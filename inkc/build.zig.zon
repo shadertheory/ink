@@ -1,0 +1,23 @@
+.{
+    .name = .inkc,
+    // This is the version of your compiler
+    .version = "0.1.0",
+    .fingerprint = 0x7791033119306fe4,
+
+    // This is where you would declare external dependencies (like from GitHub).
+    // Since ink is local and you are handling it in build.zig, 
+    // you can leave this empty for now.
+    .dependencies = .{
+        .ink = .{
+            .name = .ink,
+            .path = "../ink", // Points to the folder containing ink's build.zig
+        },
+    },
+
+    // Specifies which files are included if you were to publish this package.
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
