@@ -20,6 +20,22 @@ pub const comparison = enum(u8) {
     greater_or_equal
 };
 
+
+fn compare(cmp: comparison, lhs: anytype, rhs: @TypeOf(lhs)) bool {
+    // Determine the ordering using your original logic
+    // 1: greater, -1: less, 0: equal
+    const order: i8 = if (lhs > rhs) 1 else if (lhs < rhs) -1 else 0;
+
+    return switch (cmp) {
+        .equal            => order == 0,
+        .not_equal        => order != 0,
+        .less_than        => order == -1,
+        .less_or_equal    => order <= 0,
+        .greater_than     => order == 1,
+        .greater_or_equal => order >= 0,
+    };
+}
+
 pub const binary = enum(u8) {
     add, sub, mul, div, mod,
     min, max,
