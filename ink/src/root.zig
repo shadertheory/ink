@@ -1,4 +1,16 @@
-pub const op = @import("op.zig");
+const std = @import("std");
+pub const exe = @import("vm/exe.zig");
+pub const value = @import("vm/value.zig");
+pub const strings = @import("common/string.zig");
+pub const ast = @import("lang/ast.zig");
+pub const lexer = @import("lang/lexer.zig");
+pub const parser = @import("lang/parser.zig");
+pub const token = @import("lang/token.zig");
+const tuple = std.meta.Tuple;
+
+pub const identifier = exe.identifier;
+
+pub const literal = exe.literal; 
 
 pub const trait_identifier = struct { id: u64 };
 
@@ -52,4 +64,123 @@ pub const bitwise = enum(u8) {
     band, bor, xor, not,
     shl, shr, sar,
     rol, ror,
+};
+
+
+pub const type_reference = struct {
+    id: trait_identifier,
+    params: []const type_identifier,
+};
+
+pub const trait_reference = struct {
+    id: u64,
+};
+
+pub const struct_decl = struct {
+    name: identifier,
+    data: []const field,
+
+    pub const field = struct {
+        name: identifier,
+        what: type_reference,
+    };
+};
+
+pub const generic_parameter = struct {
+    name: identifier,
+    contraints: []const trait_reference,
+};
+
+pub const argument = struct {
+    name: identifier,
+    what: type_reference,
+    mutable: bool,
+};
+
+pub const type_kind = union(enum) {
+    name: identifier,
+    generic: identifier,
+    reference: *type_reference,
+    parameter: struct { base: identifier, params: []const type_reference },
+    unit,
+    bang,
+    self,
+    any,
+};
+
+pub const function_decl = struct {
+    name: identifier,
+    generics: []const generic_parameter,
+    params: []const argument,
+    ret: type_reference,
+    body: []const statement,
+};
+
+pub const block = struct {
+    []const statement,
+};
+
+pub const statement = union(enum) {
+    declare: struct {
+        name: identifier,
+        explicit: ?type_reference,
+        mutable: bool,
+        value: expression,
+    },
+    assignment: struct {
+        target: identifier,
+        value: expression,
+    },
+    flow_return: ?expression,
+    flow_if: struct {
+        condition: expression,
+        then_block: block,
+        else_block: ?block,
+    },
+    flow_loop: struct {
+        condition: expression,
+        do: block,
+    },
+    match: struct {
+        subject: expression,
+        cases: []const match_case,
+    },
+    standalone: expression,
+
+    pub const match_case = struct {
+        against: pattern,
+        body: block,
+
+        pub const pattern = union(enum) {
+            wildcard,           // `_` (Matches anything)
+            lit: literal,
+            variant: struct {   
+                name: []identifier,   // "Some"
+                capture: ?[]identifier,   // "val" (Variable to bind data to)
+                },
+            };
+        };
+    };
+
+
+pub const expression = union(enum) {
+    lit: literal,
+    ident: identifier,
+    binary: struct {
+        lhs: *const expression,
+        op: binary,
+        rhs: *const expression,
+    },
+    call: struct {
+        name: identifier,
+        args: []const expression
+    },
+    init: struct {
+        name: identifier,
+        assign: []const struct { name: identifier, value: expression },
+    },
+    access: struct {
+        target: *const expression,
+        field: identifier,
+    }
 };
