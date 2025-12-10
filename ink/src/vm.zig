@@ -90,17 +90,20 @@ pub const operation = union(enum) {
             lhs: address,
             rhs: address,
             op: binary,
+            ty: number,
         },
         compute_unary: struct {
             dst: address,
             src: address,
             op: unary,
+            ty: number,
         },
         compare: struct {
             dst: address, // Stores a boolean result (0 or 1)
             lhs: address,
             rhs: address,
             op: comparison,
+            ty: number,
         },
     };
     pub const memory = union(enum) {
@@ -154,29 +157,64 @@ pub const machine = struct {
         self.ip.next();
         
         switch(instruction) {
-            .unit => {},
-            .bang => return true,
-            .jump { to, condition } => switch (condition) {
-                .always => self.ip.jump(to),
-                .check_if { cmp, subject } => {
-                    const value: *bool = subject.read(bool);
-                    if (value.* == cmp) {
-                        self.ip.jump(to);
-                    } 
-                }
-                ,
-                .check_comparison { cmp, lhs, rhs, ty } => {
-                    const num = if (ty == .number) u64 else f32; 
-                    const should_jump = ink.compare(
-                        cmp,
-                        lhs.read(num),
-                        rhs.read(num)
-                    );
-                    if (should_jump) {
-                        self.ip.jump(to);
+            .state => |control_op| switch (control_op) {
+                .unit => {},
+                .bang => return true,
+                .jump { to, condition } => switch (condition) {
+                    .always => self.ip.jump(to),
+                    .check_if { cmp, subject } => {
+                        const value: *bool = subject.read(bool);
+                        if (value.* == cmp) {
+                            self.ip.jump(to);
+                        } 
                     }
-                 }
-            } 
+                    ,
+                    .check_comparison { cmp, lhs, rhs, ty } => {
+                        const num = if (ty == .number) u64 else f32; 
+                        const should_jump = ink.compare(
+                            cmp,
+                            lhs.read(num),
+                            rhs.read(num)
+                        );
+                        if (should_jump) {
+                            self.ip.jump(to);
+                        }
+                     }
+                },
+                .call { argc, argp, ret, location } => {
+                    var frame: call_frame = undefined;
+                    frame.dest = ret.read(machine.register); 
+                    frame.ret = address { .where = self.ip.where + 1 };
+
+                    try self.frames.push(frame);
+
+                    switch (location) {
+                        .direct { where } => {
+                            self.ip.jump(where);
+                        },
+                        .indirect { where } => {
+                            self.ip.jump(where.read(address).*);
+                        },
+                        else => unreachable
+                    }
+                },
+                .ret { value, size } => {
+                    const frame = try self.frames.pop();
+                    self.ip.jump(frame.ret);
+
+                    if (value) |value| {
+                        frame.dest.write_bytes(value, size);
+                    }
+                }
+            },
+            .math => |math_op| switch(math_op) {
+                .compute_binary { dst, lhs, rhs, op } => {},
+                .compute_unary { dst, src, op } => {},
+                .compare { dst, lhs, rhs, op, ty } => {}
+            },
+            .block => |memory_op| switch(memory_op) {
+                else => {}
+            }
         }
         return false;
     }
@@ -187,7 +225,7 @@ pub const machine = struct {
 };
 
 pub const call_frame = struct {
-    return_address: instruction_pointer,
-    previous_function: frame_pointer,
-    destination: machine.register,
+    ret: instruction_pointer,
+    prev: frame_pointer,
+    dest: machine.register,
 };
