@@ -1,11 +1,12 @@
 const std = @import("std");
 pub const exe = @import("vm/exe.zig");
-pub const value = @import("vm/value.zig");
 pub const strings = @import("common/string.zig");
 pub const ast = @import("lang/ast.zig");
 pub const lexer = @import("lang/lexer.zig");
 pub const parser = @import("lang/parser.zig");
 pub const token = @import("lang/token.zig");
+pub const vm = @import("vm.zig");
+const mem_allocator = std.mem.Allocator;
 const tuple = std.meta.Tuple;
 
 pub const identifier = exe.identifier;
@@ -184,3 +185,58 @@ pub const expression = union(enum) {
         field: identifier,
     }
 };
+
+pub const cpu_memory = struct {
+    block: []u64,
+    allocator: mem_allocator,
+    head: usize,
+
+    pub fn init_with_capacity(allocator: mem_allocator, initial_capacity: usize) cpu_memory {
+        return cpu_memory {
+            .allocator = allocator,
+            .block =  try allocator.alloc(u8, initial_capacity),
+        };
+    }
+
+    pub fn init(allocator: mem_allocator) cpu_memory {
+        const megabyte: usize = 1024 * 1024;
+        return cpu_memory.init_with_capacity(allocator, megabyte);
+    }
+
+    pub fn allocate(self: *cpu_memory, comptime ty: type, values: []ty) !address {
+        var bytes: []u8 = @ptrCast(self.block);
+        const offset = self.head;
+        bytes += offset;
+        const data: []ty = @ptrCast(bytes);
+        for (0..values.count) |i| {
+            (data + i).* = values[i];
+        }
+        return address { .memory = self, .where = offset };        
+    }
+};
+
+pub fn address(comptime memory_type: type) type { return struct { 
+    where: usize,
+    var memory: ?memory_type = undefined; 
+
+    pub fn add(self: *address, comptime ty: type, count: usize) address {
+        return address {
+            .where = self.where + @sizeOf(ty) * count
+        };
+    }
+
+    pub fn read(self: *address, comptime ty: type) *ty {
+        return @as(*ty, @ptrCast(self.block.read(self.where)));
+    }
+
+    pub fn write(self: *address, comptime ty: type, val: ty) void {
+        self.read(ty).* = val;
+    }
+}; 
+}
+
+pub const any_memory = struct {};
+
+pub const any_address = address(any_memory);
+
+pub const cpu_address = address(cpu_memory);
