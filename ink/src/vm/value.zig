@@ -8,8 +8,8 @@ pub const fields = std.meta.fields;
 pub fn handle(comptime h: type, comptime t: type) type {
     return struct { header: type = h, layout: type = t };
 }
-pub fn view(comptime header_type: type, comptime layout_type: type) type {
 
+pub fn view(comptime header_type: type, comptime layout_type: type) type {
     const has_payload = @hasField(layout_type, "payload");
     const payload_child_type = if(has_payload) blk: {
         const field_info = fields(layout_type)[@intFromEnum(field_enum(layout_type).payload)];

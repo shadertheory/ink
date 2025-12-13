@@ -1,110 +1,56 @@
 pub const mem_allocator = @import("std").mem.Allocator;
 pub const instruction = @import("root").vm.instruction;
+pub const accessors = @import("root").vm.accessors;
+pub const array_list = @import("std").array_list.Managed;
+pub const assembler = @import("root").vm.assembler;
 
-u
-pub fn handle(comptime ty: type) type {
-    return struct { target: type = ty };
-}
+pub const machine = 
+     struct {
+        const self = @This();
 
-pub const machine = struct { 
-    pub const header = struct {
+        pub const fundamental = accessors(self);
+
         constant_count: u64,
         trap_count: u64,
-        instruction_count: u64,
-    };
-    pub const control_flow = enum { .cont, .halt };
-    pub const tape = struct {
-        pub const word = packed union {
-            raw: u64,
+        code_count: u64,
 
-            half: packed struct {
-                alpha: single,
-                bravo: single,
-            },
+        memory: tape,
 
-            full: double,
-        };
+        instruction: tape.index, 
+        frame: tape.index,
+        stack: tape.index,
+        trap: tape.index,
 
-        data: []word,
-    
-        pub fn init(allocator: mem_allocator, byte_count: usize) tape {
-            return tape {
-                .data = allocator.alloc(u8, byte_count / @bitSizeOf(word)),
+        pub fn init(allocator: mem_allocator, bytecode: anytype, program: []const u8, constants: []value) machine {
+            const memory = tape.init(1024 * 1024);
+            
+            const instruction = memory.allocate(u8, bytecode.len);
+
+            const stack_size = 8192;
+            const stack = memory.allocate(u64, stack_size);
+
+            const trap = unreachable;//TODO; 
+
+            return machine {
+                .memory = memory,
+                .instruction = instruction,
+                .frame = frame,
+                .stack = stack,
+                .trap = trap,
             };
         }
 
-        pub const index = struct { where: u64 };
-    };
-    pub const single = packed struct { 
-        operation: u8, 
-        alpha: register,
-        bravo: register,
-        info: packed union { 
-            sub_operation: u8,
-            immediete: u8,
-            charlie: register,
-        },
-    };
-    pub const double = packed struct {
-        operation: u8,
-        alpha: register,
-        immediete: u48, 
-    };
-    memory: tape,
-    def: header,
+        pub const tape = struct {
+            pub const word = u64;
+            data: []word,
+        
+            pub fn init(allocator: mem_allocator, byte_count: usize) tape {
+                return tape {
+                    .data = allocator.alloc(u8, byte_count / @bitSizeOf(word)),
+                };
+            }
 
-    instruction: tape.index, 
-    frame: tape.index,
-    stack: tape.index,
-    trap: tape.index,
-    pub fn init(allocator: mem_allocator, program_instructions: []instruction, constants: []value) machine {
-        const memory = tape.init(1024 * 1024);
-
-        const instruction_code = pack_code(program_instructions);
-        const program_index = tape.allocate(code, program.len);
-        const instruction = program_index.view(program).function("main");
-        const frame = instruction;
-
-        const stack_size = 8192;
-        const stack = tape.allocate(u64, stack_size);
-
-        const trap = linked_list(trap_condition).setup(&tape);
-
-        const frames = call_stack.init(allocator); 
-
-        return machine {
-            .frames = frames,
-            .memory = memory,
-            .instruction = instruction,
-            .frame = frame,
-            .stack = stack,
-            .trap = trap,
+            pub const index = struct { where: u64 };
         };
-    }
-
-    pub fn step(self: *machine) control_flow {
-        self.instruct() catch |trap_condition| {
-            self.trap.add(@intFromEnum(trap_condition)).write(value, .{.boolean = true});
-            return .halt;
-        };
-    } 
-
-    fn pack_code(run: []instruction) []code {
-
-    }
-
-    fn instruct(self: *machine) !control_flow {
-        const code = self.tape.read(code, self.instruction);
-        self.instruction.advance();
-
-         
-
-        return .cont;
-    }
-
-
-    pub const register = struct {
-        which: u8,
     };
-};
 

@@ -1,0 +1,224 @@
+pub const std = @import("std");
+pub const root = @import("root");
+pub const mem = std.mem;
+pub const mem_sort = mem.sort;
+pub const instruction = @import("root").vm.instruction;
+pub const array_list = std.array_list.Managed;
+pub const mem_allocator = std.mem.Allocator;
+pub const int_fitting_range = std.math.IntFittingRange;
+pub const struct_field = std.builtin.Type.StructField;
+pub const tuple = std.meta.Tuple;
+pub const op = root.vm.op; 
+
+fn struct_field_bit_size_less_than(context: void, lhs: struct_field, rhs: struct_field) bool {
+    _ = context;
+        return @bitSizeOf(lhs.type) < @bitSizeOf(rhs.type);
+}
+
+pub fn accessors(comptime vm_type: type) type {
+    return struct {
+        pub const dst = struct {
+            vm: *vm_type,
+            index: usize,
+            pub fn set(self: dst, value: u64) void { self.vm.registers[self.index] = value; }
+            pub fn get(self: dst) u64 { return self.vm.registers[self.index]; }
+        };
+
+        pub const src = struct {
+            vm: *vm_type,
+            index: usize,
+            pub fn get(self: src) u64 { return self.vm.registers[self.index]; }
+        };
+
+        pub const val = struct {
+            raw: u64,
+            pub fn get(self: val) u64 { return self.raw; }
+        };
+
+        pub const jmp_abs = struct {
+            vm: *vm_type,
+            target: usize,
+
+            pub fn to(self: jmp_abs) void {
+                self.vm.pc = self.target;
+            }
+        };
+
+        pub const jmp_rel = struct {
+            vm: *vm_type,
+            offset: isize,
+
+            pub fn skip(self: jmp_rel) void {
+                if (self.offset < 0) {
+                    const abs_off: usize = @intCast(-self.offset);
+                    self.vm.pc -= abs_off;
+                } else {
+                    const abs_off: usize = @intCast(self.offset);
+                    self.vm.pc += abs_off;
+                }
+            }
+        };
+
+        pub const jmp_ind = struct {
+            vm: *vm_type,
+            reg_index: usize,
+
+            pub fn to(self: jmp_ind) void {
+                const target = self.vm.registers[self.reg_index];
+                self.vm.pc = @intCast(target);
+            }
+        };
+    };
+}
+
+pub const bytecode = assembly(.{ op.control }, .{ tiny }, .{ .control = control_operators });
+
+pub fn assembly(comptime operation_sets: anytype, comptime formats: anytype, comptime logic_map: anytype) type {
+    const operation_map = struct {
+        const count = blk: {
+            var sum = 0;
+            for (operation_sets) |set| sum += @typeInfo(set).@"enum".fields.len;
+            break :blk sum;
+        };
+
+        const tag_type = int_fitting_range(0, count - 1);
+
+        fn get(op: anytype) tag_type {
+            const op_type = @TypeOf(op);
+            var base: usize = 0;
+            for (operation_sets) |set| {
+                if (set == op_type) return @intCast(base + @intFromEnum(op));
+                base += @typeInfo(set).@"enum".fields.len;
+            }
+            @compileError("Unknown instruction passed to assembler");
+        }
+    };
+
+    const sorted_formats = mem_sort(struct_field, @typeInfo(formats).@"struct".fields, void, @This().struct_field_bit_size_less_than);
+
+    return struct {
+        const executor = struct {
+            const self = @This();
+
+            registers: [256]u64,
+            pc: usize,
+
+            pub fn init(registers: [256]u64, pc_start: usize) self {
+                return . { .registers = registers, .pc = pc_start };
+            }
+
+            pub fn run(this: *self, code: []const u8, budget: usize) void {
+                const raw = code[this.pc];
+                const format_index = raw >> 6;
+                const operation = raw & 0x3F;
+                const health = budget;
+
+                while(--health > 0) {
+                    const format = sorted_formats[format_index];
+                    const size = @sizeOf(format);
+                    const inst = mem.bytesToValue(format, code[self.pc..][0..size]);
+                    self.dispatch(operation, inst);
+                    self.pc += size;
+                }
+            }
+
+            pub fn dispatch(this: *self, operation: u8, inst: anytype) void {
+                switch (operation) {
+                     for (std.meta.fields(@TypeOf(logic_map))) |field| {
+                        const function_decl = @field(logic_map, field.name);
+                        const function_info = @typeInfo(@TypeOf(function_decl)).@"fn";
+                        const function_params = function_info.params;
+                        return .{.decl = function_decl, .params = function_params};
+                    } => |function_data| {
+                        var function_arguments: tuple(&.{*anyopaque} ++ param_types(function_data.params)) = undefined;
+
+                        function_arguments[0] = self;
+
+                        inline for (function_data.params[1..], 1..) |param, i| {
+                            const ty = param.type.?;
+
+                            if(@hasDecl(ty, "from_instruction")) {
+                                function_arguments[i] = ty.from_instruction(this, inst);
+                            }
+                        }
+
+                        @call(.auto, function_data.decl, function_arguments);
+                    },
+                    else => {
+                        unreachable;
+                    }
+                }
+            }
+
+            fn param_types(comptime params: []const std.builtin.Type.Fn.Param) [params.len - 1]type {
+                if (params.len == 0) @compileError("Implementation function must take at least 1 argument (the VM)");
+                
+                var types: [params.len - 1]type = undefined;
+                
+                for (params[1..], 0..) |param, i| {
+                    types[i] = param.type.?;
+                }
+                
+                return types;
+            }
+        };
+        const assembler = struct {
+            const self = @This();
+            buffer: array_list(assembly),
+            
+            pub fn init(allocator: mem_allocator) self {
+                return .{ .buffer = std.array_list(assembly).init(allocator) };
+            }
+
+            pub fn deinit(this: *self) void {
+                this.buffer.deinit();
+            }
+
+            pub fn emit(this: *self, op: anytype, args: anytype) !void {
+                const op_size = operation_map.get(op);
+
+                inline for (sorted_formats, 0..) |format, format_index| {
+                    if (is_compatible(format, args)) {
+                        const header = (@as(u8, @intCast(format_index)) << 6) | (op_size & 0x3F);
+                        var inst: format = std.mem.zeroes(format);
+                        inst.opcode = header;
+
+                        inline for (std.meta.fields(format)) |ff| {
+                            if (!mem.eql(u8, ff.name, "opcode")) {
+                                if (@hasField(@TypeOf(args), ff.name)) {
+                                    @field(inst, ff.name) = @intCast(@field(args, ff.name));
+                                }
+                            }
+                        }
+
+                        try this.buffer.appendSlice(mem.asBytes(&inst));
+                        return;
+                    }
+                }
+
+                return error.instruction_too_large;
+            }
+            
+            fn is_compatible(comptime format: type, args: anytype) bool {
+                inline for (std.meta.fields(@TypeOf(args))) |af| {
+                    if (!@hasField(format, af.name)) return false;
+                }
+                inline for (std.meta.fields(format)) |ff| {
+                    if (mem.eql(u8, ff.name, "opcode")) continue;
+                    if (@hasField(@TypeOf(args), ff.name)) {
+                        const val = @field(args, ff.name);
+                        const bits = @typeInfo(ff.type).Int.bits;
+                        if (val > (1 << bits) - 1) return false;
+                    }
+                }
+                return true;
+            } 
+
+            fn finish(this: *self) []assembly {
+                const ret = this.output.toOwnedSlice();
+                this.deinit();
+                return ret;
+            }
+        };
+    };
+}
