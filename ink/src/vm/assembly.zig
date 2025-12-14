@@ -52,66 +52,113 @@ fn struct_field_bit_size_less_than(context: type, lhs: type, rhs: type) bool {
         return @bitSizeOf(lhs) < @bitSizeOf(rhs);
 }
 
+fn create_accessor_type(comptime config: anytype) type {
+    return comptime blk: {
+        // 1. Use an ArrayList to build the list of fields.
+        //    This is the most robust way to build a collection at comptime.
+        const fields_list_total = @intFromBool(config.include_vm_field)
+            + @typeInfo(@TypeOf(config.fields)).@"struct".fields.len;
+        var fields_list = [_]std.builtin.Type.StructField{undefined} ** fields_list_total;
+        var fields_list_count = 0;
+
+        // 2. Conditionally add the `vm` field to the list.
+        if (config.include_vm_field) {
+            // .append can fail (OOM), so we must catch. At comptime, we error out.
+            fields_list[fields_list_count] = .{
+                .name = "vm",
+                .type = *config.vm_type,
+                .default_value_ptr = null,
+                .is_comptime = false,
+                .alignment = @alignOf(*config.vm_type),
+            };
+            fields_list_count += 1;
+        }
+
+        // 3. Add all custom data fields to the list.
+        const custom_fields_info = @typeInfo(@TypeOf(config.fields));
+         for (custom_fields_info.@"struct".fields) |field_info| {
+            const field_type = @field(config.fields, field_info.name);
+           fields_list[fields_list_count] = .{ 
+                .name = field_info.name,
+                .type = field_type,
+                .default_value_ptr = null,
+                .is_comptime = false,
+                .alignment = @alignOf(field_type),
+            };
+        }
+
+         // 5. Create the final struct type using the .items slice from the ArrayLists.
+        const final_struct = @Type(.{
+            .@"struct" = .{
+                .layout = .@"auto",
+                .fields = &fields_list,
+                .decls = &[0]std.builtin.Type.Declaration{},
+                .is_tuple = false,
+            },
+        });
+
+        break :blk final_struct;
+    };
+}
+
 pub fn accessors(comptime vm_type: type) type {
     return struct {
-        pub const dst = struct {
-            vm: *vm_type,
-            index: usize,
-            pub fn set(self: dst, value: u64) void { self.vm.registers[self.index] = value; }
-            pub fn get(self: dst) u64 { return self.vm.registers[self.index]; }
-        };
+        // --- Method Implementations ---
+        // We define the logic once and reuse it where possible.
+        // `self: anytype` allows these functions to be used in different generated structs.
 
-        pub const src = struct {
-            vm: *vm_type,
-            index: usize,
-            pub fn get(self: src) u64 { return self.vm.registers[self.index]; }
-        };
+        pub const destination_register = create_accessor_type(.{
+            .vm_type = vm_type,
+            .include_vm_field = true,
+            .fields = .{ .index = usize },
+        });
 
-        pub const val = struct {
-            raw: u64,
-            pub fn get(self: val) u64 { return self.raw; }
-        };
+        /// Accesses a register for reading only.
+        pub const source_register = create_accessor_type(.{
+            .vm_type = vm_type,
+            .include_vm_field = true,
+            .fields = .{ .index = usize },
+        });
 
-        pub const jmp_abs = struct {
-            vm: *vm_type,
-            target: usize,
+        /// Wraps a raw u64 value.
+        pub const immediate_value = create_accessor_type(.{
+            .vm_type = vm_type,
+            .include_vm_field = false, // Does not need the vm
+            .fields = .{ .raw_value = u64 },
+        });
 
-            pub fn to(self: jmp_abs) void {
-                self.vm.pc = self.target;
-            }
-        };
+        /// Jumps to an absolute program counter address.
+        pub const absolute_jump = create_accessor_type(.{
+            .vm_type = vm_type,
+            .include_vm_field = true,
+            .fields = .{ .target_address = usize },
+        });
 
-        pub const jmp_rel = struct {
-            vm: *vm_type,
-            offset: isize,
+        /// Jumps forward or backward by a relative offset.
+        pub const relative_jump = create_accessor_type(.{
+            .vm_type = vm_type,
+            .include_vm_field = true,
+            .fields = .{ .offset = isize },
+        });
 
-            pub fn skip(self: jmp_rel) void {
-                if (self.offset < 0) {
-                    const abs_off: usize = @intCast(-self.offset);
-                    self.vm.pc -= abs_off;
-                } else {
-                    const abs_off: usize = @intCast(self.offset);
-                    self.vm.pc += abs_off;
-                }
-            }
-        };
-
-        pub const jmp_ind = struct {
-            vm: *vm_type,
-            reg_index: usize,
-
-            pub fn to(self: jmp_ind) void {
-                const target = self.vm.registers[self.reg_index];
-                self.vm.pc = @intCast(target);
-            }
-        };
+        /// Jumps to an address stored in a register.
+        pub const indirect_jump = create_accessor_type(.{
+            .vm_type = vm_type,
+            .include_vm_field = true,
+            .fields = .{ .register_index = usize },
+        });
     };
 }
 
 pub fn control_operators(comptime vm: type) type {
     return struct {
-        fn no_operation(machine: *vm) void { _ = machine; return; } 
-        fn halt(machine: *vm) void { _ = machine; return; } 
+        fn no_operation(machine: *vm) void { _ = machine; std.debug.print("\nno op\n", .{}); return; } 
+        fn halt(machine: *vm) void { _ = machine; std.debug.print("\nhalt\n", .{}); return; } 
+        fn jump_always(machine: *vm, jump: usize) void {
+            machine.pc = jump;
+            std.debug.print("\njump to {d}\n", .{jump});
+            return;
+        }
     };
 }
 
@@ -165,19 +212,24 @@ pub fn assembly(comptime operation_sets: anytype, comptime formats: anytype, com
                 return . { .registers = registers, .pc = pc_start };
             }
 
-            pub fn run(this: *self, code: []const u8, budget: usize) void {
-                const raw = code[this.pc];
-                const format_index = raw >> 6;
-                const operation = raw & 0x3F;
+            pub fn step(this: *self, code: []const u8, budget: usize) void {
+                const format_bits = std.math.log2_int_ceil(usize, sorted_formats.len);
+                const format_mask = (@as(usize, 1) << @intCast(format_bits)) - 1;
                 var health = budget;
 
                 while(health > 0) {
+                    const raw = code[this.pc];
+                    const format_index = raw & format_mask;
+                    const operation = raw >> @intCast(format_bits);
                     inline for (sorted_formats, 0..) |format, idx| {
                         if (idx == format_index) {
                             const size = @sizeOf(format);
                             const inst = mem.bytesToValue(format, code[this.pc..][0..size]);
+                            const pc_start = this.pc;
                             this.dispatch(operation, inst);
-                            this.pc += size;
+                            if (this.pc == pc_start) {
+                                this.pc += size;
+                            }
                             health -= 1;
                             break;
                         }
@@ -213,13 +265,10 @@ pub fn assembly(comptime operation_sets: anytype, comptime formats: anytype, com
                                 var function_arguments: std.meta.ArgsTuple(@TypeOf(implementation_function)) = undefined;
                                 function_arguments[0] = this;
 
-                                inline for (function_params[1..], 1..) |param, index| {
-                                    const param_type = param.type.?;
-                                    if (@hasDecl(param_type, "from_instruction")) {
-                                        function_arguments[index] = param_type.from_instruction(this, instruction_payload);
-                                    } else {
-                                        @compileError("parameter type " ++ @typeName(param_type) ++ " in " ++ function_name ++ " missing from_instruction method");
-                                    }
+
+                                const instruction_payload_type_info = @typeInfo(@TypeOf(instruction_payload));
+                                inline for (function_params[1..], 1..) |_, index| {
+                                        function_arguments[index] = @field(instruction_payload, instruction_payload_type_info.@"struct".fields[index].name);
                                 }
 
                                 @call(.auto, implementation_function, function_arguments);
@@ -264,7 +313,7 @@ pub fn assembly(comptime operation_sets: anytype, comptime formats: anytype, com
                     if (is_compatible(format, args)) {
                         const opcode_type = @typeInfo(format).@"struct".fields[0].type;
                         const op_size: opcode_type = @intCast(operation_map.get(operation));
-                        const format_bits: opcode_type = @intCast(std.math.log2_int_ceil(opcode_type, ((1 << sorted_formats.len) - 1)));
+                        const format_bits: opcode_type = @intCast(std.math.log2_int_ceil(opcode_type, sorted_formats.len));
                         const header = (@as(opcode_type, @intCast(format_index))) | (op_size) << @intCast(format_bits);
                         var inst: format = std.mem.zeroes(format);
                         inst.opcode = @intCast(header);
@@ -323,10 +372,11 @@ test "bytecode basic" {
 
 test "bytecode execute" {
     var assembler = bytecode.assembler.init(std.testing.allocator);
-    try assembler.emit(op.control.no_operation, .{ .jmp_abs =  700000 });
+    try assembler.emit(op.control.no_operation, .{});
+    try assembler.emit(op.control.jump_always, .{ .jmp_abs =  0 });
     try assembler.emit(op.control.halt, .{});
     const bytes = assembler.finish();
     const reg = [_]u64{0} ** 256;
     var exe = bytecode.executor.init(reg, 0);
-    exe.run(bytes, 2);
+    exe.step(bytes, 20);
 }

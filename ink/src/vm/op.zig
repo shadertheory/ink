@@ -5,24 +5,7 @@ pub const control = enum(u8) {
     
     //control
     jump_always,
-    jump_if_true,
-    jump_if_false,
-
-    conditional_move,
-    conditional_move_value,
-
-    argument_set,
-
-    call,
-    call_register,
-    call_foreign,
-    call_tail,
-
-    ret,
-    ret_value,
-
-    method_virtual_get,
-};
+    };
 
 
     //TODO async
