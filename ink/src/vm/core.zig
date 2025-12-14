@@ -1,8 +1,8 @@
 pub const mem_allocator = @import("std").mem.Allocator;
-pub const instruction = @import("root").vm.instruction;
-pub const accessors = @import("root").vm.accessors;
+pub const instruction = @import("./exe.zig").instruction;
+pub const accessors = @import("./assembly.zig").accessors;
 pub const array_list = @import("std").array_list.Managed;
-pub const assembler = @import("root").vm.assembler;
+pub const assembler = @import("./assembly.zig").bytecode.assembler;
 
 pub const machine = 
      struct {
@@ -21,19 +21,24 @@ pub const machine =
         stack: tape.index,
         trap: tape.index,
 
-        pub fn init(allocator: mem_allocator, bytecode: anytype, program: []const u8, constants: []value) machine {
+        pub fn init(allocator: mem_allocator, bytecode: anytype, program: []const u8, constants: []u8) machine {
+            _ = program;
+            _ = allocator;
+            _ = constants;
             const memory = tape.init(1024 * 1024);
             
-            const instruction = memory.allocate(u8, bytecode.len);
+            const inst = memory.allocate(u8, bytecode.len);
 
             const stack_size = 8192;
             const stack = memory.allocate(u64, stack_size);
 
-            const trap = unreachable;//TODO; 
+            const trap = memory.allocate(u64, 1);
+
+            const frame = memory.allocate(u64, 1);
 
             return machine {
                 .memory = memory,
-                .instruction = instruction,
+                .instruction = inst,
                 .frame = frame,
                 .stack = stack,
                 .trap = trap,
