@@ -28,7 +28,7 @@ pub fn build(b: *std.Build) void {
     // to our consumers. We must give it a name because a Zig package can expose
     // multiple modules and consumers will need to be able to specify which
     // module they want to access.
-     _ = b.addModule("ink", .{
+    const root = b.addModule("ink", .{
         // The root source file is the "entry point" of this module. Users of
         // this module will only be able to access public declarations contained
         // in this file, which means that if you have declarations that you
@@ -41,6 +41,7 @@ pub fn build(b: *std.Build) void {
         .optimize =  optimize,
         .target = target,
     });
+    root.addImport("ink", root);
 
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function

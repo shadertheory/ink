@@ -29,6 +29,8 @@ pub fn build(b: *std.Build) void {
     // multiple modules and consumers will need to be able to specify which
     // module they want to access.
 
+    const ink_dep = b.dependency("ink", .{}).module("ink");
+    // Allow ink's internal @import("root") to resolve to the ink module.
     const root = b.addModule("inkc", .{
         // The root source file is the "entry point" of this module. Users of
         // this module will only be able to access public declarations contained
@@ -36,12 +38,12 @@ pub fn build(b: *std.Build) void {
         // intend to expose to consumers that were defined in other files part
         // of this module, you will have to make sure to re-export them from
         // the root file.
-        .root_source_file = b.path("src/root.zig"),
+        .root_source_file = b.path("../ink/src/root.zig"),
         // Later on we'll use this module as the root module of a test executable
         // which requires us to specify a target.
         .target = target,
     });
-    root.addImport("ink", b.dependency("ink", .{}).module("ink"));
+    root.addImport("ink", ink_dep);
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
     // to the module defined above, it's sometimes preferable to split business
@@ -79,6 +81,7 @@ pub fn build(b: *std.Build) void {
                 // repeated because you are allowed to rename your imports, which
                 // can be extremely useful in case of collisions (which can happen
                 // importing modules from different packages).
+                .{ .name = "ink", .module = ink_dep },
             },
         }),
     });

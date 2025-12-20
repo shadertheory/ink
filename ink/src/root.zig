@@ -2,16 +2,25 @@ const std = @import("std");
 pub const exe = @import("vm/exe.zig");
 pub const strings = @import("common/string.zig");
 pub const ast = @import("lang/ast.zig");
-pub const lexer = @import("lang/lexer.zig");
-pub const parser = @import("lang/parser.zig");
-pub const token = @import("lang/token.zig");
+pub const node = @import("lang/ast.zig").node;
+pub const lexer = @import("lang/lexer.zig").lexer;
+pub const parser = @import("lang/parser.zig").parser;
+pub const parser_error = @import("lang/parser.zig").parser_error;
+pub const token = @import("lang/token.zig").token;
+pub const precedence = @import("lang/token.zig").precedence;
 pub const vm = @import("vm.zig");
+
 const mem_allocator = std.mem.Allocator;
 const tuple = std.meta.Tuple;
 
-pub const identifier = exe.identifier;
+pub const literal = exe.literal;
 
-pub const literal = exe.literal; 
+pub const identifier_owner = enum { ref, def };
+
+pub const identifier = struct {
+    string: []const u8,
+    owner: identifier_owner,
+};
 
 pub const trait_identifier = struct { id: u64 };
 
@@ -19,20 +28,14 @@ pub const type_identifier = struct { id: u64 };
 
 pub const function_identifier = struct { id: u64 };
 
-pub const number = union(enum) {
-    integer,
-    float
+pub const location = struct {
+    start: usize,
+    end: usize,
 };
 
-pub const comparison = enum(u8) {
-    equal,
-    not_equal,
-    less_than,
-    less_or_equal,
-    greater_than,
-    greater_or_equal
-};
+pub const number = union(enum) { integer, float };
 
+pub const comparison = enum(u8) { equal, not_equal, less_than, less_or_equal, greater_than, greater_or_equal };
 
 fn compare(cmp: comparison, lhs: anytype, rhs: @TypeOf(lhs)) bool {
     // Determine the ordering using your original logic
@@ -40,33 +43,61 @@ fn compare(cmp: comparison, lhs: anytype, rhs: @TypeOf(lhs)) bool {
     const order: i8 = if (lhs > rhs) 1 else if (lhs < rhs) -1 else 0;
 
     return switch (cmp) {
-        .equal            => order == 0,
-        .not_equal        => order != 0,
-        .less_than        => order == -1,
-        .less_or_equal    => order <= 0,
-        .greater_than     => order == 1,
+        .equal => order == 0,
+        .not_equal => order != 0,
+        .less_than => order == -1,
+        .less_or_equal => order <= 0,
+        .greater_than => order == 1,
         .greater_or_equal => order >= 0,
     };
 }
 
 pub const binary = enum(u8) {
-    add, sub, mul, div, mod,
-    min, max,
+    add,
+    sub,
+    mul,
+    div,
+    mod,
+    min,
+    max,
+    equal,
+    not_equal,
+    less_than,
+    less_or_equal,
+    greater_than,
+    greater_or_equal,
+    call,
 };
 
 pub const unary = enum(u8) {
-    neg, abs, sqrt,
-    sin, cos, tan,
-    asin, acos, atan,
-    floor, ceil, round, trunc,
+    neg,
+    not,
+    abs,
+    sqrt,
+    sin,
+    cos,
+    tan,
+    asin,
+    acos,
+    atan,
+    floor,
+    ceil,
+    round,
+    trunc,
+    ret,
 };
 
 pub const bitwise = enum(u8) {
-    band, bor, xor, not,
-    shl, shr, sar,
-    rol, ror,
+    band,
+    bor,
+    xor,
+    not,
+    shl,
+    shr,
+    sar,
+    rol,
+    ror,
 };
-
 
 pub const type_reference = struct {
     id: trait_identifier,
@@ -153,38 +184,27 @@ pub const statement = union(enum) {
         body: block,
 
         pub const pattern = union(enum) {
-            wildcard,           // `_` (Matches anything)
+            wildcard, // `_` (Matches anything)
             lit: literal,
-            variant: struct {   
-                name: []identifier,   // "Some"
-                capture: ?[]identifier,   // "val" (Variable to bind data to)
-                },
-            };
+            variant: struct {
+                name: []identifier, // "Some"
+                capture: ?[]identifier, // "val" (Variable to bind data to)
+            },
         };
     };
-
-
-pub const expression = union(enum) {
-    lit: literal,
-    ident: identifier,
-    binary: struct {
-        lhs: *const expression,
-        op: binary,
-        rhs: *const expression,
-    },
-    call: struct {
-        name: identifier,
-        args: []const expression
-    },
-    init: struct {
-        name: identifier,
-        assign: []const struct { name: identifier, value: expression },
-    },
-    access: struct {
-        target: *const expression,
-        field: identifier,
-    }
 };
+
+pub const expression = union(enum) { lit: literal, ident: identifier, binary: struct {
+    lhs: *const expression,
+    op: binary,
+    rhs: *const expression,
+}, call: struct { name: identifier, args: []const expression }, init: struct {
+    name: identifier,
+    assign: []const struct { name: identifier, value: expression },
+}, access: struct {
+    target: *const expression,
+    field: identifier,
+} };
 
 pub const cpu_memory = struct {
     block: []u64,
@@ -192,9 +212,9 @@ pub const cpu_memory = struct {
     head: usize,
 
     pub fn init_with_capacity(allocator: mem_allocator, initial_capacity: usize) cpu_memory {
-        return cpu_memory {
+        return cpu_memory{
             .allocator = allocator,
-            .block =  try allocator.alloc(u8, initial_capacity),
+            .block = try allocator.alloc(u8, initial_capacity),
         };
     }
 
@@ -211,28 +231,27 @@ pub const cpu_memory = struct {
         for (0..values.count) |i| {
             (data + i).* = values[i];
         }
-        return address { .memory = self, .where = offset };        
+        return address{ .memory = self, .where = offset };
     }
 };
 
-pub fn address(comptime memory_type: type) type { return struct { 
-    where: usize,
-    var memory: ?memory_type = undefined; 
+pub fn address(comptime memory_type: type) type {
+    return struct {
+        where: usize,
+        var memory: ?memory_type = undefined;
 
-    pub fn add(self: *address, comptime ty: type, count: usize) address {
-        return address {
-            .where = self.where + @sizeOf(ty) * count
-        };
-    }
+        pub fn add(self: *address, comptime ty: type, count: usize) address {
+            return address{ .where = self.where + @sizeOf(ty) * count };
+        }
 
-    pub fn read(self: *address, comptime ty: type) *ty {
-        return @as(*ty, @ptrCast(self.block.read(self.where)));
-    }
+        pub fn read(self: *address, comptime ty: type) *ty {
+            return @as(*ty, @ptrCast(self.block.read(self.where)));
+        }
 
-    pub fn write(self: *address, comptime ty: type, val: ty) void {
-        self.read(ty).* = val;
-    }
-}; 
+        pub fn write(self: *address, comptime ty: type, val: ty) void {
+            self.read(ty).* = val;
+        }
+    };
 }
 
 pub const any_memory = struct {};

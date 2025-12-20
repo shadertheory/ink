@@ -1,4 +1,4 @@
-pub const root = @import("root");
+pub const root = @import("ink");
 pub const object = root.object;
 pub const word = root.vm.machine.word;
 const std = @import("std");

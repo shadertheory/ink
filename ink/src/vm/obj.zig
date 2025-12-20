@@ -1,4 +1,6 @@
-pub const vm = @import("root").vm;
+pub const vm = @import("ink").vm;
+pub const tape = vm.vm.tape;
+
 pub const object = struct {
     pub const header = packed struct {
         ty: identifier,
@@ -17,18 +19,18 @@ pub const object = struct {
 
     pub const generation = struct { gen: u64 };
 
-    pub const identifier = struct { 
+    pub const identifier = struct {
         id: u64,
         var next: u64 = @typeInfo(special).@"enum".fields.len;
 
         pub fn reserve_special(which: special) identifier {
-            return identifier { .id = @intFromEnum(which) };
+            return identifier{ .id = @intFromEnum(which) };
         }
 
         pub fn reserve_next() identifier {
             const id = identifier.next;
             identifier.next += 1;
-            return identifier { .id = id };
+            return identifier{ .id = id };
         }
 
         pub const special = enum {
@@ -44,6 +46,6 @@ pub const object = struct {
 };
 
 pub const reference = packed struct {
-    where: tape_index,
+    where: tape.index,
     when: object.generation,
 };
