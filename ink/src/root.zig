@@ -67,6 +67,8 @@ pub const binary = enum(u8) {
     greater_than,
     greater_or_equal,
     call,
+    access,
+    coalesce,
 };
 
 pub const unary = enum(u8) {

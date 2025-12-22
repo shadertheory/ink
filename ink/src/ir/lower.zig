@@ -1,13 +1,13 @@
 pub const std = @import("std");
 pub const node = @import("../lang/ast.zig").node;
 pub const ir = @import("./core.zig").ir;
+pub const ir_identifier = @import("./core.zig").ir_identifier;
+pub const string_identifier = @import("./core.zig").string_identifier;
 pub const hash_map = std.hash_map.AutoHashMap;
 pub const array_list = std.array_list.Managed;
 pub const span = struct { start: usize, end: usize };
 
 pub const ast_identifier = struct { idx: u32 };
-pub const ir_identifier = struct { idx: u32 };
-pub const string_identifier = struct { idx: u32 };
 
 pub const lower_error = error{
     out_of_memory,
