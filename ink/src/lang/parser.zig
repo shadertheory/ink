@@ -697,7 +697,14 @@ pub const parser = struct {
     }
 
     pub fn parse(source: []const u8, tokens: []const token, block: mem_allocator) parser_error!parser {
-        return parser{ .source = source, .tokens = tokens, .block = block, .current = 0 };
+        return parser{
+            .source = source,
+            .tokens = tokens,
+            .block = block,
+            .current = 0,
+            .last_error = null,
+            .furthest_error_pos = 0,
+        };
     }
 
     pub fn process(self: *parser) parser_error!*node {
@@ -722,8 +729,9 @@ pub const parser = struct {
 
     fn parse_prefix(self: *parser) parser_error!*node {
         self.skip_layout();
-        std.debug.print("\n{any} = {s}\n", .{ self.current_token().which, self.current_token().what.string });
-        if (!is_prefix_kind(self.current_token().which)) return parser_error.unexpected_token;
+        if (!is_prefix_kind(self.current_token().which)) {
+            return self.record_error(parser_error.unexpected_token, null);
+        }
         return try engine.dispatch(self, self.current_token());
     }
 
@@ -747,7 +755,9 @@ pub const parser = struct {
 
             const right = try self.parse_expr(.none);
 
-            if (self.current_token().which != .paren_right) return parser_error.unclosed_group;
+            if (self.current_token().which != .paren_right) {
+                return self.record_error(parser_error.unclosed_group, .paren_right);
+            }
             self.advance(); // Consume closing ')'
 
             const bin = try token_kind_to_binary(op);
@@ -781,6 +791,23 @@ pub const parser = struct {
                 else => return,
             }
         }
+    }
+
+    fn record_error(self: *parser, kind: parser_error, expected: ?token.kind) parser_error {
+        return self.record_error_at(kind, expected, self.current_token());
+    }
+
+    fn record_error_at(self: *parser, kind: parser_error, expected: ?token.kind, found: token) parser_error {
+        const pos = found.where.start;
+        if (pos >= self.furthest_error_pos) {
+            self.furthest_error_pos = pos;
+            self.last_error = .{
+                .kind = kind,
+                .expected = expected,
+                .found = found,
+            };
+        }
+        return kind;
     }
 
     // Use parser_error for all fallible return types

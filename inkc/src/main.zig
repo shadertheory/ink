@@ -384,7 +384,7 @@ pub fn printer(writer_type: type) type {
                         try self.print_identifier_list("cases", "case", enum_decl.cases, depth + 1);
                         try self.print_line(depth, ")", .{});
                     },
-                    .@"impl" => |impl_decl| {
+                    .impl => |impl_decl| {
                         try self.print_indent(depth);
                         try self.writer.print("(impl_decl\n", .{});
                         try self.print_identifier_field("by_trait", impl_decl.by_trait, depth + 1);
@@ -427,6 +427,12 @@ pub fn printer(writer_type: type) type {
                     try self.print_match_arm_list("arms", me.arms, depth + 1);
                     try self.print_line(depth, ")", .{});
                 },
+                .block => |blk| {
+                    try self.print_indent(depth);
+                    try self.writer.print("(block\n", .{});
+                    try self.print_node_list("items", blk.items, depth + 1);
+                    try self.print_line(depth, ")", .{});
+                },
 
                 .associate => |assoc| {
                     try self.print_indent(depth);
@@ -440,6 +446,21 @@ pub fn printer(writer_type: type) type {
             }
         }
     };
+}
+
+fn lineCol(source: []const u8, pos: usize) struct { line: usize, column: usize } {
+    var line: usize = 1;
+    var column: usize = 1;
+    var i: usize = 0;
+    while (i < pos and i < source.len) : (i += 1) {
+        if (source[i] == '\n') {
+            line += 1;
+            column = 1;
+        } else {
+            column += 1;
+        }
+    }
+    return .{ .line = line, .column = column };
 }
 
 pub fn main() !void {
@@ -480,8 +501,6 @@ pub fn main() !void {
         out_writer = &out_file_writer.interface;
     }
 
-    var p = printer(@TypeOf(out_writer)){ .writer = out_writer };
-
     var lexer = try ink.lexer.init(source);
     var tokens: [1024]ink.token = undefined;
     var i: usize = 0;
@@ -495,18 +514,64 @@ pub fn main() !void {
             if (tok.which == .end_of_file) break;
         } else {
             break;
+    }
+    }
+
+    var parse_result = try ink.peg_parser.parse(allocator, tokens[0..i]);
+    defer parse_result.deinit();
+
+    if (!parse_result.ok) {
+        if (parse_result.@"error") |info| {
+            const token_index = info.position;
+            const loc_index = if (token_index < i) tokens[token_index].where.start else source.len;
+            const loc = lineCol(source, loc_index);
+            err_writer.print("parse error at {d}:{d}\n", .{ loc.line, loc.column }) catch {};
+            if (info.expected.len != 0) {
+                err_writer.print("expected", .{}) catch {};
+                for (info.expected, 0..) |kind, idx| {
+                    const sep = if (idx == 0) " " else ", ";
+                    err_writer.print("{s}{s}", .{ sep, @tagName(kind) }) catch {};
+                }
+                err_writer.print("\n", .{}) catch {};
+            }
+            if (info.found) |found| {
+                err_writer.print("found {s}\n", .{@tagName(found)}) catch {};
+            } else {
+                err_writer.print("found end_of_file\n", .{}) catch {};
+            }
+        } else {
+            err_writer.print("parse error\n", .{}) catch {};
         }
+        err_writer.flush() catch {};
+        std.process.exit(1);
     }
 
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    var parser = try ink.parser.parse(source, tokens[0..i], arena.allocator());
+    var builder = ink.peg_ast.builder.init(parse_result.arena.allocator(), tokens[0..i], &parse_result.tree);
+    const nodes = builder.build_program(parse_result.root.?) catch {
+        if (builder.last_error) |info| {
+            const token_index = info.position;
+            const loc_index = if (token_index < i) tokens[token_index].where.start else source.len;
+            const loc = lineCol(source, loc_index);
+            err_writer.print("ast error: {s} at {d}:{d}\n", .{ @tagName(info.kind), loc.line, loc.column }) catch {};
+        } else {
+            err_writer.print("ast error\n", .{}) catch {};
+        }
+        err_writer.flush() catch {};
+        std.process.exit(1);
+    };
 
-    while (!parser.at_end()) {
-        const node = try parser.process();
-        try p.print_node_tree(node, 0);
-        try p.writer.writeByte('\n');
-    }
+    var ir_builder = ink.ir_build.builder.init(parse_result.arena.allocator());
+    defer ir_builder.deinit();
+    const ir_result = ir_builder.build(nodes) catch {
+        if (ir_builder.last_error) |info| {
+            err_writer.print("ir error: {s}\n", .{@tagName(info)}) catch {};
+        } else {
+            err_writer.print("ir error\n", .{}) catch {};
+        }
+        err_writer.flush() catch {};
+        std.process.exit(1);
+    };
 
-    try p.writer.flush();
+    try ink.ir_print.print(out_writer, ir_result.nodes, ir_result.strings, ir_result.roots);
+    try out_writer.flush();
 }

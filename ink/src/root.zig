@@ -4,8 +4,14 @@ pub const strings = @import("common/string.zig");
 pub const ast = @import("lang/ast.zig");
 pub const node = @import("lang/ast.zig").node;
 pub const lexer = @import("lang/lexer.zig").lexer;
-pub const parser = @import("lang/parser.zig").parser;
-pub const parser_error = @import("lang/parser.zig").parser_error;
+pub const grammar = @import("lang/grammar.zig");
+pub const gparser = @import("lang/gparser.zig");
+pub const peg = @import("lang/peg.zig");
+pub const peg_parser = @import("lang/peg_parser.zig");
+pub const peg_ast = @import("lang/peg_ast.zig");
+pub const ir = @import("ir/core.zig");
+pub const ir_build = @import("ir/build.zig");
+pub const ir_print = @import("ir/print.zig");
 pub const token = @import("lang/token.zig").token;
 pub const precedence = @import("lang/token.zig").precedence;
 pub const vm = @import("vm.zig");
@@ -67,6 +73,7 @@ pub const binary = enum(u8) {
     greater_than,
     greater_or_equal,
     call,
+    pipe,
     access,
     coalesce,
 };

@@ -234,6 +234,13 @@ pub const specification = [_]type_spec{
     } },
 
     .{ .@"struct" = .{
+        .name = "block_expr",
+        .fields = &.{
+            .{ .name = "items", .ty = ref_node_ptr_slice },
+        },
+    } },
+
+    .{ .@"struct" = .{
         .name = "associate",
         .fields = &.{
             .{ .name = "name", .ty = ref_identifier },
@@ -284,6 +291,7 @@ pub const node_union = union_spec{
         .{ .name = "binary", .ty = type_ref{ .named = "binary_expr" } },
         .{ .name = "if_expr", .ty = type_ref{ .named = "if_expr" } },
         .{ .name = "match_expr", .ty = type_ref{ .named = "match_expr" } },
+        .{ .name = "block", .ty = type_ref{ .named = "block_expr" } },
         .{ .name = "associate", .ty = type_ref{ .named = "associate" } },
         .{ .name = "type", .ty = type_ref{ .named = "type_expr" } },
     },
@@ -308,6 +316,7 @@ pub const binarys = [_]binary{
     .{ .name = "greater_than", .ir_name = "greater_than" },
     .{ .name = "greater_or_equal", .ir_name = "greater_or_equal" },
     .{ .name = "call", .ir_name = "call" },
+    .{ .name = "pipe", .ir_name = "pipe" },
 };
 
 pub const unarys = [_]unary{
@@ -415,6 +424,7 @@ pub const generic_value_kinds = [_][]const u8{
 
 pub const parser_precedence = [_]struct { kind: []const u8, precedence: []const u8 }{
     .{ .kind = "assign", .precedence = "assignment" },
+    .{ .kind = "pipe", .precedence = "pipe" },
     .{ .kind = "logical_or", .precedence = "logical_or" },
     .{ .kind = "logical_xor", .precedence = "logical_or" },
     .{ .kind = "logical_and", .precedence = "logical_and" },
@@ -447,6 +457,7 @@ pub const parser_binary_ops = [_]struct { kind: []const u8, op: []const u8 }{
     .{ .kind = "minus", .op = "sub" },
     .{ .kind = "asterisk", .op = "mul" },
     .{ .kind = "slash", .op = "div" },
+    .{ .kind = "pipe", .op = "pipe" },
     .{ .kind = "less_than", .op = "less_than" },
     .{ .kind = "greater_than", .op = "greater_than" },
     .{ .kind = "less_or_equal", .op = "less_or_equal" },

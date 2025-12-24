@@ -164,7 +164,6 @@ pub const lexer = struct {
             self.read_char();
         }
         const text = self.source[start..self.head];
-        std.debug.print("\nfound text {s}\n", .{text});
         const kind = keywords.get(text) orelse .identifier;
         return self.delineate_from(kind, start);
     }

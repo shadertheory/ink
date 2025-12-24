@@ -12,6 +12,7 @@ pub const ir = union(enum) {
 
     unary: struct { op: ink.unary, right: ir_identifier },
     binary: struct { left: ir_identifier, op: ink.binary, right: ir_identifier },
+    block: []const ir_identifier,
 
     if_expr: struct { condition: ir_identifier, then_branch: ir_identifier, else_branch: ?ir_identifier },
     match_expr: struct { target: ir_identifier, arms: []const match_arm },

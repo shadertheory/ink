@@ -19,6 +19,7 @@ pub const token = struct {
 pub const precedence = enum(u8) {
     none = 0,
     assignment,
+    pipe,
     logical_or,
     logical_and,
     comparison,
