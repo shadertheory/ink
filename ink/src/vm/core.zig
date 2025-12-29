@@ -12,61 +12,58 @@ pub const machine =
         memory: tape,
 
         processor: executor,
+        code: []const u8,
+        constants: []const u64,
 
-        pub fn init(allocator: mem_allocator, program: []const instruction, constants: []u8) machine {
-            _ = constants;
-            const memory = tape.init(allocator, 8192 * 1024);
-
-            const assembler = bytecode.assembler.init(allocator);
-            for (program) |_| {}
-            const program_bytecode = assembler.finish();
-
-            const inst = memory.allocate(u8, program_bytecode);
-
-            const stack_size = 8192;
-
-            const sp = memory.allocate(u64, [_]u64{0} ** stack_size);
+        pub fn init(allocator: mem_allocator, program: []const u8, constants: []const u64) machine {
+            var memory = tape.init(allocator, 1024 * 1024);
+            const state = executor.state{
+                .pc = 0,
+                .fp = 0,
+                .sp = 1,
+            };
 
             return machine{
-                .processor = executor.init(.{
-                    .sp = sp,
-                    .fp = sp,
-                    .pc = inst,
-                }),
+                .processor = executor.init(state, &memory, constants),
                 .memory = memory,
+                .code = program,
+                .constants = constants,
             };
         }
 
-        pub const index = struct { value: u64 };
+        pub fn step(this: *machine, budget: usize) *executor.state {
+            return this.processor.step(this.code, budget);
+        }
+
+        pub const index = usize;
 
         pub const register = struct { value: index };
+        pub const word = u64;
 
         pub const tape = struct {
-            pub const word = u64;
-            data: []word,
+            pub const index = usize;
+            data: []u64,
             head: usize,
 
-            pub fn init(allocator: mem_allocator, byte_count: usize) tape {
+            pub fn init(allocator: mem_allocator, word_count: usize) tape {
                 return tape{
-                    .data = allocator.alloc(u8, byte_count / @sizeOf(word)),
+                    .data = allocator.alloc(u64, word_count) catch unreachable,
+                    .head = 0,
                 };
             }
 
-            pub fn allocate(this: *tape, comptime ty: type, data: []ty) tape.index {
-                return this.push(&this.head, ty, data);
+            pub fn access(this: *tape, slot: usize) *u64 {
+                return &this.data[slot];
             }
 
-            pub fn push(this: *tape, head: *usize, comptime ty: type, data: []ty) tape.index {
-                const byte_payload: []u8 = @ptrCast(data.ptr);
-                const byte_data: []u8 = @ptrCast(this.data.ptr);
-                const align_req = @alignOf(ty) - @rem(head, @alignOf(ty));
-                head += align_req;
-                const ret = tape.index{ .where = head };
-                std.mem.copyForwards(u8, byte_data[head..][0..byte_payload.len], byte_payload);
-                head += byte_payload.len;
-                return ret;
+            pub fn read(this: *tape, slot: usize) u64 {
+                return this.data[slot];
             }
 
-            pub const address = struct { where: index };
+            pub fn write(this: *tape, slot: usize, value: u64) void {
+                this.data[slot] = value;
+            }
+
+            pub const address = struct { where: @This().index };
         };
     };

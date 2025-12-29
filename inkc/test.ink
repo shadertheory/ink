@@ -69,6 +69,9 @@ fn box_it<T: type>(x: T) -> box<T>
 	return box(x)
 
 fn pi() -> float
+	3.14
 
 fn main() -> int
-	choose(true) + fib(1) + negate(1)
+	s < 3.14
+	structure<generic>
+	choose(true) |> fib(1) |> negate(1)

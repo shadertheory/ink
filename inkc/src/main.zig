@@ -339,6 +339,9 @@ pub fn printer(writer_type: type) type {
                 .float => |val| {
                     try self.print_line(depth, "(float {d})", .{val});
                 },
+                .string => |val| {
+                    try self.print_line(depth, "(string \"{s}\")", .{val.string});
+                },
                 .identifier => |name| {
                     try self.print_line(depth, "(identifier \"{s}\")", .{name.string});
                 },
@@ -390,6 +393,22 @@ pub fn printer(writer_type: type) type {
                         try self.print_identifier_field("by_trait", impl_decl.by_trait, depth + 1);
                         try self.print_identifier_field("for_struct", impl_decl.for_struct, depth + 1);
                         try self.print_function_decl_list("functions", impl_decl.functions, depth + 1);
+                        try self.print_line(depth, ")", .{});
+                    },
+                    .@"const" => |const_decl| {
+                        try self.print_indent(depth);
+                        try self.writer.print("(const_decl\n", .{});
+                        try self.print_identifier_field("name", const_decl.name, depth + 1);
+                        try self.print_node_opt_field("ty", const_decl.ty, depth + 1);
+                        try self.print_node_field("value", const_decl.value, depth + 1);
+                        try self.print_line(depth, ")", .{});
+                    },
+                    .@"var" => |var_decl| {
+                        try self.print_indent(depth);
+                        try self.writer.print("(var_decl\n", .{});
+                        try self.print_identifier_field("name", var_decl.name, depth + 1);
+                        try self.print_node_opt_field("ty", var_decl.ty, depth + 1);
+                        try self.print_node_field("value", var_decl.value, depth + 1);
                         try self.print_line(depth, ")", .{});
                     },
                 },
@@ -485,21 +504,7 @@ pub fn main() !void {
     const source = try std.fs.cwd().readFileAlloc(allocator, options.input_path, 1_000_000);
     defer allocator.free(source);
 
-    var out_file_buffer: [1_000_000]u8 = undefined;
-    var out_file: ?std.fs.File = null;
-    defer if (out_file) |file| file.close();
-
-    var out_file_writer = std.fs.File.stdout().writer(out_file_buffer[0..]);
-    var out_writer = &out_file_writer.interface;
-    if (options.output_path) |path| {
-        const file = if (std.fs.path.isAbsolute(path))
-            try std.fs.createFileAbsolute(path, .{ .truncate = true })
-        else
-            try std.fs.cwd().createFile(path, .{ .truncate = true });
-        out_file = file;
-        out_file_writer = file.writer(out_file_buffer[0..]);
-        out_writer = &out_file_writer.interface;
-    }
+    _ = options.output_path;
 
     var lexer = try ink.lexer.init(source);
     var tokens: [1024]ink.token = undefined;
@@ -572,6 +577,11 @@ pub fn main() !void {
         std.process.exit(1);
     };
 
-    try ink.ir_print.print(out_writer, ir_result.nodes, ir_result.strings, ir_result.roots);
-    try out_writer.flush();
+    const program = try ink.ir_codegen.generate(allocator, ir_result.nodes, ir_result.strings, ir_result.roots);
+    const bytecode = try ink.vm.encode.encode(allocator, program.instructions);
+
+    var vm = ink.vm.vm.init(allocator, bytecode, program.constants);
+    while (!vm.processor.halted) {
+        _ = vm.step(10_000);
+    }
 }

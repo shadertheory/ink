@@ -65,6 +65,7 @@ pub const builder = struct {
         return switch (node.*) {
             .integer => |value| self.emit(.{ .integer = value }),
             .float => |value| self.emit(.{ .float = @as(f64, value) }),
+            .string => |value| self.emit(.{ .string = try self.intern_string(value.string) }),
             .identifier => |id| self.build_identifier(id),
             .unary => |un| self.build_unary(un),
             .binary => |bin| self.build_binary(bin),
@@ -160,6 +161,8 @@ pub const builder = struct {
             .sum => |s| .{ .sum = try self.build_sum_decl(s) },
             .@"enum" => |e| .{ .@"enum" = try self.build_enum_decl(e) },
             .@"impl" => |i| .{ .@"impl" = try self.build_impl_decl(i) },
+            .@"const" => |c| .{ .@"const" = try self.build_const_decl(c) },
+            .@"var" => |v| .{ .@"var" = try self.build_var_decl(v) },
         } });
     }
 
@@ -216,6 +219,22 @@ pub const builder = struct {
             .for_struct = try self.intern_string(i.for_struct.string),
             .by_trait = try self.intern_string(i.by_trait.string),
             .functions = try self.build_function_list(i.functions),
+        };
+    }
+
+    fn build_const_decl(self: *builder, c: ink.ast.const_decl) build_error!ir.const_decl {
+        return .{
+            .name = try self.intern_string(c.name.string),
+            .ty = if (c.ty) |ref| try self.build_node(ink.ast.deref(ref)) else null,
+            .value = try self.build_node(ink.ast.deref(c.value)),
+        };
+    }
+
+    fn build_var_decl(self: *builder, v: ink.ast.var_decl) build_error!ir.var_decl {
+        return .{
+            .name = try self.intern_string(v.name.string),
+            .ty = if (v.ty) |ref| try self.build_node(ink.ast.deref(ref)) else null,
+            .value = try self.build_node(ink.ast.deref(v.value)),
         };
     }
 

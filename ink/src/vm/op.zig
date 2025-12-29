@@ -11,6 +11,8 @@ pub const control = enum(u8) {
     conditional_move,
     conditional_move_value,
 
+    load_const,
+    move,
     argument_set,
 
     call,
@@ -92,5 +94,3 @@ pub const memory = enum(u8) {
     read,
     write,
 };
-
-

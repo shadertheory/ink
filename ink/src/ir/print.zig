@@ -42,6 +42,9 @@ fn print_node(
         .float => |value| {
             try writer.print("  ({d} float {d})\n", .{ idx, value });
         },
+        .string => |id| {
+            try writer.print("  ({d} string \"{s}\")\n", .{ idx, string_value(strings, id) });
+        },
         .boolean => |value| {
             try writer.print("  ({d} boolean {s})\n", .{ idx, if (value) "true" else "false" });
         },
@@ -114,6 +117,12 @@ fn print_node(
                 .@"impl" => |im| {
                     try print_impl_decl(writer, im, strings);
                 },
+                .@"const" => |c| {
+                    try print_const_decl(writer, c, strings);
+                },
+                .@"var" => |v| {
+                    try print_var_decl(writer, v, strings);
+                },
             }
             try writer.print(")\n", .{});
         },
@@ -178,6 +187,18 @@ fn print_impl_decl(writer: anytype, im: ir.impl_decl, strings: []const []const u
         try writer.print(")", .{});
     }
     try writer.print(")", .{});
+}
+
+fn print_const_decl(writer: anytype, c: ir.const_decl, strings: []const []const u8) !void {
+    try writer.print("const (name \"{s}\") (type ", .{string_value(strings, c.name)});
+    try print_id_opt(writer, c.ty);
+    try writer.print(") (value {d})", .{c.value.idx});
+}
+
+fn print_var_decl(writer: anytype, v: ir.var_decl, strings: []const []const u8) !void {
+    try writer.print("var (name \"{s}\") (type ", .{string_value(strings, v.name)});
+    try print_id_opt(writer, v.ty);
+    try writer.print(") (value {d})", .{v.value.idx});
 }
 
 fn print_generic_params(writer: anytype, generics: []const ir.generic_param, strings: []const []const u8) !void {

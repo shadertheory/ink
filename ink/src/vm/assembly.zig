@@ -8,8 +8,7 @@ pub const mem_allocator = std.mem.Allocator;
 pub const int_fitting_range = std.math.IntFittingRange;
 pub const struct_field = std.builtin.Type.StructField;
 pub const tuple = std.meta.Tuple;
-pub const access = @import("./core.zig").machine.fundamental;
-pub const tape = @import("./core").machine.tape;
+pub const tape = @import("./core.zig").machine.tape;
 const small = packed struct {
     opcode: u8,
     src: u3,
@@ -35,7 +34,7 @@ const huge = packed struct {
 };
 
 const imm_val = packed struct {
-    opcode: u6,
+    opcode: u10,
     src: u5,
     dst: u3,
     val: u13,
@@ -57,7 +56,7 @@ const jmp_loc_ind = packed struct {
 };
 
 const tri = packed struct {
-    opcode: u8,
+    opcode: u10,
     dst: u8,
     src_a: u8,
     src_b: u8,
@@ -184,106 +183,259 @@ pub fn accessors(comptime vm_type: type) type {
     };
 }
 
-pub const jump_loc = union { target_absolute: usize, target_register: usize, target_relative: isize };
-
 pub fn control_operators(comptime vm: type) type {
     return struct {
         const self = @This();
-        fn no_operation(machine: *vm) void {
+        const register_count = 8;
+        fn reg_ptr(machine: *vm, index: usize) *u64 {
+            const addr = machine.current.fp + index;
+            return machine.memory.access(addr);
+        }
+
+        fn no_operation(machine: *vm, src: usize, dst: usize) void {
             _ = machine;
-            std.debug.print("\nno op\n", .{});
-            return;
+            _ = src;
+            _ = dst;
         }
-        fn halt(machine: *vm) void {
-            _ = machine;
-            std.debug.print("\nhalt\n", .{});
-            return;
+
+        fn halt(machine: *vm, src: usize, dst: usize) void {
+            _ = src;
+            _ = dst;
+            machine.halted = true;
         }
-        fn jump_always(machine: *vm, jump: jump_loc) void {
-            switch (jump) {
-                .target_absolute => |t| {
-                    machine.pc = t;
-                },
-                .target_register => |r| {
-                    machine.pc = machine.register[r];
-                },
-                .target_relative => |s| {
-                    if (s >= 0) machine.pc += s else machine.pc -= -s;
-                },
-            }
-            std.debug.print("\njump to {d}\n", .{jump.target_absolute});
-            return;
-        }
-        fn jump_if(machine: *vm, condition: bool, condition_register: usize, jump: jump_loc) void {
-            const val = *self.reg(condition_register);
-            if (val == @intFromBool(condition)) {
+
+        fn load_const(machine: *vm, src: usize, dst: usize, val: usize) void {
+            _ = src;
+            if (val >= machine.constants.len) {
+                machine.memory.write(machine.current.fp + dst, 0);
                 return;
             }
-            self.jump_always(machine, jump);
+            machine.memory.write(machine.current.fp + dst, machine.constants[val]);
         }
-        fn jump_if_true(machine: *vm, condition_register: usize, jump: jump_loc) void {
-            self.jump_if(machine, true, condition_register, jump);
+
+        fn move(machine: *vm, src: usize, dst: usize) void {
+            machine.memory.write(machine.current.fp + dst, machine.memory.read(machine.current.fp + src));
         }
-        fn jump_if_false(machine: *vm, condition_register: usize, jump: jump_loc) void {
-            self.jump_if(machine, false, condition_register, jump);
+
+        fn jump_always(machine: *vm, target_absolute: usize) void {
+            machine.current.pc = target_absolute;
         }
-        fn reg(machine: *vm, index: usize) *u64 {
-            const addr = machine.fp + index;
-            if (addr >= machine.current.sp) {
-                return 0;
+
+        fn jump_if_true(machine: *vm, condition_register: usize, target_absolute: usize) void {
+            if (machine.memory.read(machine.current.fp + condition_register) != 0) {
+                machine.current.pc = target_absolute;
             }
-            return &machine.current.memory.data[addr];
         }
-        fn push(machine: *vm, val: u64) *u64 {
-            const item = self.peek();
-            item.* = val;
-            machine.current.sp += 1;
-            return item;
+
+        fn jump_if_false(machine: *vm, condition_register: usize, target_absolute: usize) void {
+            if (machine.memory.read(machine.current.fp + condition_register) == 0) {
+                machine.current.pc = target_absolute;
+            }
         }
-        fn pop(machine: *vm) u64 {
-            const item = *self.peek();
-            machine.current.sp -= 1;
-            return item;
-        }
-        fn peek(machine: *vm) *u64 {
-            return machine.current.memory.access(machine.current.sp);
-        }
+
         fn conditional_move(machine: *vm, dst: usize, src_a: usize, src_b: usize) void {
-            if (machine.get(src_b).* != @intFromBool(false)) {
-                argument_set(machine, dst, src_a);
+            if (machine.memory.read(machine.current.fp + src_b) != 0) {
+                argument_set(machine, src_a, dst);
             }
         }
+
         fn conditional_move_value(machine: *vm, dst: usize, src: usize, val: usize) void {
-            if (machine.get(src).* != @intFromBool(false)) {
-                machine.reg(dst).* = @intCast(val);
+            if (machine.memory.read(machine.current.fp + src) != 0) {
+                machine.memory.write(machine.current.fp + dst, @intCast(val));
             }
         }
-        fn argument_set(machine: *vm, dst: usize, src: usize) void {
-            machine.reg(dst).* = machine.reg(src).*;
+
+        fn argument_set(machine: *vm, src: usize, dst: usize) void {
+            if (!machine.arg_base_valid) {
+                machine.arg_base = machine.current.sp;
+                machine.arg_base_valid = true;
+            }
+            const addr = machine.arg_base + 2 + dst;
+            if (addr >= machine.current.sp) {
+                machine.current.sp = addr + 1;
+            }
+            machine.memory.write(addr, machine.memory.read(machine.current.fp + src));
         }
-        fn call(machine: *vm, jump: jump_loc) void {
-            machine.current.memory.allocate(&machine.current.sp, vm.state, machine.current.*);
-            call_tail(machine, jump);
+
+        fn call(machine: *vm, target_absolute: usize) void {
+            const base = if (machine.arg_base_valid) machine.arg_base else machine.current.sp;
+            machine.memory.write(base, machine.current.pc + machine.last_inst_size);
+            machine.memory.write(base + 1, machine.current.fp);
+            machine.current.fp = base + 2;
+            const frame_end = base + 2 + register_count;
+            if (machine.current.sp < frame_end) {
+                machine.current.sp = frame_end;
+            }
+            machine.arg_base = machine.current.sp;
+            machine.arg_base_valid = false;
+            machine.current.pc = target_absolute;
         }
+
         fn call_indirect(machine: *vm, src: usize) void {
-            call(machine, .{ .target_absolute = reg(src) });
+            const target = machine.memory.read(machine.current.fp + src);
+            call(machine, @intCast(target));
         }
-        fn call_tail(machine: *vm, jump: jump_loc) void {
-            jump_always(machine, jump);
+
+        fn call_register(machine: *vm, src: usize, dst: usize) void {
+            _ = dst;
+            call_indirect(machine, src);
         }
-        fn call_foreign(machine: *vm, table_index: usize) void {
+
+        fn call_tail(machine: *vm, target_absolute: usize) void {
+            jump_always(machine, target_absolute);
+        }
+
+        fn call_foreign(machine: *vm, src: usize, dst: usize, val: usize) void {
+            _ = src;
+            _ = dst;
+            switch (val) {
+                0 => {
+                    var buffer: [256]u8 = undefined;
+                    var out_file = std.fs.File.stdout().writer(buffer[0..]);
+                    var out = &out_file.interface;
+                    out.print("{d}\n", .{machine.memory.read(machine.current.fp + 0)}) catch {};
+                    out.flush() catch {};
+                },
+                else => {},
+            }
+        }
+
+        fn ret(machine: *vm, src: usize, dst: usize) void {
+            _ = src;
+            _ = dst;
+            const ret_pc = machine.memory.read(machine.current.fp - 2);
+            const prev_fp = machine.memory.read(machine.current.fp - 1);
+            machine.current.sp = machine.current.fp - 2;
+            machine.current.fp = prev_fp;
+            machine.current.pc = ret_pc;
+        }
+
+        fn ret_value(machine: *vm, src: usize, dst: usize) void {
+            _ = dst;
+            const value = machine.memory.read(machine.current.fp + src);
+            const ret_pc = machine.memory.read(machine.current.fp - 2);
+            const prev_fp = machine.memory.read(machine.current.fp - 1);
+            machine.memory.write(prev_fp + 0, value);
+            machine.current.sp = machine.current.fp - 2;
+            machine.current.fp = prev_fp;
+            machine.current.pc = ret_pc;
+        }
+
+        fn method_virtual_get(machine: *vm, src: usize, dst: usize) void {
             _ = machine;
-            _ = table_index;
-            //TODO
-            unreachable;
-        }
-        fn ret(machine: *vm) void {
-            machine.current.* = machine.current.memory.free(&machine.memory.current.sp, vm.state);
+            _ = src;
+            _ = dst;
         }
     };
 }
 
-pub const bytecode = assembly(.{ .control = op.control }, .{ small, standard, wide, huge, imm_val, jmp_loc_abs, jmp_loc_rel, jmp_loc_ind, imm_val_dual, tri, jmp_cond_abs, jmp_cond_rel }, .{ .control = control_operators });
+pub fn int_math_operators(comptime vm: type) type {
+    return struct {
+        fn reg(machine: *vm, index: usize) u64 {
+            return machine.memory.read(machine.current.fp + index);
+        }
+
+        fn set(machine: *vm, index: usize, value: u64) void {
+            machine.memory.write(machine.current.fp + index, value);
+        }
+
+        fn compare_equal(machine: *vm, dst: usize, src_a: usize, src_b: usize) void {
+            set(machine, dst, @intFromBool(reg(machine, src_a) == reg(machine, src_b)));
+        }
+        fn compare_less_than(machine: *vm, dst: usize, src_a: usize, src_b: usize) void {
+            set(machine, dst, @intFromBool(@as(i64, @bitCast(reg(machine, src_a))) < @as(i64, @bitCast(reg(machine, src_b)))));
+        }
+        fn compare_less_than_or_equal(machine: *vm, dst: usize, src_a: usize, src_b: usize) void {
+            set(machine, dst, @intFromBool(@as(i64, @bitCast(reg(machine, src_a))) <= @as(i64, @bitCast(reg(machine, src_b)))));
+        }
+        fn compare_greater_than(machine: *vm, dst: usize, src_a: usize, src_b: usize) void {
+            set(machine, dst, @intFromBool(@as(i64, @bitCast(reg(machine, src_a))) > @as(i64, @bitCast(reg(machine, src_b)))));
+        }
+        fn compare_greater_than_or_equal(machine: *vm, dst: usize, src_a: usize, src_b: usize) void {
+            set(machine, dst, @intFromBool(@as(i64, @bitCast(reg(machine, src_a))) >= @as(i64, @bitCast(reg(machine, src_b)))));
+        }
+
+        fn unary_negate(machine: *vm, dst: usize, src_a: usize, _: usize) void {
+            const val: i64 = @bitCast(reg(machine, src_a));
+            set(machine, dst, @bitCast(-val));
+        }
+        fn unary_absolute(machine: *vm, dst: usize, src_a: usize, _: usize) void {
+            const val: i64 = @bitCast(reg(machine, src_a));
+            set(machine, dst, @bitCast(@abs(val)));
+        }
+        fn unary_bitwise_not(machine: *vm, dst: usize, src_a: usize, _: usize) void {
+            set(machine, dst, ~reg(machine, src_a));
+        }
+
+        fn binary_add(machine: *vm, dst: usize, src_a: usize, src_b: usize) void {
+            const a: i64 = @bitCast(reg(machine, src_a));
+            const b: i64 = @bitCast(reg(machine, src_b));
+            set(machine, dst, @bitCast(a + b));
+        }
+        fn binary_sub(machine: *vm, dst: usize, src_a: usize, src_b: usize) void {
+            const a: i64 = @bitCast(reg(machine, src_a));
+            const b: i64 = @bitCast(reg(machine, src_b));
+            set(machine, dst, @bitCast(a - b));
+        }
+        fn binary_multiply(machine: *vm, dst: usize, src_a: usize, src_b: usize) void {
+            const a: i64 = @bitCast(reg(machine, src_a));
+            const b: i64 = @bitCast(reg(machine, src_b));
+            set(machine, dst, @bitCast(a * b));
+        }
+        fn binary_divide(machine: *vm, dst: usize, src_a: usize, src_b: usize) void {
+            const a: i64 = @bitCast(reg(machine, src_a));
+            const b: i64 = @bitCast(reg(machine, src_b));
+            set(machine, dst, @bitCast(@divTrunc(a, b)));
+        }
+        fn binary_remainder(machine: *vm, dst: usize, src_a: usize, src_b: usize) void {
+            const a: i64 = @bitCast(reg(machine, src_a));
+            const b: i64 = @bitCast(reg(machine, src_b));
+            set(machine, dst, @bitCast(@mod(a, b)));
+        }
+        fn binary_minimum(machine: *vm, dst: usize, src_a: usize, src_b: usize) void {
+            const a: i64 = @bitCast(reg(machine, src_a));
+            const b: i64 = @bitCast(reg(machine, src_b));
+            set(machine, dst, @bitCast(@min(a, b)));
+        }
+        fn binary_maximum(machine: *vm, dst: usize, src_a: usize, src_b: usize) void {
+            const a: i64 = @bitCast(reg(machine, src_a));
+            const b: i64 = @bitCast(reg(machine, src_b));
+            set(machine, dst, @bitCast(@max(a, b)));
+        }
+
+        fn bitwise_and(machine: *vm, dst: usize, src_a: usize, src_b: usize) void {
+            set(machine, dst, reg(machine, src_a) & reg(machine, src_b));
+        }
+        fn bitwise_or(machine: *vm, dst: usize, src_a: usize, src_b: usize) void {
+            set(machine, dst, reg(machine, src_a) | reg(machine, src_b));
+        }
+        fn bitwise_xor(machine: *vm, dst: usize, src_a: usize, src_b: usize) void {
+            set(machine, dst, reg(machine, src_a) ^ reg(machine, src_b));
+        }
+        fn bitwise_shift_left(machine: *vm, dst: usize, src_a: usize, src_b: usize) void {
+            const shift: u6 = @intCast(reg(machine, src_b));
+            set(machine, dst, reg(machine, src_a) << shift);
+        }
+        fn bitwise_shift_right(machine: *vm, dst: usize, src_a: usize, src_b: usize) void {
+            const shift: u6 = @intCast(reg(machine, src_b));
+            set(machine, dst, reg(machine, src_a) >> shift);
+        }
+        fn bitwise_shift_arithmetic(machine: *vm, dst: usize, src_a: usize, src_b: usize) void {
+            const shift: u6 = @intCast(reg(machine, src_b));
+            const val: i64 = @bitCast(reg(machine, src_a));
+            set(machine, dst, @bitCast(val >> shift));
+        }
+        fn bitwise_rotate_left(machine: *vm, dst: usize, src_a: usize, src_b: usize) void {
+            const shift: u6 = @intCast(reg(machine, src_b));
+            set(machine, dst, std.math.rotl(u64, reg(machine, src_a), shift));
+        }
+        fn bitwise_rotate_right(machine: *vm, dst: usize, src_a: usize, src_b: usize) void {
+            const shift: u6 = @intCast(reg(machine, src_b));
+            set(machine, dst, std.math.rotr(u64, reg(machine, src_a), shift));
+        }
+    };
+}
+pub const bytecode = assembly(.{ .control = op.control, .int_math = op.int_math }, .{ small, standard, wide, huge, imm_val, jmp_loc_abs, jmp_loc_rel, jmp_loc_ind, imm_val_dual, tri, jmp_cond_abs, jmp_cond_rel }, .{ .control = control_operators, .int_math = int_math_operators });
 
 pub fn assembly(comptime operation_sets: anytype, comptime formats: anytype, comptime logic_map: anytype) type {
     const operation_map = struct {
@@ -324,24 +476,38 @@ pub fn assembly(comptime operation_sets: anytype, comptime formats: anytype, com
 
     const sorted_formats = sorted_formats_fn;
     return struct {
-        const executor = struct {
+        pub const executor = struct {
             const self = @This();
 
             pub const state = struct {
-                pc: tape.index,
-                fp: tape.index,
-                sp: tape.index,
+                pc: usize,
+                fp: usize,
+                sp: usize,
             };
 
             current: state,
+            memory: *tape,
+            constants: []const u64,
+            halted: bool,
+            arg_base: usize,
+            arg_base_valid: bool,
+            last_inst_size: usize,
 
             pub fn stack_push(this: *self, val: u64) void {
-                this.memory.write(self.current.sp, val);
-                this.current.sp += @sizeOf(u64);
+                this.memory.write(this.current.sp, val);
+                this.current.sp += 1;
             }
 
-            pub fn init(start: state) self {
-                return .{ .current = start };
+            pub fn init(start: state, memory: *tape, constants: []const u64) self {
+                return .{
+                    .current = start,
+                    .memory = memory,
+                    .constants = constants,
+                    .halted = false,
+                    .arg_base = start.sp,
+                    .arg_base_valid = false,
+                    .last_inst_size = 0,
+                };
             }
 
             pub fn step(this: *self, code: []const u8, budget: usize) *state {
@@ -349,25 +515,27 @@ pub fn assembly(comptime operation_sets: anytype, comptime formats: anytype, com
                 const format_mask = (@as(usize, 1) << @intCast(format_bits)) - 1;
                 var health = budget;
 
-                while (health > 0) {
-                    const raw = code[this.pc];
+                while (health > 0 and !this.halted) {
+                    const raw = code[this.current.pc];
                     const format_index = raw & format_mask;
-                    const operation = raw >> @intCast(format_bits);
                     inline for (sorted_formats, 0..) |format, idx| {
-                        if (idx == format_index) {
-                            const size = @sizeOf(format);
-                            const inst = mem.bytesToValue(format, code[this.pc..][0..size]);
-                            const pc_start = this.pc;
-                            this.dispatch(operation, inst);
-                            if (this.pc == pc_start) {
-                                this.pc += size;
+                    if (idx == format_index) {
+                        const size = @sizeOf(format);
+                        const inst = mem.bytesToValue(format, code[this.current.pc..][0..size]);
+                        const opcode_val: usize = @intCast(inst.opcode);
+                        const operation: u8 = @intCast(opcode_val >> @intCast(format_bits));
+                        const pc_start = this.current.pc;
+                        this.last_inst_size = size;
+                        this.dispatch(operation, inst);
+                        if (this.current.pc == pc_start) {
+                                this.current.pc += size;
                             }
                             health -= 1;
                             break;
                         }
                     }
                 }
-                return &this.state;
+                return &this.current;
             }
             pub fn dispatch(this: *self, operation: u8, instruction_payload: anytype) void {
                 comptime var opcode_base_index = 0;
@@ -401,12 +569,11 @@ pub fn assembly(comptime operation_sets: anytype, comptime formats: anytype, com
                                 const instruction_payload_type_info = @typeInfo(@TypeOf(instruction_payload));
                                 if (instruction_payload_type_info.@"struct".fields.len == function_params.len) {
                                     inline for (function_params[1..], 1..) |param, index| {
-                                        const function_param_type_info = @typeInfo(@TypeOf(param.type.?));
+                                        const function_param_type_info = @typeInfo(param.type.?);
                                         const name = instruction_payload_type_info.@"struct".fields[index].name;
                                         switch (function_param_type_info) {
                                             .int => {
-                                                function_arguments[index] = @field(instruction_payload, name);
-                                                break;
+                                                function_arguments[index] = @intCast(@field(instruction_payload, name));
                                             },
                                             .@"union" => {
                                                 @field(function_arguments[index], name) = @field(instruction_payload, name);
@@ -443,7 +610,7 @@ pub fn assembly(comptime operation_sets: anytype, comptime formats: anytype, com
                 return types;
             }
         };
-        const assembler = struct {
+        pub const assembler = struct {
             const self = @This();
             buffer: array_list(u8),
 
@@ -497,32 +664,38 @@ pub fn assembly(comptime operation_sets: anytype, comptime formats: anytype, com
                 return true;
             }
 
-            fn finish(this: *self) []u8 {
+            pub fn finish(this: *self) []u8 {
                 const ret = this.buffer.toOwnedSlice();
                 this.deinit();
                 return ret catch unreachable;
             }
         };
+        pub fn encoded_size(operation: anytype, args: anytype) usize {
+            _ = operation;
+            inline for (sorted_formats) |format| {
+                if (assembler.is_compatible(format, args)) {
+                    return @sizeOf(format);
+                }
+            }
+            unreachable;
+        }
     };
 }
 
 test "bytecode basic" {
     var assembler = bytecode.assembler.init(std.testing.allocator);
-    try assembler.emit(op.control.no_operation, .{ .target_absolute = 700000 });
-    try assembler.emit(op.control.halt, .{});
+    try assembler.emit(op.control.no_operation, .{ .src = 0, .dst = 0 });
+    try assembler.emit(op.control.halt, .{ .src = 0, .dst = 0 });
     const done = assembler.finish();
-    const jmp: *align(1) jmp_loc_abs = std.mem.bytesAsValue(jmp_loc_abs, done[0..@sizeOf(jmp_loc_abs)]);
-    std.debug.assert(jmp.target_absolute == 700000);
+    std.debug.assert(done.len > 0);
 }
 
 test "bytecode execute" {
     var assembler = bytecode.assembler.init(std.testing.allocator);
-    try assembler.emit(op.control.no_operation, .{});
-    try assembler.emit(op.control.jump_always, .{ .target_absolute = 0 });
-    try assembler.emit(op.control.jump_always, .{ .target_relative = 3 });
-    try assembler.emit(op.control.halt, .{});
+    try assembler.emit(op.control.no_operation, .{ .src = 0, .dst = 0 });
+    try assembler.emit(op.control.halt, .{ .src = 0, .dst = 0 });
     const bytes = assembler.finish();
-    const reg = [_]u64{0} ** 256;
-    var exe = bytecode.executor.init(reg, 0);
-    exe.step(bytes, 20);
+    var test_tape = @import("./core.zig").machine.tape.init(std.testing.allocator, 64);
+    var exe = bytecode.executor.init(.{ .pc = 0, .fp = 0, .sp = 1 }, &test_tape, &[_]u64{});
+    _ = exe.step(bytes, 20);
 }

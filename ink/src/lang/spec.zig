@@ -130,6 +130,24 @@ pub const specification = [_]type_spec{
         },
     } },
 
+    .{ .@"struct" = .{
+        .name = "const_decl",
+        .fields = &.{
+            .{ .name = "name", .ty = ref_identifier },
+            .{ .name = "ty", .ty = ref_node_ptr_opt },
+            .{ .name = "value", .ty = ref_node_ptr },
+        },
+    } },
+
+    .{ .@"struct" = .{
+        .name = "var_decl",
+        .fields = &.{
+            .{ .name = "name", .ty = ref_identifier },
+            .{ .name = "ty", .ty = ref_node_ptr_opt },
+            .{ .name = "value", .ty = ref_node_ptr },
+        },
+    } },
+
     .{ .@"union" = .{
         .name = "trait_item",
         .fields = &.{
@@ -276,6 +294,8 @@ pub const specification = [_]type_spec{
             .{ .name = "sum", .ty = type_ref{ .named = "sum_decl" } },
             .{ .name = "enum", .ty = type_ref{ .named = "enum_decl" } },
             .{ .name = "impl", .ty = type_ref{ .named = "impl_decl" } },
+            .{ .name = "const", .ty = type_ref{ .named = "const_decl" } },
+            .{ .name = "var", .ty = type_ref{ .named = "var_decl" } },
         },
     } },
 };
@@ -285,6 +305,7 @@ pub const node_union = union_spec{
     .fields = &.{
         .{ .name = "integer", .ty = type_ref{ .builtin = .i64 } },
         .{ .name = "float", .ty = type_ref{ .builtin = .f32 } },
+        .{ .name = "string", .ty = ref_identifier },
         .{ .name = "identifier", .ty = ref_identifier },
         .{ .name = "decl", .ty = type_ref{ .named = "decl" } },
         .{ .name = "unary", .ty = type_ref{ .named = "unary_expr" } },
@@ -317,6 +338,13 @@ pub const binarys = [_]binary{
     .{ .name = "greater_or_equal", .ir_name = "greater_or_equal" },
     .{ .name = "call", .ir_name = "call" },
     .{ .name = "pipe", .ir_name = "pipe" },
+    .{ .name = "access", .ir_name = "access" },
+    .{ .name = "coalesce", .ir_name = "coalesce" },
+    .{ .name = "logical_or", .ir_name = "logical_or" },
+    .{ .name = "logical_and", .ir_name = "logical_and" },
+    .{ .name = "logical_xor", .ir_name = "logical_xor" },
+    .{ .name = "assign", .ir_name = "assign" },
+    .{ .name = "index", .ir_name = "index" },
 };
 
 pub const unarys = [_]unary{

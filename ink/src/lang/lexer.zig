@@ -168,6 +168,32 @@ pub const lexer = struct {
         return self.delineate_from(kind, start);
     }
 
+    fn match_string_token(self: *lexer) ?token {
+        if (self.current != '"') return null;
+        const start_quote = self.head;
+        const start = self.head + 1;
+        var escaped = false;
+        while (true) {
+            self.read_char();
+            if (self.current == spec.eof_char or self.current == spec.whitespace.newline) {
+                return self.delineate_from(.illegal, start_quote);
+            }
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (self.current == '\\') {
+                escaped = true;
+                continue;
+            }
+            if (self.current == '"') break;
+        }
+        const end = self.head;
+        self.read_char();
+        const where = location{ .start = start, .end = end };
+        return token{ .which = .string, .where = where, .what = self.delineate_source_slice(where) };
+    }
+
     fn match_number_token(self: *lexer) ?token {
         const start = self.head;
         if (!is_digit(self.current)) return null;
@@ -235,6 +261,7 @@ pub const lexer = struct {
         //Flush pending tokens.
         if (self.match_whitespace_token()) |whitespace| return whitespace;
         if (self.match_simple_token_greedy()) |simple| return simple;
+        if (self.match_string_token()) |string| return string;
         if (self.match_alpha_token()) |alpha| return alpha;
         if (self.match_number_token()) |number| return number;
         if (self.match_end_of_file()) |eof| return eof;

@@ -7,6 +7,7 @@ pub const string_identifier = struct { idx: u32 };
 pub const ir = union(enum) {
     integer: i64,
     float: f64,
+    string: string_identifier,
     boolean: bool,
     identifier: string_identifier,
 
@@ -34,6 +35,8 @@ pub const ir = union(enum) {
         sum: sum_decl,
         @"enum": enum_decl,
         impl: impl_decl,
+        @"const": const_decl,
+        @"var": var_decl,
     },
 
     pub const match_arm = struct { pattern: ir_identifier, body: ir_identifier };
@@ -62,6 +65,18 @@ pub const ir = union(enum) {
         for_struct: string_identifier,
         by_trait: string_identifier,
         functions: []const function_decl,
+    };
+
+    pub const const_decl = struct {
+        name: string_identifier,
+        ty: ?ir_identifier,
+        value: ir_identifier,
+    };
+
+    pub const var_decl = struct {
+        name: string_identifier,
+        ty: ?ir_identifier,
+        value: ir_identifier,
     };
 
     pub const trait_decl = struct {
