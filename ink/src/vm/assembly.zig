@@ -6,23 +6,27 @@ pub const instruction = @import("ink").vm.instruction;
 pub const array_list = std.array_list.Managed;
 pub const mem_allocator = std.mem.Allocator;
 pub const int_fitting_range = std.math.IntFittingRange;
+const foreign = @import("foreign.zig");
+const inkb = @import("inkb.zig");
+const runtime = @import("../runtime/scheduler.zig");
 pub const struct_field = std.builtin.Type.StructField;
 pub const tuple = std.meta.Tuple;
 pub const tape = @import("./core.zig").machine.tape;
+const default_step_budget: usize = 10_000;
 const small = packed struct {
-    opcode: u8,
+    opcode: u12,
     src: u3,
     dst: u3,
 };
 
 const standard = packed struct {
-    opcode: u8,
+    opcode: u12,
     src: u4,
     dst: u3,
 };
 
 const wide = packed struct {
-    opcode: u10,
+    opcode: u12,
     src: u5,
     dst: u3,
 };
@@ -34,51 +38,71 @@ const huge = packed struct {
 };
 
 const imm_val = packed struct {
-    opcode: u10,
+    opcode: u12,
     src: u5,
     dst: u3,
     val: u13,
 };
 
+const imm_val_wide = packed struct {
+    opcode: u12,
+    src: u8,
+    dst: u8,
+    val: u13,
+};
+
 const jmp_loc_abs = packed struct {
-    opcode: u8,
+    opcode: u12,
     target_absolute: u24,
 };
 
 const jmp_loc_rel = packed struct {
-    opcode: u8,
+    opcode: u12,
     target_relative: i24,
 };
 
 const jmp_loc_ind = packed struct {
-    opcode: u8,
+    opcode: u12,
     target_register: u24,
 };
 
 const tri = packed struct {
-    opcode: u10,
+    opcode: u12,
     dst: u8,
     src_a: u8,
     src_b: u8,
 };
 
 const imm_val_dual = packed struct {
-    opcode: u8,
-    dst: u8,
+    opcode: u12,
     src: u8,
+    dst: u8,
     val: u8,
 };
 
+const reg_dual = packed struct {
+    opcode: u12,
+    src: u8,
+    dst: u8,
+};
+
 const jmp_cond_abs = packed struct {
-    opcode: u8,
+    opcode: u12,
     condition_register: u8,
     target_absolute: u24,
 };
 
 const jmp_cond_rel = packed struct {
-    opcode: u8,
+    opcode: u12,
     condition_register: u8,
     target_relative: i24,
+};
+
+const task_spawn_fmt = packed struct {
+    opcode: u12,
+    dst: u8,
+    argc: u8,
+    target_absolute: u24,
 };
 
 fn struct_field_bit_size_less_than(context: type, lhs: type, rhs: type) bool {
@@ -183,10 +207,108 @@ pub fn accessors(comptime vm_type: type) type {
     };
 }
 
+const vm_task = struct {
+    allocator: mem_allocator,
+    memory: tape,
+    executor: bytecode.executor,
+    code: []const u8,
+    task_id: runtime.task_id = 0,
+    step_budget: usize = default_step_budget,
+
+    fn init(
+        allocator: mem_allocator,
+        code: []const u8,
+        constants: []const u64,
+        data: []const inkb.data_entry,
+        foreign_names: []const []const u8,
+        scheduler: ?*runtime.scheduler,
+        lib_dir: ?[]const u8,
+    ) !*vm_task {
+        const task_ptr = try allocator.create(vm_task);
+        errdefer allocator.destroy(task_ptr);
+        task_ptr.* = .{
+            .allocator = allocator,
+            .memory = tape.init(allocator, 1024 * 1024),
+            .executor = undefined,
+            .code = code,
+            .task_id = 0,
+            .step_budget = default_step_budget,
+        };
+        task_ptr.executor = bytecode.executor.init(
+            .{ .pc = 0, .fp = 0, .sp = 1 },
+            &task_ptr.memory,
+            constants,
+            data,
+            foreign_names,
+            allocator,
+            scheduler,
+            lib_dir,
+            code,
+        );
+        return task_ptr;
+    }
+
+    fn deinit(self: *vm_task) void {
+        self.executor.deinit();
+        self.allocator.free(self.memory.data);
+        self.allocator.destroy(self);
+    }
+};
+
+fn on_cancel_vm_task(ctx: *anyopaque) void {
+    const task: *vm_task = @ptrCast(@alignCast(ctx));
+    const sched = task.executor.scheduler orelse return;
+    const pending = task.executor.pending_op_id;
+    if (pending != 0) {
+        sched.cancel_wait(task.task_id, pending);
+        if (pending < runtime.task_wait_base) {
+            _ = sched.reactor.cancel(pending);
+        }
+        task.executor.pending_op_id = 0;
+        task.executor.pending_op_pc = 0;
+    }
+    sched.ready.append(sched.allocator, task.task_id) catch {};
+}
+
+fn poll_vm_task(ctx: *anyopaque, sched: *runtime.scheduler, id: runtime.task_id) runtime.poll_status {
+    const task: *vm_task = @ptrCast(@alignCast(ctx));
+
+    if (sched.is_cancelled(id)) {
+        task.executor.halted = true;
+    }
+
+    task.executor.set_task_context(sched, id);
+    _ = task.executor.step(task.code, task.step_budget);
+
+    if (task.executor.halted) {
+        if (sched.has_children(id)) {
+            sched.begin_join(id);
+            return .pending;
+        }
+        const result = task.executor.return_value();
+        sched.complete_task(id, result);
+        task.deinit();
+        return .done;
+    }
+
+    return switch (task.executor.take_suspend()) {
+        .op => |op_id| blk: {
+            sched.wait(id, op_id) catch {
+                task.executor.halted = true;
+                task.deinit();
+                break :blk .done;
+            };
+            break :blk .pending;
+        },
+        .manual => .pending,
+        .none => .ready,
+    };
+}
+
 pub fn control_operators(comptime vm: type) type {
     return struct {
         const self = @This();
-        const register_count = 8;
+        const register_count = 64;
         fn reg_ptr(machine: *vm, index: usize) *u64 {
             const addr = machine.current.fp + index;
             return machine.memory.access(addr);
@@ -239,7 +361,7 @@ pub fn control_operators(comptime vm: type) type {
             }
         }
 
-        fn conditional_move_value(machine: *vm, dst: usize, src: usize, val: usize) void {
+        fn conditional_move_value(machine: *vm, src: usize, dst: usize, val: usize) void {
             if (machine.memory.read(machine.current.fp + src) != 0) {
                 machine.memory.write(machine.current.fp + dst, @intCast(val));
             }
@@ -288,16 +410,129 @@ pub fn control_operators(comptime vm: type) type {
         fn call_foreign(machine: *vm, src: usize, dst: usize, val: usize) void {
             _ = src;
             _ = dst;
-            switch (val) {
-                0 => {
-                    var buffer: [256]u8 = undefined;
-                    var out_file = std.fs.File.stdout().writer(buffer[0..]);
-                    var out = &out_file.interface;
-                    out.print("{d}\n", .{machine.memory.read(machine.current.fp + 0)}) catch {};
-                    out.flush() catch {};
-                },
-                else => {},
+            foreign.dispatch(machine, @intCast(val));
+            if (machine.arg_base_valid) {
+                machine.current.sp = machine.arg_base;
+                machine.arg_base_valid = false;
             }
+        }
+
+        fn task_spawn(machine: *vm, dst: usize, argc: usize, target_absolute: usize) void {
+            const sched = machine.scheduler orelse {
+                machine.memory.write(machine.current.fp + dst, 0);
+                return;
+            };
+
+            const base = if (machine.arg_base_valid) machine.arg_base else machine.current.sp;
+            const task_ptr = vm_task.init(
+                machine.allocator,
+                machine.code,
+                machine.constants,
+                machine.data,
+                machine.foreign_names,
+                sched,
+                machine.foreign_resolver.lib_dir,
+            ) catch {
+                machine.memory.write(machine.current.fp + dst, 0);
+                return;
+            };
+
+            task_ptr.executor.memory.write(0, 0);
+            task_ptr.executor.memory.write(1, 0);
+            task_ptr.executor.current.fp = 2;
+            task_ptr.executor.current.sp = 2 + register_count;
+            task_ptr.executor.current.pc = target_absolute;
+            task_ptr.executor.arg_base = task_ptr.executor.current.sp;
+            task_ptr.executor.arg_base_valid = false;
+
+            var i: usize = 0;
+            while (i < argc and i + 1 < register_count) : (i += 1) {
+                const value = machine.memory.read(base + 2 + i + 1);
+                task_ptr.executor.memory.write(2 + i + 1, value);
+            }
+
+            const task_id = sched.spawn_child(machine.current_task_id, .{
+                .context = task_ptr,
+                .poll = poll_vm_task,
+                .on_cancel = on_cancel_vm_task,
+            }) catch {
+                task_ptr.deinit();
+                machine.memory.write(machine.current.fp + dst, 0);
+                return;
+            };
+            task_ptr.task_id = task_id;
+
+            if (machine.arg_base_valid) {
+                machine.current.sp = machine.arg_base;
+                machine.arg_base_valid = false;
+            }
+
+            machine.memory.write(machine.current.fp + dst, task_id);
+        }
+
+        fn task_await(machine: *vm, src: usize, dst: usize) void {
+            const sched = machine.scheduler orelse {
+                machine.memory.write(machine.current.fp + dst, 0);
+                return;
+            };
+            const raw = machine.memory.read(machine.current.fp + src);
+            const task_id: runtime.task_id = @intCast(raw);
+            if (sched.task_result_ready(task_id)) {
+                const result = sched.task_result(task_id) orelse 0;
+                machine.memory.write(machine.current.fp + dst, result);
+                return;
+            }
+            machine.suspend_op(runtime.task_wait_op(task_id));
+        }
+
+        fn task_await_any(machine: *vm, dst: usize, src: usize, val: usize) void {
+            const sched = machine.scheduler orelse {
+                machine.memory.write(machine.current.fp + dst, 0);
+                return;
+            };
+
+            var winner: ?runtime.task_id = null;
+            var i: usize = 0;
+            while (i < val) : (i += 1) {
+                const task_val = machine.memory.read(machine.current.fp + src + i);
+                const task_id: runtime.task_id = @intCast(task_val);
+                if (sched.task_result_ready(task_id)) {
+                    winner = task_id;
+                    break;
+                }
+            }
+
+            if (winner) |win_id| {
+                i = 0;
+                while (i < val) : (i += 1) {
+                    const task_val = machine.memory.read(machine.current.fp + src + i);
+                    const task_id: runtime.task_id = @intCast(task_val);
+                    if (task_id == win_id) continue;
+                    sched.cancel_wait(machine.current_task_id, runtime.task_wait_op(task_id));
+                }
+                machine.memory.write(machine.current.fp + dst, win_id);
+                return;
+            }
+
+            i = 0;
+            while (i < val) : (i += 1) {
+                const task_val = machine.memory.read(machine.current.fp + src + i);
+                const task_id: runtime.task_id = @intCast(task_val);
+                sched.wait(machine.current_task_id, runtime.task_wait_op(task_id)) catch {
+                    machine.halted = true;
+                    return;
+                };
+            }
+
+            machine.suspend_manual();
+        }
+
+        fn task_cancel(machine: *vm, src: usize, dst: usize) void {
+            _ = dst;
+            const sched = machine.scheduler orelse return;
+            const raw = machine.memory.read(machine.current.fp + src);
+            const task_id: runtime.task_id = @intCast(raw);
+            sched.cancel(task_id);
         }
 
         fn ret(machine: *vm, src: usize, dst: usize) void {
@@ -305,6 +540,10 @@ pub fn control_operators(comptime vm: type) type {
             _ = dst;
             const ret_pc = machine.memory.read(machine.current.fp - 2);
             const prev_fp = machine.memory.read(machine.current.fp - 1);
+            if (ret_pc == 0 and prev_fp == 0) {
+                machine.halted = true;
+                return;
+            }
             machine.current.sp = machine.current.fp - 2;
             machine.current.fp = prev_fp;
             machine.current.pc = ret_pc;
@@ -316,6 +555,10 @@ pub fn control_operators(comptime vm: type) type {
             const ret_pc = machine.memory.read(machine.current.fp - 2);
             const prev_fp = machine.memory.read(machine.current.fp - 1);
             machine.memory.write(prev_fp + 0, value);
+            if (ret_pc == 0 and prev_fp == 0) {
+                machine.halted = true;
+                return;
+            }
             machine.current.sp = machine.current.fp - 2;
             machine.current.fp = prev_fp;
             machine.current.pc = ret_pc;
@@ -435,7 +678,92 @@ pub fn int_math_operators(comptime vm: type) type {
         }
     };
 }
-pub const bytecode = assembly(.{ .control = op.control, .int_math = op.int_math }, .{ small, standard, wide, huge, imm_val, jmp_loc_abs, jmp_loc_rel, jmp_loc_ind, imm_val_dual, tri, jmp_cond_abs, jmp_cond_rel }, .{ .control = control_operators, .int_math = int_math_operators });
+
+pub fn float_math_operators(comptime vm: type) type {
+    return struct {
+        fn reg(machine: *vm, index: usize) f64 {
+            return @bitCast(machine.memory.read(machine.current.fp + index));
+        }
+
+        fn set(machine: *vm, index: usize, value: f64) void {
+            machine.memory.write(machine.current.fp + index, @bitCast(value));
+        }
+
+        fn compare_eq(machine: *vm, dst: usize, src_a: usize, src_b: usize) void {
+            set(machine, dst, if (reg(machine, src_a) == reg(machine, src_b)) 1.0 else 0.0);
+        }
+        fn compare_lt(machine: *vm, dst: usize, src_a: usize, src_b: usize) void {
+            set(machine, dst, if (reg(machine, src_a) < reg(machine, src_b)) 1.0 else 0.0);
+        }
+        fn compare_gt(machine: *vm, dst: usize, src_a: usize, src_b: usize) void {
+            set(machine, dst, if (reg(machine, src_a) > reg(machine, src_b)) 1.0 else 0.0);
+        }
+
+        fn unary_negate(machine: *vm, dst: usize, src_a: usize, _: usize) void {
+            set(machine, dst, -reg(machine, src_a));
+        }
+        fn unary_absolute(machine: *vm, dst: usize, src_a: usize, _: usize) void {
+            set(machine, dst, @abs(reg(machine, src_a)));
+        }
+        fn unary_sqrt(machine: *vm, dst: usize, src_a: usize, _: usize) void {
+            set(machine, dst, @sqrt(reg(machine, src_a)));
+        }
+        fn unary_sine(machine: *vm, dst: usize, src_a: usize, _: usize) void {
+            set(machine, dst, std.math.sin(reg(machine, src_a)));
+        }
+        fn unary_cosine(machine: *vm, dst: usize, src_a: usize, _: usize) void {
+            set(machine, dst, std.math.cos(reg(machine, src_a)));
+        }
+        fn unary_tangent(machine: *vm, dst: usize, src_a: usize, _: usize) void {
+            set(machine, dst, std.math.tan(reg(machine, src_a)));
+        }
+        fn unary_arcsine(machine: *vm, dst: usize, src_a: usize, _: usize) void {
+            set(machine, dst, std.math.asin(reg(machine, src_a)));
+        }
+        fn unary_arccosine(machine: *vm, dst: usize, src_a: usize, _: usize) void {
+            set(machine, dst, std.math.acos(reg(machine, src_a)));
+        }
+        fn unary_arctangent(machine: *vm, dst: usize, src_a: usize, _: usize) void {
+            set(machine, dst, std.math.atan(reg(machine, src_a)));
+        }
+        fn unary_floor(machine: *vm, dst: usize, src_a: usize, _: usize) void {
+            set(machine, dst, @floor(reg(machine, src_a)));
+        }
+        fn unary_ceil(machine: *vm, dst: usize, src_a: usize, _: usize) void {
+            set(machine, dst, @ceil(reg(machine, src_a)));
+        }
+        fn unary_round(machine: *vm, dst: usize, src_a: usize, _: usize) void {
+            set(machine, dst, @round(reg(machine, src_a)));
+        }
+        fn unary_truncate(machine: *vm, dst: usize, src_a: usize, _: usize) void {
+            set(machine, dst, @trunc(reg(machine, src_a)));
+        }
+
+        fn binary_add(machine: *vm, dst: usize, src_a: usize, src_b: usize) void {
+            set(machine, dst, reg(machine, src_a) + reg(machine, src_b));
+        }
+        fn binary_sub(machine: *vm, dst: usize, src_a: usize, src_b: usize) void {
+            set(machine, dst, reg(machine, src_a) - reg(machine, src_b));
+        }
+        fn binary_multiply(machine: *vm, dst: usize, src_a: usize, src_b: usize) void {
+            set(machine, dst, reg(machine, src_a) * reg(machine, src_b));
+        }
+        fn binary_divide(machine: *vm, dst: usize, src_a: usize, src_b: usize) void {
+            set(machine, dst, reg(machine, src_a) / reg(machine, src_b));
+        }
+        fn binary_remainder(machine: *vm, dst: usize, src_a: usize, src_b: usize) void {
+            set(machine, dst, @rem(reg(machine, src_a), reg(machine, src_b)));
+        }
+        fn binary_minimum(machine: *vm, dst: usize, src_a: usize, src_b: usize) void {
+            set(machine, dst, @min(reg(machine, src_a), reg(machine, src_b)));
+        }
+        fn binary_maximum(machine: *vm, dst: usize, src_a: usize, src_b: usize) void {
+            set(machine, dst, @max(reg(machine, src_a), reg(machine, src_b)));
+        }
+    };
+}
+
+pub const bytecode = assembly(.{ .control = op.control, .int_math = op.int_math, .float_math = op.float_math }, .{ small, standard, wide, huge, imm_val, imm_val_wide, jmp_loc_abs, jmp_loc_rel, jmp_loc_ind, imm_val_dual, reg_dual, tri, jmp_cond_abs, jmp_cond_rel, task_spawn_fmt }, .{ .control = control_operators, .int_math = int_math_operators, .float_math = float_math_operators });
 
 pub fn assembly(comptime operation_sets: anytype, comptime formats: anytype, comptime logic_map: anytype) type {
     const operation_map = struct {
@@ -488,7 +816,21 @@ pub fn assembly(comptime operation_sets: anytype, comptime formats: anytype, com
             current: state,
             memory: *tape,
             constants: []const u64,
+            data: []const inkb.data_entry,
+            code: []const u8,
             halted: bool,
+            heap_top: usize,
+            free_head: usize,
+            foreign_names: []const []const u8,
+            foreign_resolver: foreign.Resolver,
+            allocator: mem_allocator,
+            scheduler: ?*runtime.scheduler,
+            current_task_id: runtime.task_id,
+            suspended: bool,
+            suspend_op_id: u32,
+            suspend_has_op: bool,
+            pending_op_id: u32,
+            pending_op_pc: usize,
             arg_base: usize,
             arg_base_valid: bool,
             last_inst_size: usize,
@@ -498,16 +840,45 @@ pub fn assembly(comptime operation_sets: anytype, comptime formats: anytype, com
                 this.current.sp += 1;
             }
 
-            pub fn init(start: state, memory: *tape, constants: []const u64) self {
+            pub fn init(
+                start: state,
+                memory: *tape,
+                constants: []const u64,
+                data: []const inkb.data_entry,
+                foreign_names: []const []const u8,
+                allocator: mem_allocator,
+                scheduler: ?*runtime.scheduler,
+                lib_dir: ?[]const u8,
+                code: []const u8,
+            ) self {
+                const null_ptr = std.math.maxInt(usize);
                 return .{
                     .current = start,
                     .memory = memory,
                     .constants = constants,
+                    .data = data,
+                    .code = code,
                     .halted = false,
+                    .heap_top = memory.data.len,
+                    .free_head = null_ptr,
+                    .foreign_names = foreign_names,
+                    .foreign_resolver = foreign.Resolver.init(allocator, lib_dir),
+                    .allocator = allocator,
+                    .scheduler = scheduler,
+                    .current_task_id = 0,
+                    .suspended = false,
+                    .suspend_op_id = 0,
+                    .suspend_has_op = false,
+                    .pending_op_id = 0,
+                    .pending_op_pc = 0,
                     .arg_base = start.sp,
                     .arg_base_valid = false,
                     .last_inst_size = 0,
                 };
+            }
+
+            pub fn deinit(this: *self) void {
+                this.foreign_resolver.deinit();
             }
 
             pub fn step(this: *self, code: []const u8, budget: usize) *state {
@@ -519,16 +890,19 @@ pub fn assembly(comptime operation_sets: anytype, comptime formats: anytype, com
                     const raw = code[this.current.pc];
                     const format_index = raw & format_mask;
                     inline for (sorted_formats, 0..) |format, idx| {
-                    if (idx == format_index) {
-                        const size = @sizeOf(format);
-                        const inst = mem.bytesToValue(format, code[this.current.pc..][0..size]);
-                        const opcode_val: usize = @intCast(inst.opcode);
-                        const operation: u8 = @intCast(opcode_val >> @intCast(format_bits));
-                        const pc_start = this.current.pc;
-                        this.last_inst_size = size;
-                        this.dispatch(operation, inst);
-                        if (this.current.pc == pc_start) {
+                        if (idx == format_index) {
+                            const size = @sizeOf(format);
+                            const inst = mem.bytesToValue(format, code[this.current.pc..][0..size]);
+                            const opcode_val: usize = @intCast(inst.opcode);
+                            const operation: u8 = @intCast(opcode_val >> @intCast(format_bits));
+                            const pc_start = this.current.pc;
+                            this.last_inst_size = size;
+                            this.dispatch(operation, inst);
+                            if (this.current.pc == pc_start and !this.suspended) {
                                 this.current.pc += size;
+                            }
+                            if (this.suspended) {
+                                return &this.current;
                             }
                             health -= 1;
                             break;
@@ -537,7 +911,43 @@ pub fn assembly(comptime operation_sets: anytype, comptime formats: anytype, com
                 }
                 return &this.current;
             }
+
+            pub fn set_task_context(this: *self, scheduler_ptr: ?*runtime.scheduler, task_id: runtime.task_id) void {
+                this.scheduler = scheduler_ptr;
+                this.current_task_id = task_id;
+            }
+
+            pub fn suspend_op(this: *self, op_id: u32) void {
+                this.suspend_op_id = op_id;
+                this.suspend_has_op = true;
+                this.suspended = true;
+            }
+
+            pub fn suspend_manual(this: *self) void {
+                this.suspended = true;
+                this.suspend_has_op = false;
+                this.suspend_op_id = 0;
+            }
+
+            pub const suspend_state = union(enum) { none, op: u32, manual };
+
+            pub fn take_suspend(this: *self) suspend_state {
+                if (!this.suspended) return .none;
+                const has_op = this.suspend_has_op;
+                const op_id = this.suspend_op_id;
+                this.suspended = false;
+                this.suspend_has_op = false;
+                this.suspend_op_id = 0;
+                return if (has_op) .{ .op = op_id } else .manual;
+            }
+
+            pub fn return_value(this: *self) u64 {
+                return this.memory.read(0);
+            }
             pub fn dispatch(this: *self, operation: u8, instruction_payload: anytype) void {
+                comptime {
+                    @setEvalBranchQuota(200000);
+                }
                 comptime var opcode_base_index = 0;
 
                 inline for (operation_map.sets) |instruction_set| {
@@ -696,6 +1106,16 @@ test "bytecode execute" {
     try assembler.emit(op.control.halt, .{ .src = 0, .dst = 0 });
     const bytes = assembler.finish();
     var test_tape = @import("./core.zig").machine.tape.init(std.testing.allocator, 64);
-    var exe = bytecode.executor.init(.{ .pc = 0, .fp = 0, .sp = 1 }, &test_tape, &[_]u64{});
+    var exe = bytecode.executor.init(
+        .{ .pc = 0, .fp = 0, .sp = 1 },
+        &test_tape,
+        &[_]u64{},
+        &[_]inkb.data_entry{},
+        &[_][]const u8{},
+        std.heap.page_allocator,
+        null,
+        null,
+        bytes,
+    );
     _ = exe.step(bytes, 20);
 }

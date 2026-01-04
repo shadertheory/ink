@@ -1,0 +1,8 @@
+pyproject.toml
+pygments_ink/__init__.py
+pygments_ink.egg-info/PKG-INFO
+pygments_ink.egg-info/SOURCES.txt
+pygments_ink.egg-info/dependency_links.txt
+pygments_ink.egg-info/entry_points.txt
+pygments_ink.egg-info/requires.txt
+pygments_ink.egg-info/top_level.txt

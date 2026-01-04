@@ -6,7 +6,7 @@ pub const token = struct {
     where: ink.location,
     what: ink.identifier,
 
-    pub const kind = enum { end_of_file, illegal, indent, dedent, new_line, identifier, string, number, comma, colon, dot, function, constant, variable, expr_if, expr_else, expr_match, stmt_return, logical_or, logical_and, logical_xor, logical_not, logical_false, logical_true, paren_left, paren_right, bracket_left, bracket_right, assign, plus, minus, asterisk, slash, bang, less_than, greater_than, less_or_equal, greater_or_equal, equal, not_equal, @"enum", type, arrow, question, question_dot, coalesce, range, range_inclusive, double_colon, pipe, in, sum, trait, concept, impl, @"for", @"struct", where, self, this, requires };
+    pub const kind = enum { end_of_file, illegal, indent, dedent, new_line, identifier, string, number, comma, colon, dot, ellipsis, hash, at_sign, function, constant, variable, expr_if, expr_else, expr_match, expr_select, case, detached, stmt_return, spawn, await, @"try", logical_or, logical_and, logical_xor, logical_not, logical_false, logical_true, paren_left, paren_right, bracket_left, bracket_right, assign, plus_assign, minus_assign, asterisk_assign, slash_assign, percent_assign, ampersand_assign, bar_assign, caret_assign, shift_left_assign, shift_right_assign, plus, minus, asterisk, slash, percent, ampersand, bar, caret, shift_left, shift_right, bang, tilde, less_than, greater_than, less_or_equal, greater_or_equal, equal, not_equal, @"enum", type, arrow, question, question_dot, coalesce, range, range_inclusive, double_colon, pipe, in, trait, impl, as, import, from, with, dynamic, @"comptime", @"for", @"struct", where, self, this, requires, dyn };
 
     pub fn precedence_of(this: kind) precedence {
         inline for (precedence_entries) |entry| {
@@ -22,7 +22,11 @@ pub const precedence = enum(u8) {
     pipe,
     logical_or,
     logical_and,
+    bit_or,
+    bit_xor,
+    bit_and,
     comparison,
+    shift,
     sum,
     product,
     unary,

@@ -1,4 +1,4 @@
-pub const fundamental = enum { i64, f32, unit, identifier, unary, binary };
+pub const fundamental = enum { i64, f32, bool, unit, identifier, unary, binary };
 
 pub const type_ref = union(enum) {
     builtin: fundamental,
@@ -39,11 +39,15 @@ const ref_node_ptr_opt = type_ref{ .opt = &ref_node_ptr };
 const ref_node_ptr_slice = type_ref{ .slice = .{ .child = &ref_node_ptr, .@"const" = true } };
 
 const ref_identifier = type_ref{ .builtin = .identifier };
+const ref_identifier_opt = type_ref{ .opt = &ref_identifier };
 const ref_binary = type_ref{ .builtin = .binary };
 const ref_unary = type_ref{ .builtin = .unary };
+const ref_bool = type_ref{ .builtin = .bool };
 
 const ref_match_arm = type_ref{ .named = "match_arm" };
 const ref_match_arm_slice = type_ref{ .slice = .{ .child = &ref_match_arm, .@"const" = true } };
+const ref_select_arm = type_ref{ .named = "select_arm" };
+const ref_select_arm_slice = type_ref{ .slice = .{ .child = &ref_select_arm, .@"const" = true } };
 
 const ref_generic_param = type_ref{ .named = "generic_param" };
 const ref_generic_param_slice = type_ref{ .slice = .{ .child = &ref_generic_param, .@"const" = true } };
@@ -66,7 +70,12 @@ const ref_struct_field_slice = type_ref{ .slice = .{ .child = &ref_struct_field,
 const ref_function_decl = type_ref{ .named = "function_decl" };
 const ref_function_decl_slice = type_ref{ .slice = .{ .child = &ref_function_decl, .@"const" = true } };
 
+const ref_associate = type_ref{ .named = "associate" };
+const ref_associate_slice = type_ref{ .slice = .{ .child = &ref_associate, .@"const" = true } };
+
 const ref_identifier_slice = type_ref{ .slice = .{ .child = &ref_identifier, .@"const" = true } };
+const ref_attribute = type_ref{ .named = "attribute" };
+const ref_attribute_slice = type_ref{ .slice = .{ .child = &ref_attribute, .@"const" = true } };
 
 pub const field = struct {
     name: []const u8,
@@ -83,19 +92,31 @@ pub const specification = [_]type_spec{
         .name = "generic_kind",
         .tags = &.{ "type", "value" },
     } },
+    .{ .@"struct" = .{ .name = "attribute", .fields = &.{
+        .{ .name = "name", .ty = ref_identifier },
+        .{ .name = "args", .ty = ref_node_ptr_slice },
+    } } },
     .{ .@"struct" = .{ .name = "match_arm", .fields = &.{
         .{ .name = "pattern", .ty = ref_node_ptr },
         .{ .name = "body", .ty = ref_node_ptr },
     } } },
+    .{ .@"struct" = .{ .name = "select_arm", .fields = &.{
+        .{ .name = "name", .ty = ref_identifier_opt },
+        .{ .name = "task", .ty = ref_node_ptr },
+        .{ .name = "body", .ty = ref_node_ptr },
+        .{ .name = "detached", .ty = ref_bool },
+    } } },
     .{ .@"struct" = .{ .name = "param", .fields = &.{
         .{ .name = "name", .ty = ref_identifier },
         .{ .name = "ty", .ty = ref_node_ptr },
+        .{ .name = "variadic", .ty = ref_bool },
     } } },
     .{ .@"struct" = .{ .name = "where_req", .fields = &.{
         .{ .name = "name", .ty = ref_identifier },
         .{ .name = "constraint", .ty = ref_node_ptr },
     } } },
     .{ .@"struct" = .{ .name = "function_decl", .fields = &.{
+        .{ .name = "attributes", .ty = ref_attribute_slice },
         .{ .name = "name", .ty = ref_identifier },
         .{ .name = "generics", .ty = ref_generic_param_slice },
         .{ .name = "params", .ty = ref_param_slice },
@@ -115,6 +136,7 @@ pub const specification = [_]type_spec{
     .{ .@"struct" = .{
         .name = "struct_decl",
         .fields = &.{
+            .{ .name = "attributes", .ty = ref_attribute_slice },
             .{ .name = "name", .ty = ref_identifier },
             .{ .name = "generics", .ty = ref_generic_param_slice },
             .{ .name = "fields", .ty = ref_struct_field_slice },
@@ -124,6 +146,7 @@ pub const specification = [_]type_spec{
     .{ .@"struct" = .{
         .name = "impl_decl",
         .fields = &.{
+            .{ .name = "attributes", .ty = ref_attribute_slice },
             .{ .name = "by_trait", .ty = ref_identifier },
             .{ .name = "for_struct", .ty = ref_identifier },
             .{ .name = "functions", .ty = ref_function_decl_slice },
@@ -131,8 +154,29 @@ pub const specification = [_]type_spec{
     } },
 
     .{ .@"struct" = .{
+        .name = "import_decl",
+        .fields = &.{
+            .{ .name = "attributes", .ty = ref_attribute_slice },
+            .{ .name = "module", .ty = ref_identifier },
+            .{ .name = "item", .ty = ref_identifier_opt },
+            .{ .name = "alias", .ty = ref_identifier_opt },
+        },
+    } },
+
+    .{ .@"struct" = .{
+        .name = "type_decl",
+        .fields = &.{
+            .{ .name = "attributes", .ty = ref_attribute_slice },
+            .{ .name = "name", .ty = ref_identifier },
+            .{ .name = "generics", .ty = ref_generic_param_slice },
+            .{ .name = "value", .ty = ref_node_ptr },
+        },
+    } },
+
+    .{ .@"struct" = .{
         .name = "const_decl",
         .fields = &.{
+            .{ .name = "attributes", .ty = ref_attribute_slice },
             .{ .name = "name", .ty = ref_identifier },
             .{ .name = "ty", .ty = ref_node_ptr_opt },
             .{ .name = "value", .ty = ref_node_ptr },
@@ -142,6 +186,7 @@ pub const specification = [_]type_spec{
     .{ .@"struct" = .{
         .name = "var_decl",
         .fields = &.{
+            .{ .name = "attributes", .ty = ref_attribute_slice },
             .{ .name = "name", .ty = ref_identifier },
             .{ .name = "ty", .ty = ref_node_ptr_opt },
             .{ .name = "value", .ty = ref_node_ptr },
@@ -159,6 +204,7 @@ pub const specification = [_]type_spec{
     .{ .@"struct" = .{
         .name = "associated_type_decl",
         .fields = &.{
+            .{ .name = "attributes", .ty = ref_attribute_slice },
             .{ .name = "name", .ty = ref_identifier },
             .{ .name = "value", .ty = ref_node_ptr_opt },
         },
@@ -167,27 +213,11 @@ pub const specification = [_]type_spec{
     .{ .@"struct" = .{
         .name = "trait_decl",
         .fields = &.{
+            .{ .name = "attributes", .ty = ref_attribute_slice },
             .{ .name = "name", .ty = ref_identifier },
             .{ .name = "generics", .ty = ref_generic_param_slice },
             .{ .name = "items", .ty = ref_trait_item_slice },
-        },
-    } },
-
-    .{ .@"struct" = .{
-        .name = "concept_decl",
-        .fields = &.{
-            .{ .name = "name", .ty = ref_identifier },
-            .{ .name = "generics", .ty = ref_generic_param_slice },
             .{ .name = "requires", .ty = ref_node_ptr_slice },
-        },
-    } },
-
-    .{ .@"struct" = .{
-        .name = "sum_decl",
-        .fields = &.{
-            .{ .name = "name", .ty = ref_identifier },
-            .{ .name = "generics", .ty = ref_generic_param_slice },
-            .{ .name = "variants", .ty = ref_sum_variant_slice },
         },
     } },
 
@@ -202,8 +232,10 @@ pub const specification = [_]type_spec{
     .{ .@"struct" = .{
         .name = "enum_decl",
         .fields = &.{
+            .{ .name = "attributes", .ty = ref_attribute_slice },
             .{ .name = "name", .ty = ref_identifier },
-            .{ .name = "cases", .ty = ref_identifier_slice },
+            .{ .name = "generics", .ty = ref_generic_param_slice },
+            .{ .name = "variants", .ty = ref_sum_variant_slice },
         },
     } },
 
@@ -214,6 +246,7 @@ pub const specification = [_]type_spec{
             .{ .name = "kind", .ty = type_ref{ .named = "generic_kind" } },
             .{ .name = "constraint", .ty = ref_node_ptr_opt },
             .{ .name = "default", .ty = ref_node_ptr_opt },
+            .{ .name = "is_pack", .ty = ref_bool },
         },
     } },
 
@@ -250,11 +283,39 @@ pub const specification = [_]type_spec{
             .{ .name = "arms", .ty = ref_match_arm_slice },
         },
     } },
+    .{ .@"struct" = .{
+        .name = "select_expr",
+        .fields = &.{
+            .{ .name = "arms", .ty = ref_select_arm_slice },
+        },
+    } },
+    .{ .@"struct" = .{
+        .name = "with_expr",
+        .fields = &.{
+            .{ .name = "name", .ty = ref_identifier },
+            .{ .name = "body", .ty = ref_node_ptr },
+        },
+    } },
 
     .{ .@"struct" = .{
         .name = "block_expr",
         .fields = &.{
             .{ .name = "items", .ty = ref_node_ptr_slice },
+        },
+    } },
+
+    .{ .@"struct" = .{
+        .name = "record_expr",
+        .fields = &.{
+            .{ .name = "items", .ty = ref_associate_slice },
+        },
+    } },
+
+    .{ .@"struct" = .{
+        .name = "intrinsic_call",
+        .fields = &.{
+            .{ .name = "name", .ty = ref_identifier },
+            .{ .name = "args", .ty = ref_node_ptr_slice },
         },
     } },
 
@@ -280,6 +341,7 @@ pub const specification = [_]type_spec{
             .{ .name = "self", .ty = type_ref{ .builtin = .unit } },
             .{ .name = "name", .ty = ref_identifier },
             .{ .name = "optional", .ty = ref_node_ptr },
+            .{ .name = "dyn", .ty = ref_node_ptr },
             .{ .name = "applied", .ty = type_ref{ .named = "type_applied" } },
         },
     } },
@@ -290,10 +352,10 @@ pub const specification = [_]type_spec{
             .{ .name = "function", .ty = type_ref{ .named = "function_decl" } },
             .{ .name = "struct", .ty = type_ref{ .named = "struct_decl" } },
             .{ .name = "trait", .ty = type_ref{ .named = "trait_decl" } },
-            .{ .name = "concept", .ty = type_ref{ .named = "concept_decl" } },
-            .{ .name = "sum", .ty = type_ref{ .named = "sum_decl" } },
             .{ .name = "enum", .ty = type_ref{ .named = "enum_decl" } },
             .{ .name = "impl", .ty = type_ref{ .named = "impl_decl" } },
+            .{ .name = "import", .ty = type_ref{ .named = "import_decl" } },
+            .{ .name = "type_alias", .ty = type_ref{ .named = "type_decl" } },
             .{ .name = "const", .ty = type_ref{ .named = "const_decl" } },
             .{ .name = "var", .ty = type_ref{ .named = "var_decl" } },
         },
@@ -312,7 +374,11 @@ pub const node_union = union_spec{
         .{ .name = "binary", .ty = type_ref{ .named = "binary_expr" } },
         .{ .name = "if_expr", .ty = type_ref{ .named = "if_expr" } },
         .{ .name = "match_expr", .ty = type_ref{ .named = "match_expr" } },
+        .{ .name = "select_expr", .ty = type_ref{ .named = "select_expr" } },
+        .{ .name = "with_expr", .ty = type_ref{ .named = "with_expr" } },
         .{ .name = "block", .ty = type_ref{ .named = "block_expr" } },
+        .{ .name = "record", .ty = type_ref{ .named = "record_expr" } },
+        .{ .name = "intrinsic", .ty = type_ref{ .named = "intrinsic_call" } },
         .{ .name = "associate", .ty = type_ref{ .named = "associate" } },
         .{ .name = "type", .ty = type_ref{ .named = "type_expr" } },
     },
@@ -328,6 +394,11 @@ pub const binarys = [_]binary{
     .{ .name = "mul", .ir_name = "mul" },
     .{ .name = "div", .ir_name = "div" },
     .{ .name = "mod", .ir_name = "mod" },
+    .{ .name = "bit_and", .ir_name = "bit_and" },
+    .{ .name = "bit_or", .ir_name = "bit_or" },
+    .{ .name = "bit_xor", .ir_name = "bit_xor" },
+    .{ .name = "shl", .ir_name = "shl" },
+    .{ .name = "shr", .ir_name = "shr" },
     .{ .name = "min", .ir_name = "min" },
     .{ .name = "max", .ir_name = "max" },
     .{ .name = "equal", .ir_name = "equal" },
@@ -339,17 +410,31 @@ pub const binarys = [_]binary{
     .{ .name = "call", .ir_name = "call" },
     .{ .name = "pipe", .ir_name = "pipe" },
     .{ .name = "access", .ir_name = "access" },
+    .{ .name = "scope_access", .ir_name = "scope_access" },
     .{ .name = "coalesce", .ir_name = "coalesce" },
     .{ .name = "logical_or", .ir_name = "logical_or" },
     .{ .name = "logical_and", .ir_name = "logical_and" },
     .{ .name = "logical_xor", .ir_name = "logical_xor" },
     .{ .name = "assign", .ir_name = "assign" },
+    .{ .name = "assign_add", .ir_name = "assign_add" },
+    .{ .name = "assign_sub", .ir_name = "assign_sub" },
+    .{ .name = "assign_mul", .ir_name = "assign_mul" },
+    .{ .name = "assign_div", .ir_name = "assign_div" },
+    .{ .name = "assign_mod", .ir_name = "assign_mod" },
+    .{ .name = "assign_bit_and", .ir_name = "assign_bit_and" },
+    .{ .name = "assign_bit_or", .ir_name = "assign_bit_or" },
+    .{ .name = "assign_bit_xor", .ir_name = "assign_bit_xor" },
+    .{ .name = "assign_shl", .ir_name = "assign_shl" },
+    .{ .name = "assign_shr", .ir_name = "assign_shr" },
+    .{ .name = "as", .ir_name = "as" },
     .{ .name = "index", .ir_name = "index" },
 };
 
 pub const unarys = [_]unary{
     .{ .name = "neg", .ir_name = "neg" },
     .{ .name = "not", .ir_name = "not" },
+    .{ .name = "bit_not", .ir_name = "bit_not" },
+    .{ .name = "comptime", .ir_name = "comptime" },
     .{ .name = "abs", .ir_name = "abs" },
     .{ .name = "sqrt", .ir_name = "sqrt" },
     .{ .name = "sin", .ir_name = "sin" },
@@ -362,7 +447,12 @@ pub const unarys = [_]unary{
     .{ .name = "ceil", .ir_name = "ceil" },
     .{ .name = "round", .ir_name = "round" },
     .{ .name = "trunc", .ir_name = "trunc" },
+    .{ .name = "dynamic", .ir_name = "dynamic" },
     .{ .name = "ret", .ir_name = "ret" },
+    .{ .name = "spawn", .ir_name = "spawn" },
+    .{ .name = "await", .ir_name = "await" },
+    .{ .name = "try", .ir_name = "try" },
+    .{ .name = "unwrap_optional", .ir_name = "unwrap_optional" },
 };
 
 pub const keyword_lexemes = [_]lexeme{
@@ -372,7 +462,15 @@ pub const keyword_lexemes = [_]lexeme{
     .{ .text = "if", .kind = "expr_if" },
     .{ .text = "else", .kind = "expr_else" },
     .{ .text = "match", .kind = "expr_match" },
+    .{ .text = "select", .kind = "expr_select" },
+    .{ .text = "case", .kind = "case" },
+    .{ .text = "detached", .kind = "detached" },
     .{ .text = "return", .kind = "stmt_return" },
+    .{ .text = "dynamic", .kind = "dynamic" },
+    .{ .text = "comptime", .kind = "comptime" },
+    .{ .text = "spawn", .kind = "spawn" },
+    .{ .text = "await", .kind = "await" },
+    .{ .text = "try", .kind = "try" },
     .{ .text = "or", .kind = "logical_or" },
     .{ .text = "and", .kind = "logical_and" },
     .{ .text = "xor", .kind = "logical_xor" },
@@ -380,9 +478,12 @@ pub const keyword_lexemes = [_]lexeme{
     .{ .text = "false", .kind = "logical_false" },
     .{ .text = "true", .kind = "logical_true" },
     .{ .text = "trait", .kind = "trait" },
-    .{ .text = "concept", .kind = "concept" },
     .{ .text = "in", .kind = "in" },
     .{ .text = "impl", .kind = "impl" },
+    .{ .text = "as", .kind = "as" },
+    .{ .text = "import", .kind = "import" },
+    .{ .text = "from", .kind = "from" },
+    .{ .text = "with", .kind = "with" },
     .{ .text = "for", .kind = "for" },
     .{ .text = "struct", .kind = "struct" },
     .{ .text = "self", .kind = "self" },
@@ -390,11 +491,22 @@ pub const keyword_lexemes = [_]lexeme{
     .{ .text = "type", .kind = "type" },
     .{ .text = "enum", .kind = "enum" },
     .{ .text = "where", .kind = "where" },
-    .{ .text = "sum", .kind = "sum" },
     .{ .text = "requires", .kind = "requires" },
+    .{ .text = "dyn", .kind = "dyn" },
 };
 
 pub const symbol_lexemes = [_]lexeme{
+    .{ .text = "...", .kind = "ellipsis" },
+    .{ .text = "<<=", .kind = "shift_left_assign" },
+    .{ .text = ">>=", .kind = "shift_right_assign" },
+    .{ .text = "+=", .kind = "plus_assign" },
+    .{ .text = "-=", .kind = "minus_assign" },
+    .{ .text = "*=", .kind = "asterisk_assign" },
+    .{ .text = "/=", .kind = "slash_assign" },
+    .{ .text = "%=", .kind = "percent_assign" },
+    .{ .text = "&=", .kind = "ampersand_assign" },
+    .{ .text = "|=", .kind = "bar_assign" },
+    .{ .text = "^=", .kind = "caret_assign" },
     .{ .text = "..=", .kind = "range_inclusive" },
     .{ .text = "->", .kind = "arrow" },
     .{ .text = "=>", .kind = "arrow" },
@@ -402,11 +514,18 @@ pub const symbol_lexemes = [_]lexeme{
     .{ .text = "!=", .kind = "not_equal" },
     .{ .text = ">=", .kind = "greater_or_equal" },
     .{ .text = "<=", .kind = "less_or_equal" },
+    .{ .text = "<<", .kind = "shift_left" },
+    .{ .text = ">>", .kind = "shift_right" },
     .{ .text = "?.", .kind = "question_dot" },
     .{ .text = "??", .kind = "coalesce" },
     .{ .text = "::", .kind = "double_colon" },
     .{ .text = "..", .kind = "range" },
     .{ .text = "|>", .kind = "pipe" },
+    .{ .text = "^", .kind = "caret" },
+    .{ .text = "|", .kind = "bar" },
+    .{ .text = "&", .kind = "ampersand" },
+    .{ .text = "~", .kind = "tilde" },
+    .{ .text = "%", .kind = "percent" },
     .{ .text = "?", .kind = "question" },
     .{ .text = "]", .kind = "bracket_right" },
     .{ .text = "[", .kind = "bracket_left" },
@@ -422,6 +541,8 @@ pub const symbol_lexemes = [_]lexeme{
     .{ .text = ">", .kind = "greater_than" },
     .{ .text = ",", .kind = "comma" },
     .{ .text = ".", .kind = "dot" },
+    .{ .text = "#", .kind = "hash" },
+    .{ .text = "@", .kind = "at_sign" },
     .{ .text = "-", .kind = "minus" },
 };
 
@@ -452,22 +573,39 @@ pub const generic_value_kinds = [_][]const u8{
 
 pub const parser_precedence = [_]struct { kind: []const u8, precedence: []const u8 }{
     .{ .kind = "assign", .precedence = "assignment" },
+    .{ .kind = "plus_assign", .precedence = "assignment" },
+    .{ .kind = "minus_assign", .precedence = "assignment" },
+    .{ .kind = "asterisk_assign", .precedence = "assignment" },
+    .{ .kind = "slash_assign", .precedence = "assignment" },
+    .{ .kind = "percent_assign", .precedence = "assignment" },
+    .{ .kind = "ampersand_assign", .precedence = "assignment" },
+    .{ .kind = "bar_assign", .precedence = "assignment" },
+    .{ .kind = "caret_assign", .precedence = "assignment" },
+    .{ .kind = "shift_left_assign", .precedence = "assignment" },
+    .{ .kind = "shift_right_assign", .precedence = "assignment" },
     .{ .kind = "pipe", .precedence = "pipe" },
     .{ .kind = "logical_or", .precedence = "logical_or" },
     .{ .kind = "logical_xor", .precedence = "logical_or" },
     .{ .kind = "logical_and", .precedence = "logical_and" },
+    .{ .kind = "bar", .precedence = "bit_or" },
+    .{ .kind = "caret", .precedence = "bit_xor" },
+    .{ .kind = "ampersand", .precedence = "bit_and" },
     .{ .kind = "less_than", .precedence = "comparison" },
     .{ .kind = "greater_than", .precedence = "comparison" },
     .{ .kind = "less_or_equal", .precedence = "comparison" },
     .{ .kind = "greater_or_equal", .precedence = "comparison" },
     .{ .kind = "equal", .precedence = "comparison" },
     .{ .kind = "not_equal", .precedence = "comparison" },
+    .{ .kind = "shift_left", .precedence = "shift" },
+    .{ .kind = "shift_right", .precedence = "shift" },
     .{ .kind = "plus", .precedence = "sum" },
     .{ .kind = "minus", .precedence = "sum" },
     .{ .kind = "asterisk", .precedence = "product" },
     .{ .kind = "slash", .precedence = "product" },
+    .{ .kind = "percent", .precedence = "product" },
     .{ .kind = "bang", .precedence = "unary" },
     .{ .kind = "logical_not", .precedence = "unary" },
+    .{ .kind = "tilde", .precedence = "unary" },
     .{ .kind = "paren_left", .precedence = "call" },
     .{ .kind = "bracket_left", .precedence = "call" },
     .{ .kind = "dot", .precedence = "call" },
@@ -477,6 +615,12 @@ pub const parser_unary_ops = [_]struct { kind: []const u8, op: []const u8 }{
     .{ .kind = "minus", .op = "neg" },
     .{ .kind = "bang", .op = "not" },
     .{ .kind = "logical_not", .op = "not" },
+    .{ .kind = "tilde", .op = "bit_not" },
+    .{ .kind = "dynamic", .op = "dynamic" },
+    .{ .kind = "comptime", .op = "comptime" },
+    .{ .kind = "spawn", .op = "spawn" },
+    .{ .kind = "await", .op = "await" },
+    .{ .kind = "try", .op = "try" },
     .{ .kind = "stmt_return", .op = "ret" },
 };
 
@@ -485,6 +629,12 @@ pub const parser_binary_ops = [_]struct { kind: []const u8, op: []const u8 }{
     .{ .kind = "minus", .op = "sub" },
     .{ .kind = "asterisk", .op = "mul" },
     .{ .kind = "slash", .op = "div" },
+    .{ .kind = "percent", .op = "mod" },
+    .{ .kind = "ampersand", .op = "bit_and" },
+    .{ .kind = "bar", .op = "bit_or" },
+    .{ .kind = "caret", .op = "bit_xor" },
+    .{ .kind = "shift_left", .op = "shl" },
+    .{ .kind = "shift_right", .op = "shr" },
     .{ .kind = "pipe", .op = "pipe" },
     .{ .kind = "less_than", .op = "less_than" },
     .{ .kind = "greater_than", .op = "greater_than" },
@@ -500,19 +650,25 @@ pub const parser_prefix_kinds = [_][]const u8{
     "identifier",
     "expr_if",
     "expr_match",
+    "expr_select",
+    "with",
     "function",
     "struct",
     "trait",
-    "concept",
-    "sum",
     "enum",
     "impl",
     "stmt_return",
+    "dynamic",
+    "comptime",
+    "spawn",
+    "await",
+    "try",
     "paren_left",
     "bracket_left",
     "minus",
     "bang",
     "logical_not",
+    "tilde",
     "logical_true",
     "logical_false",
     "this",

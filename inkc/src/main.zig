@@ -1,10 +1,15 @@
 const std = @import("std");
 const ink = @import("ink");
+const inkc = @import("inkc");
+const graph = @import("graph.zig");
+
+const mem_allocator = std.mem.Allocator;
 
 const Cli = struct {
     const Options = struct {
-        input_path: []const u8,
+        input_path: ?[]const u8 = null,
         output_path: ?[]const u8 = null,
+        manifest_path: ?[]const u8 = null,
     };
 
     const ParseError = error{InvalidArgs};
@@ -12,6 +17,7 @@ const Cli = struct {
     fn parse(args: []const []const u8, p: *std.Io.Writer) ParseError!Options {
         var input_path: ?[]const u8 = null;
         var output_path: ?[]const u8 = null;
+        var manifest_path: ?[]const u8 = null;
 
         var i: usize = 1;
         while (i < args.len) : (i += 1) {
@@ -23,6 +29,16 @@ const Cli = struct {
                     return error.InvalidArgs;
                 }
                 output_path = args[i + 1];
+                i += 1;
+                continue;
+            }
+            if (std.mem.eql(u8, arg, "--manifest") or std.mem.eql(u8, arg, "-m")) {
+                if (i + 1 >= args.len) {
+                    p.print("error: missing value for {s}\n", .{arg}) catch {};
+                    print_usage(p, args[0]) catch {};
+                    return error.InvalidArgs;
+                }
+                manifest_path = args[i + 1];
                 i += 1;
                 continue;
             }
@@ -39,16 +55,27 @@ const Cli = struct {
             }
         }
 
-        if (input_path == null) {
+        if (manifest_path != null and input_path != null) {
+            p.print("error: cannot combine --manifest with a source file\n", .{}) catch {};
             print_usage(p, args[0]) catch {};
             return error.InvalidArgs;
         }
 
-        return .{ .input_path = input_path.?, .output_path = output_path };
+        if (manifest_path == null and input_path == null) {
+            print_usage(p, args[0]) catch {};
+            return error.InvalidArgs;
+        }
+
+        return .{
+            .input_path = input_path,
+            .output_path = output_path,
+            .manifest_path = manifest_path,
+        };
     }
 
     fn print_usage(p: *std.Io.Writer, exe_name: []const u8) !void {
         try p.print("Usage: {s} [-o <path>] <source_file>\n", .{exe_name});
+        try p.print("       {s} --manifest <path> [-o <path>]\n", .{exe_name});
     }
 };
 
@@ -199,6 +226,28 @@ pub fn printer(writer_type: type) type {
             try self.print_line(depth, ")", .{});
         }
 
+        fn print_associate_list(self: *Self, label: []const u8, items: []const ink.ast.associate, depth: usize) WriterError!void {
+            if (items.len == 0) {
+                try self.print_line(depth, "({s})", .{label});
+                return;
+            }
+
+            try self.print_indent(depth);
+            try self.writer.print("({s}\n", .{label});
+            for (items) |item| {
+                try self.print_indent(depth + 1);
+                try self.writer.print("(field\n", .{});
+                try self.print_identifier_field("name", item.name, depth + 2);
+                if (item.value) |ref| {
+                    try self.print_node_field("value", ref, depth + 2);
+                } else {
+                    try self.print_line(depth + 2, "(value nil)", .{});
+                }
+                try self.print_line(depth + 1, ")", .{});
+            }
+            try self.print_line(depth, ")", .{});
+        }
+
         fn print_function_decl_list(self: *Self, label: []const u8, functions: []const ink.ast.function_decl, depth: usize) WriterError!void {
             if (functions.len == 0) {
                 try self.print_line(depth, "({s})", .{label});
@@ -320,6 +369,12 @@ pub fn printer(writer_type: type) type {
                     try self.print_node_tree(deref_node(opt), depth + 2);
                     try self.print_line(depth + 1, ")", .{});
                 },
+                .dyn => |inner| {
+                    try self.print_indent(depth + 1);
+                    try self.writer.print("(dyn\n", .{});
+                    try self.print_node_tree(deref_node(inner), depth + 2);
+                    try self.print_line(depth + 1, ")", .{});
+                },
                 .applied => |ap| {
                     try self.print_indent(depth + 1);
                     try self.writer.print("(applied\n", .{});
@@ -362,29 +417,15 @@ pub fn printer(writer_type: type) type {
                         try self.print_identifier_field("name", trait_decl.name, depth + 1);
                         try self.print_generic_param_list("generics", trait_decl.generics, depth + 1);
                         try self.print_trait_items("items", trait_decl.items, depth + 1);
-                        try self.print_line(depth, ")", .{});
-                    },
-                    .concept => |concept_decl| {
-                        try self.print_indent(depth);
-                        try self.writer.print("(concept_decl\n", .{});
-                        try self.print_identifier_field("name", concept_decl.name, depth + 1);
-                        try self.print_generic_param_list("generics", concept_decl.generics, depth + 1);
-                        try self.print_node_list("requires", concept_decl.requires, depth + 1);
-                        try self.print_line(depth, ")", .{});
-                    },
-                    .sum => |sum_decl| {
-                        try self.print_indent(depth);
-                        try self.writer.print("(sum_decl\n", .{});
-                        try self.print_identifier_field("name", sum_decl.name, depth + 1);
-                        try self.print_generic_param_list("generics", sum_decl.generics, depth + 1);
-                        try self.print_sum_variant_list("variants", sum_decl.variants, depth + 1);
+                        try self.print_node_list("requires", trait_decl.requires, depth + 1);
                         try self.print_line(depth, ")", .{});
                     },
                     .@"enum" => |enum_decl| {
                         try self.print_indent(depth);
                         try self.writer.print("(enum_decl\n", .{});
                         try self.print_identifier_field("name", enum_decl.name, depth + 1);
-                        try self.print_identifier_list("cases", "case", enum_decl.cases, depth + 1);
+                        try self.print_generic_param_list("generics", enum_decl.generics, depth + 1);
+                        try self.print_sum_variant_list("variants", enum_decl.variants, depth + 1);
                         try self.print_line(depth, ")", .{});
                     },
                     .impl => |impl_decl| {
@@ -393,6 +434,22 @@ pub fn printer(writer_type: type) type {
                         try self.print_identifier_field("by_trait", impl_decl.by_trait, depth + 1);
                         try self.print_identifier_field("for_struct", impl_decl.for_struct, depth + 1);
                         try self.print_function_decl_list("functions", impl_decl.functions, depth + 1);
+                        try self.print_line(depth, ")", .{});
+                    },
+                    .import => |import_decl| {
+                        try self.print_indent(depth);
+                        try self.writer.print("(import_decl\n", .{});
+                        try self.print_identifier_field("module", import_decl.module, depth + 1);
+                        if (import_decl.item) |item| {
+                            try self.print_identifier_field("item", item, depth + 1);
+                        } else {
+                            try self.print_line(depth + 1, "(item nil)", .{});
+                        }
+                        if (import_decl.alias) |alias| {
+                            try self.print_identifier_field("alias", alias, depth + 1);
+                        } else {
+                            try self.print_line(depth + 1, "(alias nil)", .{});
+                        }
                         try self.print_line(depth, ")", .{});
                     },
                     .@"const" => |const_decl| {
@@ -453,6 +510,13 @@ pub fn printer(writer_type: type) type {
                     try self.print_line(depth, ")", .{});
                 },
 
+                .record => |rec| {
+                    try self.print_indent(depth);
+                    try self.writer.print("(record\n", .{});
+                    try self.print_associate_list("items", rec.items, depth + 1);
+                    try self.print_line(depth, ")", .{});
+                },
+
                 .associate => |assoc| {
                     try self.print_indent(depth);
                     try self.writer.print("(associate\n", .{});
@@ -482,10 +546,135 @@ fn lineCol(source: []const u8, pos: usize) struct { line: usize, column: usize }
     return .{ .line = line, .column = column };
 }
 
+fn severity_label(danger: ink.severity) []const u8 {
+    return switch (danger) {
+        .note => "note",
+        .warn => "warn",
+        .@"error" => "error",
+    };
+}
+
+fn print_diagnostics(writer: *std.Io.Writer, source: []const u8, path: []const u8, diags: []const ink.diagnostic) void {
+    for (diags) |diag| {
+        const label = severity_label(diag.danger);
+        if (diag.span) |span| {
+            const loc = lineCol(source, span.start);
+            writer.print("{s}:{d}:{d}: {s}: {s}\n", .{ path, loc.line, loc.column, label, diag.message }) catch {};
+        } else {
+            writer.print("{s}: {s}\n", .{ label, diag.message }) catch {};
+        }
+    }
+}
+
+fn default_output_path(allocator: mem_allocator, input_path: []const u8) ![]const u8 {
+    const ext = std.fs.path.extension(input_path);
+    if (ext.len == 0) {
+        return std.fmt.allocPrint(allocator, "{s}.inkb", .{input_path});
+    }
+    const stem = input_path[0 .. input_path.len - ext.len];
+    return std.fmt.allocPrint(allocator, "{s}.inkb", .{stem});
+}
+
+fn resolve_manifest_root(allocator: mem_allocator, path: []const u8) ![]const u8 {
+    const abs = try std.fs.cwd().realpathAlloc(allocator, path);
+    errdefer allocator.free(abs);
+    const stat = try std.fs.cwd().statFile(abs);
+    if (stat.kind == .directory) {
+        return abs;
+    }
+    const dir = std.fs.path.dirname(abs) orelse return error.InvalidArgs;
+    const duped = try allocator.dupe(u8, dir);
+    allocator.free(abs);
+    return duped;
+}
+
+fn resolve_output_path(
+    allocator: mem_allocator,
+    root_dir: []const u8,
+    name: []const u8,
+    provided: ?[]const u8,
+) ![]const u8 {
+    if (provided) |path| return try allocator.dupe(u8, path);
+    const out_dir = try std.fs.path.join(allocator, &.{ root_dir, ".quill", "lib" });
+    defer allocator.free(out_dir);
+    return std.fmt.allocPrint(allocator, "{s}/{s}.inkb", .{ out_dir, name });
+}
+
+fn print_diagnostics_simple(writer: *std.Io.Writer, diags: []const ink.diagnostic) void {
+    for (diags) |diag| {
+        const label = severity_label(diag.danger);
+        if (diag.span) |span| {
+            writer.print("{s}: {s} ({d}..{d})\n", .{ label, diag.message, span.start, span.end }) catch {};
+        } else {
+            writer.print("{s}: {s}\n", .{ label, diag.message }) catch {};
+        }
+    }
+}
+
+fn load_module_sources(
+    allocator: mem_allocator,
+    dir_path: []const u8,
+    next_id: *ink.compiler.source_id,
+    sources: *std.array_list.Managed(ink.compiler.source),
+    allocated_paths: *std.array_list.Managed([]const u8),
+) ![]ink.compiler.source_id {
+    var ids = std.array_list.Managed(ink.compiler.source_id).init(allocator);
+    errdefer ids.deinit();
+
+    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch |err| {
+        if (err == error.FileNotFound) {
+            return ids.toOwnedSlice();
+        }
+        return err;
+    };
+    defer dir.close();
+
+    var it = dir.iterate();
+    while (try it.next()) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".ink")) continue;
+        const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, entry.name });
+        try allocated_paths.append(path);
+        const text = try std.fs.cwd().readFileAlloc(allocator, path, 1_000_000);
+        const id = next_id.*;
+        next_id.* += 1;
+        try sources.append(.{ .id = id, .path = path, .text = text });
+        try ids.append(id);
+    }
+
+    return ids.toOwnedSlice();
+}
+
+fn find_std_dir(allocator: mem_allocator, input_path: []const u8) !?[]const u8 {
+    const abs_path = try std.fs.cwd().realpathAlloc(allocator, input_path);
+    defer allocator.free(abs_path);
+
+    var dir = std.fs.path.dirname(abs_path) orelse return null;
+    while (true) {
+        const candidate = try std.fmt.allocPrint(allocator, "{s}/std/src", .{dir});
+        if (std.fs.cwd().openDir(candidate, .{})) |found| {
+            var found_dir = found;
+            found_dir.close();
+            return candidate;
+        } else |err| {
+            if (err != error.FileNotFound and err != error.NotDir) {
+                allocator.free(candidate);
+                return err;
+            }
+        }
+        allocator.free(candidate);
+        const parent = std.fs.path.dirname(dir) orelse break;
+        if (std.mem.eql(u8, parent, dir)) break;
+        dir = parent;
+    }
+
+    return null;
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    const allocator: mem_allocator = gpa.allocator();
 
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
@@ -496,92 +685,135 @@ pub fn main() !void {
     const options = Cli.parse(args, err_writer) catch |err| {
         if (err == error.InvalidArgs) {
             err_writer.flush() catch {};
-            return;
+            std.process.exit(1);
         }
         return err;
     };
 
-    const source = try std.fs.cwd().readFileAlloc(allocator, options.input_path, 1_000_000);
-    defer allocator.free(source);
+    if (options.manifest_path) |manifest_path| {
+        const root_dir = try resolve_manifest_root(allocator, manifest_path);
+        defer allocator.free(root_dir);
 
-    _ = options.output_path;
-
-    var lexer = try ink.lexer.init(source);
-    var tokens: [1024]ink.token = undefined;
-    var i: usize = 0;
-
-    while (true) {
-        if (i >= tokens.len) break;
-
-        if (try lexer.next()) |tok| {
-            tokens[i] = tok;
-            i += 1;
-            if (tok.which == .end_of_file) break;
-        } else {
-            break;
-    }
-    }
-
-    var parse_result = try ink.peg_parser.parse(allocator, tokens[0..i]);
-    defer parse_result.deinit();
-
-    if (!parse_result.ok) {
-        if (parse_result.@"error") |info| {
-            const token_index = info.position;
-            const loc_index = if (token_index < i) tokens[token_index].where.start else source.len;
-            const loc = lineCol(source, loc_index);
-            err_writer.print("parse error at {d}:{d}\n", .{ loc.line, loc.column }) catch {};
-            if (info.expected.len != 0) {
-                err_writer.print("expected", .{}) catch {};
-                for (info.expected, 0..) |kind, idx| {
-                    const sep = if (idx == 0) " " else ", ";
-                    err_writer.print("{s}{s}", .{ sep, @tagName(kind) }) catch {};
-                }
-                err_writer.print("\n", .{}) catch {};
+        var dep_graph = graph.build(allocator, root_dir) catch |err| {
+            switch (err) {
+                error.FileNotFound => err_writer.print("error: package.ink not found under {s}\n", .{root_dir}) catch {},
+                error.MissingName => err_writer.writeAll("error: package.ink missing package name\n") catch {},
+                error.MissingVersion => err_writer.writeAll("error: package.ink missing package version\n") catch {},
+                error.MissingModuleSources => err_writer.writeAll("error: module missing sources\n") catch {},
+                error.MissingDepPath => err_writer.writeAll("error: dependency missing path\n") catch {},
+                error.MissingRegistryName => err_writer.writeAll("error: registry missing name\n") catch {},
+                error.MissingRegistryUrl => err_writer.writeAll("error: registry missing url\n") catch {},
+                error.InvalidManifest => err_writer.writeAll("error: invalid package.ink format\n") catch {},
+                error.MissingSources => err_writer.writeAll("error: module sources not found\n") catch {},
+                error.InvalidSources => err_writer.writeAll("error: invalid module sources path\n") catch {},
+                error.DuplicateModuleName => err_writer.writeAll("error: duplicate module name\n") catch {},
+                error.RegistryUnavailable => err_writer.writeAll("error: registry dependencies are not supported yet\n") catch {},
+                else => return err,
             }
-            if (info.found) |found| {
-                err_writer.print("found {s}\n", .{@tagName(found)}) catch {};
-            } else {
-                err_writer.print("found end_of_file\n", .{}) catch {};
-            }
-        } else {
-            err_writer.print("parse error\n", .{}) catch {};
+            err_writer.flush() catch {};
+            return err;
+        };
+        defer dep_graph.deinit();
+
+        const output_path = try resolve_output_path(allocator, root_dir, dep_graph.root_module, options.output_path);
+        defer allocator.free(output_path);
+
+        try std.fs.cwd().makePath(std.fs.path.dirname(output_path) orelse ".");
+
+        const request = ink.compiler.compile_request{
+            .sources = dep_graph.sources.items,
+            .modules = dep_graph.modules.items,
+            .root_module = dep_graph.root_module,
+        };
+
+        var result = try inkc.compile_to_inkb(allocator, request, output_path);
+        defer result.deinit(allocator);
+
+        if (result.diagnostics.len != 0) {
+            print_diagnostics_simple(err_writer, result.diagnostics);
+            err_writer.flush() catch {};
         }
-        err_writer.flush() catch {};
-        std.process.exit(1);
+
+        if (!result.ok) {
+            std.process.exit(1);
+        }
+        return;
     }
 
-    var builder = ink.peg_ast.builder.init(parse_result.arena.allocator(), tokens[0..i], &parse_result.tree);
-    const nodes = builder.build_program(parse_result.root.?) catch {
-        if (builder.last_error) |info| {
-            const token_index = info.position;
-            const loc_index = if (token_index < i) tokens[token_index].where.start else source.len;
-            const loc = lineCol(source, loc_index);
-            err_writer.print("ast error: {s} at {d}:{d}\n", .{ @tagName(info.kind), loc.line, loc.column }) catch {};
-        } else {
-            err_writer.print("ast error\n", .{}) catch {};
+    const input_path = options.input_path.?;
+    const output_path = if (options.output_path) |path| path else try default_output_path(allocator, input_path);
+    defer if (options.output_path == null) allocator.free(output_path);
+
+    var sources = std.array_list.Managed(ink.compiler.source).init(allocator);
+    defer {
+        for (sources.items) |src| {
+            allocator.free(src.text);
         }
-        err_writer.flush() catch {};
-        std.process.exit(1);
+        sources.deinit();
+    }
+
+    var allocated_paths = std.array_list.Managed([]const u8).init(allocator);
+    defer {
+        for (allocated_paths.items) |path| {
+            allocator.free(path);
+        }
+        allocated_paths.deinit();
+    }
+
+    var module_source_slices = std.array_list.Managed([]ink.compiler.source_id).init(allocator);
+    defer {
+        for (module_source_slices.items) |slice| {
+            allocator.free(slice);
+        }
+        module_source_slices.deinit();
+    }
+
+    var next_source_id: ink.compiler.source_id = 0;
+    const source_text = try std.fs.cwd().readFileAlloc(allocator, input_path, 1_000_000);
+    const main_id = next_source_id;
+    next_source_id += 1;
+    try sources.append(.{ .id = main_id, .path = input_path, .text = source_text });
+
+    const main_sources = try allocator.alloc(ink.compiler.source_id, 1);
+    main_sources[0] = main_id;
+    try module_source_slices.append(main_sources);
+
+    var std_sources: []ink.compiler.source_id = &.{};
+    if (try find_std_dir(allocator, input_path)) |std_dir| {
+        defer allocator.free(std_dir);
+        std_sources = try load_module_sources(allocator, std_dir, &next_source_id, &sources, &allocated_paths);
+        if (std_sources.len != 0) {
+            try module_source_slices.append(std_sources);
+        } else {
+            allocator.free(std_sources);
+            std_sources = &.{};
+        }
+    }
+
+    const empty_deps = &[_][]const u8{};
+
+    var modules = std.array_list.Managed(ink.compiler.module_spec).init(allocator);
+    defer modules.deinit();
+    try modules.append(.{ .name = "main", .sources = main_sources, .deps = empty_deps });
+    if (std_sources.len != 0) {
+        try modules.append(.{ .name = "std", .sources = std_sources, .deps = empty_deps });
+    }
+
+    const request = ink.compiler.compile_request{
+        .sources = sources.items,
+        .modules = modules.items,
+        .root_module = "main",
     };
 
-    var ir_builder = ink.ir_build.builder.init(parse_result.arena.allocator());
-    defer ir_builder.deinit();
-    const ir_result = ir_builder.build(nodes) catch {
-        if (ir_builder.last_error) |info| {
-            err_writer.print("ir error: {s}\n", .{@tagName(info)}) catch {};
-        } else {
-            err_writer.print("ir error\n", .{}) catch {};
-        }
+    var result = try inkc.compile_to_inkb(allocator, request, output_path);
+    defer result.deinit(allocator);
+
+    if (result.diagnostics.len != 0) {
+        print_diagnostics(err_writer, source_text, input_path, result.diagnostics);
         err_writer.flush() catch {};
+    }
+
+    if (!result.ok) {
         std.process.exit(1);
-    };
-
-    const program = try ink.ir_codegen.generate(allocator, ir_result.nodes, ir_result.strings, ir_result.roots);
-    const bytecode = try ink.vm.encode.encode(allocator, program.instructions);
-
-    var vm = ink.vm.vm.init(allocator, bytecode, program.constants);
-    while (!vm.processor.halted) {
-        _ = vm.step(10_000);
     }
 }

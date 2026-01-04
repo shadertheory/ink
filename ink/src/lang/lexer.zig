@@ -83,6 +83,7 @@ pub const lexer = struct {
         return identifier{
             .string = self.source[where.start..where.end],
             .owner = .ref,
+            .where = where,
         };
     }
     fn delineate(self: *lexer, which: token.kind) token {

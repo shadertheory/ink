@@ -250,7 +250,7 @@ const parser = struct {
     }
 };
 
-pub fn parse(allocator: mem_allocator, tokens: []const token) !parse_result {
+pub fn parse_from(allocator: mem_allocator, tokens: []const token, start: nonterminal_kind) !parse_result {
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     const arena_alloc = arena.allocator();
@@ -267,7 +267,7 @@ pub fn parse(allocator: mem_allocator, tokens: []const token) !parse_result {
         .expected = std.AutoHashMap(token.kind, void).init(arena_alloc),
     };
 
-    const parse_outcome = try p.parse_nonterminal(p.grammar.start, 0, true);
+    const parse_outcome = try p.parse_nonterminal(start, 0, true);
     const ok = parse_outcome.ok and parse_outcome.next == tokens.len;
     var error_info: ?parse_error_info = null;
     if (!ok) {
@@ -281,4 +281,8 @@ pub fn parse(allocator: mem_allocator, tokens: []const token) !parse_result {
         .ok = ok,
         .@"error" = error_info,
     };
+}
+
+pub fn parse(allocator: mem_allocator, tokens: []const token) !parse_result {
+    return parse_from(allocator, tokens, peg.nonterminal_kind.program);
 }

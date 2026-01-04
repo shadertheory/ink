@@ -1,0 +1,458 @@
+(trait_decl
+  (name "add")
+  (generics
+    (param
+      (name "rhs")
+      (kind type)
+      (constraint
+        (type
+          (name "type")
+        )
+      )
+      (default
+        (type
+          (self)
+        )
+      )
+    )
+  )
+  (items
+    (assoc_type
+      (name "output")
+      (value
+        (type
+          (self)
+        )
+      )
+    )
+    (function_decl
+      (name "add")
+      (generics)
+      (params
+        (param
+          (name "this")
+          (ty
+            (type
+              (self)
+            )
+          )
+        )
+        (param
+          (name "other")
+          (ty
+            (type
+              (name "rhs")
+            )
+          )
+        )
+      )
+      (return_type
+        (type
+          (name "output")
+        )
+      )
+      (where_clause)
+      (body nil)
+    )
+  )
+)
+
+(trait_decl
+  (name "sub")
+  (generics
+    (param
+      (name "rhs")
+      (kind type)
+      (constraint
+        (type
+          (name "type")
+        )
+      )
+      (default
+        (type
+          (self)
+        )
+      )
+    )
+  )
+  (items
+    (assoc_type
+      (name "output")
+      (value
+        (type
+          (self)
+        )
+      )
+    )
+    (function_decl
+      (name "sub")
+      (generics)
+      (params
+        (param
+          (name "this")
+          (ty
+            (type
+              (self)
+            )
+          )
+        )
+        (param
+          (name "other")
+          (ty
+            (type
+              (name "rhs")
+            )
+          )
+        )
+      )
+      (return_type
+        (type
+          (name "output")
+        )
+      )
+      (where_clause)
+      (body nil)
+    )
+  )
+)
+
+(trait_decl
+  (name "zero")
+  (generics)
+  (items
+    (assoc_type
+      (name "output")
+      (value
+        (type
+          (self)
+        )
+      )
+    )
+    (function_decl
+      (name "zero")
+      (generics)
+      (params)
+      (return_type
+        (type
+          (name "output")
+        )
+      )
+      (where_clause)
+      (body nil)
+    )
+  )
+)
+
+(trait_decl
+  (name "one")
+  (generics)
+  (items
+    (assoc_type
+      (name "output")
+      (value
+        (type
+          (self)
+        )
+      )
+    )
+    (function_decl
+      (name "one")
+      (generics)
+      (params)
+      (return_type
+        (type
+          (name "output")
+        )
+      )
+      (where_clause)
+      (body nil)
+    )
+  )
+)
+
+(sum_decl
+  (name "option")
+  (generics
+    (param
+      (name "inner")
+      (kind type)
+      (constraint
+        (type
+          (name "type")
+        )
+      )
+      (default nil)
+    )
+  )
+  (variants
+    (sum_variant
+      (name "some")
+      (payload
+        (type
+          (name "inner")
+        )
+      )
+    )
+    (sum_variant
+      (name "none")
+      (payload nil)
+    )
+  )
+)
+
+(enum_decl
+  (name "ordering")
+  (cases
+    (case "less")
+    (case "equal")
+    (case "greater")
+  )
+)
+
+(trait_decl
+  (name "ord")
+  (generics)
+  (items
+    (function_decl
+      (name "cmp")
+      (generics)
+      (params
+        (param
+          (name "this")
+          (ty
+            (type
+              (self)
+            )
+          )
+        )
+        (param
+          (name "other")
+          (ty
+            (type
+              (self)
+            )
+          )
+        )
+      )
+      (return_type
+        (type
+          (optional
+            (type
+              (name "ordering")
+            )
+          )
+        )
+      )
+      (where_clause)
+      (body nil)
+    )
+  )
+)
+
+(trait_decl
+  (name "eq")
+  (generics)
+  (items
+    (function_decl
+      (name "eq")
+      (generics)
+      (params
+        (param
+          (name "this")
+          (ty
+            (type
+              (self)
+            )
+          )
+        )
+        (param
+          (name "other")
+          (ty
+            (type
+              (self)
+            )
+          )
+        )
+      )
+      (return_type
+        (type
+          (name "bool")
+        )
+      )
+      (where_clause)
+      (body nil)
+    )
+  )
+)
+
+(concept_decl
+  (name "arithmetic")
+  (generics
+    (param
+      (name "rhs")
+      (kind type)
+      (constraint
+        (type
+          (name "type")
+        )
+      )
+      (default
+        (type
+          (self)
+        )
+      )
+    )
+  )
+  (requires
+    (type
+      (applied
+        (base "add")
+        (args
+          (type
+            (name "rhs")
+          )
+        )
+      )
+    )
+    (type
+      (applied
+        (base "sub")
+        (args
+          (type
+            (name "rhs")
+          )
+        )
+      )
+    )
+    (type
+      (name "zero")
+    )
+    (type
+      (name "one")
+    )
+    (type
+      (name "ord")
+    )
+  )
+)
+
+(function_decl
+  (name "fib")
+  (generics
+    (param
+      (name "num")
+      (kind type)
+      (constraint
+        (type
+          (name "type")
+        )
+      )
+      (default nil)
+    )
+  )
+  (params
+    (param
+      (name "n")
+      (ty
+        (type
+          (name "num")
+        )
+      )
+    )
+  )
+  (return_type
+    (type
+      (name "num")
+    )
+  )
+  (where_clause
+    (where_req
+      (name "num")
+      (constraint
+        (type
+          (name "arithmetic")
+        )
+      )
+    )
+  )
+  (body
+    (if_expr
+      (condition
+        (binary
+          (op less_than)
+          (left
+            (identifier "n")
+          )
+          (right
+            (integer 1)
+          )
+        )
+      )
+      (then_branch
+        (integer 0)
+      )
+      (else_branch
+        (if_expr
+          (condition
+            (binary
+              (op equal)
+              (left
+                (identifier "n")
+              )
+              (right
+                (integer 1)
+              )
+            )
+          )
+          (then_branch
+            (integer 1)
+          )
+          (else_branch
+            (binary
+              (op add)
+              (left
+                (binary
+                  (op call)
+                  (left
+                    (identifier "fib")
+                  )
+                  (right
+                    (binary
+                      (op sub)
+                      (left
+                        (identifier "n")
+                      )
+                      (right
+                        (integer 1)
+                      )
+                    )
+                  )
+                )
+              )
+              (right
+                (binary
+                  (op call)
+                  (left
+                    (identifier "fib")
+                  )
+                  (right
+                    (binary
+                      (op sub)
+                      (left
+                        (identifier "n")
+                      )
+                      (right
+                        (integer 2)
+                      )
+                    )
+                  )
+                )
+              )
+            )
+          )
+        )
+      )
+    )
+  )
+)
+

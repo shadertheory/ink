@@ -24,6 +24,11 @@ pub const control = enum(u8) {
     ret_value,
 
     method_virtual_get,
+
+    task_spawn,
+    task_await,
+    task_await_any,
+    task_cancel,
 };
 
 

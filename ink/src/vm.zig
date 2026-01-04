@@ -11,3 +11,6 @@ pub const register = vm.register;
 pub const bytecode = assembly.bytecode;
 pub const op = @import("vm/op.zig");
 pub const encode = @import("vm/encode.zig");
+pub const inkb = @import("vm/inkb.zig");
+pub const foreign = @import("vm/foreign.zig");
+pub const runtime = @import("vm/runtime.zig");

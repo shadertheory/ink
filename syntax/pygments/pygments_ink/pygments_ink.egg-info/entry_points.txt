@@ -1,0 +1,2 @@
+[pygments.lexers]
+ink = pygments_ink:InkLexer

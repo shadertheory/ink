@@ -30,7 +30,6 @@ pub fn build(b: *std.Build) void {
     // module they want to access.
 
     const ink_dep = b.dependency("ink", .{}).module("ink");
-    // Allow ink's internal @import("root") to resolve to the ink module.
     const root = b.addModule("inkc", .{
         // The root source file is the "entry point" of this module. Users of
         // this module will only be able to access public declarations contained
@@ -38,10 +37,11 @@ pub fn build(b: *std.Build) void {
         // intend to expose to consumers that were defined in other files part
         // of this module, you will have to make sure to re-export them from
         // the root file.
-        .root_source_file = b.path("../ink/src/root.zig"),
+        .root_source_file = b.path("src/root.zig"),
         // Later on we'll use this module as the root module of a test executable
         // which requires us to specify a target.
         .target = target,
+        .optimize = optimize,
     });
     root.addImport("ink", ink_dep);
     // Here we define an executable. An executable needs to have a root module
@@ -82,11 +82,10 @@ pub fn build(b: *std.Build) void {
                 // can be extremely useful in case of collisions (which can happen
                 // importing modules from different packages).
                 .{ .name = "ink", .module = ink_dep },
+                .{ .name = "inkc", .module = root },
             },
         }),
     });
-
-    exe.root_module.addImport("inkc", root);
 
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
