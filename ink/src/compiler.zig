@@ -4,6 +4,7 @@ const diag = @import("diagnostic.zig");
 const resol = @import("resolver.zig");
 const ink = @import("root.zig");
 const lang_spec = @import("lang/spec.zig");
+const typecheck = @import("typecheck.zig");
 const mem_allocator = std.mem.Allocator;
 const arena_allocator = std.heap.ArenaAllocator;
 const array_list = std.array_list.Managed;
@@ -152,6 +153,7 @@ pub const compiler = struct {
 
         // 3) parse per file + 4) build per-module node list
         var module_nodes = try allocator.alloc([]const *ink.node, modules.items.len);
+        var module_node_sources = try allocator.alloc([]const src.source_id, modules.items.len);
         var module_files = try allocator.alloc([]ast_file, modules.items.len);
         var module_imports = try allocator.alloc([]const resolver.module_import, modules.items.len);
         var module_import_specs = try allocator.alloc(?[]const desugar.import_decl, modules.items.len);
@@ -164,6 +166,7 @@ pub const compiler = struct {
                 for (module_files[i]) |*file| file.deinit(allocator);
                 allocator.free(module_files[i]);
                 allocator.free(module_nodes[i]);
+                allocator.free(module_node_sources[i]);
                 allocator.free(module_imports[i]);
                 if (module_import_specs[i]) |imports| allocator.free(imports);
                 allocator.free(module_foreigns[i]);
@@ -172,6 +175,7 @@ pub const compiler = struct {
             }
             allocator.free(module_files);
             allocator.free(module_nodes);
+            allocator.free(module_node_sources);
             allocator.free(module_imports);
             allocator.free(module_import_specs);
             allocator.free(module_foreigns);
@@ -193,10 +197,13 @@ pub const compiler = struct {
             var nodes = array_list(*ink.node).init(allocator);
             errdefer nodes.deinit();
 
+            var node_sources = array_list(src.source_id).init(allocator);
+            errdefer node_sources.deinit();
+
             for (mod.sources) |sid| {
                 const compsrc = sources_by_id.get(sid).?;
 
-                const tokens = try lex_all(allocator, compsrc.text, &diags);
+                const tokens = try lex_all(allocator, compsrc.text, &diags, compsrc.id);
                 var parse = try ink.peg_parser.parse(allocator, tokens);
                 if (!parse.ok) {
                     if (parse.@"error") |info| {
@@ -208,10 +215,11 @@ pub const compiler = struct {
                             .danger = .@"error",
                             .message = msg,
                             .span = span_from_token_index(tokens, info.position),
+                            .source_id = compsrc.id,
                             .code = "E1001",
                         });
                     } else {
-                        try diags.append(.{ .danger = .@"error", .message = "parse error", .span = null, .code = "E1001" });
+                        try diags.append(.{ .danger = .@"error", .message = "parse error", .span = null, .source_id = compsrc.id, .code = "E1001" });
                     }
                     allocator.free(tokens);
                     parse.deinit();
@@ -234,13 +242,14 @@ pub const compiler = struct {
                             .danger = .@"error",
                             .message = msg,
                             .span = span_from_token_index(tokens, info.position),
+                            .source_id = compsrc.id,
                             .code = "E1002",
                         });
                         allocator.free(tokens);
                         parse.deinit();
                         continue;
                     }
-                    try diags.append(.{ .danger = .@"error", .message = "ast error", .span = null, .code = "E1002" });
+                    try diags.append(.{ .danger = .@"error", .message = "ast error", .span = null, .source_id = compsrc.id, .code = "E1002" });
                     allocator.free(tokens);
                     parse.deinit();
                     continue;
@@ -253,14 +262,25 @@ pub const compiler = struct {
                     .nodes = file_nodes,
                 });
 
-                for (file_nodes) |n| try nodes.append(n);
+                for (file_nodes) |n| {
+                    try nodes.append(n);
+                    try node_sources.append(sid);
+                }
             }
 
             module_files[mi] = try files.toOwnedSlice();
 
             const raw_nodes = try nodes.toOwnedSlice();
+            const raw_sources = try node_sources.toOwnedSlice();
             var desugar_result = try desugar.desugar(module_arenas[mi].allocator(), allocator, raw_nodes, &diags);
+            var desugar_sources = array_list(src.source_id).init(allocator);
+            defer desugar_sources.deinit();
+            for (raw_nodes, 0..) |node, idx| {
+                if (node.* == .decl and node.decl == .import) continue;
+                try desugar_sources.append(raw_sources[idx]);
+            }
             allocator.free(raw_nodes);
+            allocator.free(raw_sources);
 
             var imports = array_list(resolver.module_import).init(allocator);
             var import_aliases = string_map(void).init(allocator);
@@ -286,6 +306,7 @@ pub const compiler = struct {
             module_import_specs[mi] = desugar_result.imports;
             desugar_result.origin.deinit();
             module_nodes[mi] = desugar_result.nodes;
+            module_node_sources[mi] = try desugar_sources.toOwnedSlice();
             try collect_exports(&module_exports[mi], module_nodes[mi]);
 
             var foreign_counts = string_map(usize).init(allocator);
@@ -359,7 +380,7 @@ pub const compiler = struct {
             try res.add_module(mod.id, module_imports[mi], module_nodes[mi], &diags);
         }
         for (modules.items, 0..) |mod, mi| {
-            try res.resolve_module(mod.id, module_nodes[mi], &diags);
+            try res.resolve_module(mod.id, module_nodes[mi], module_node_sources[mi], &diags);
         }
 
         if (has_error(diags.items)) {
@@ -371,18 +392,43 @@ pub const compiler = struct {
             try diags.append(.{ .danger = .@"error", .message = "unknown root module", .span = null });
             return finish(&diags, &diag_messages, null, null, null, null, null, false);
         };
-        const root_nodes = module_nodes[@intCast(root_id)];
+        const root_files = module_files[@intCast(root_id)];
 
         var ir_arena = arena_allocator.init(allocator);
         defer ir_arena.deinit();
         var ir_builder = ink.ir_build.builder.init(ir_arena.allocator());
         defer ir_builder.deinit();
-        const ir_result = ir_builder.build(root_nodes) catch {
+        for (root_files) |file| {
+            ir_builder.build_file(file.nodes, file.source_id) catch {
+                try diags.append(.{ .danger = .@"error", .message = "ir build error", .span = null });
+                return finish(&diags, &diag_messages, null, null, null, null, null, false);
+            };
+        }
+        const ir_result = ir_builder.finish() catch {
             try diags.append(.{ .danger = .@"error", .message = "ir build error", .span = null });
             return finish(&diags, &diag_messages, null, null, null, null, null, false);
         };
 
-        // 7) codegen + encode
+        // 7) typecheck (root module only)
+        var type_result = typecheck.check(
+            allocator,
+            ir_result.nodes,
+            ir_result.strings,
+            ir_result.roots,
+            ir_result.spans,
+            ir_result.sources,
+            &diags,
+        ) catch {
+            try diags.append(.{ .danger = .@"error", .message = "typecheck error", .span = null });
+            return finish(&diags, &diag_messages, null, null, null, null, null, false);
+        };
+        defer type_result.deinit(allocator);
+
+        if (has_error(diags.items)) {
+            return finish(&diags, &diag_messages, null, null, null, null, null, false);
+        }
+
+        // 8) codegen + encode
         const data_entries = try build_data_entries(allocator, ir_result.strings);
         errdefer {
             for (data_entries) |entry| allocator.free(entry.bytes);
@@ -430,13 +476,59 @@ pub const compiler = struct {
             foreigns[idx] = try allocator.dupe(u8, name);
         }
 
-        const program = try ink.ir_codegen.generate(
+        var codegen_info = ink.ir_codegen.error_info{};
+        defer codegen_info.deinit(allocator);
+
+        const program = ink.ir_codegen.generate(
             allocator,
             ir_result.nodes,
             ir_result.strings,
             ir_result.roots,
             foreigns,
-        );
+            type_result.types,
+            &codegen_info,
+        ) catch |err| {
+            const default_msg: []const u8 = switch (err) {
+                error.out_of_memory => "codegen error: out_of_memory",
+                error.unsupported_node => "codegen error: unsupported_node",
+                error.ambiguous_overload => "codegen error: ambiguous_overload",
+                error.missing_main => "codegen error: missing_main",
+                error.unknown_identifier => "codegen error: unknown_identifier",
+                error.unknown_function => "codegen error: unknown_function",
+                error.unknown_foreign => "codegen error: unknown_foreign",
+                error.register_overflow => "codegen error: register_overflow",
+                error.constant_index_overflow => "codegen error: constant_index_overflow",
+            };
+            var msg = default_msg;
+            if (codegen_info.message) |owned| {
+                msg = owned;
+                if (codegen_info.owns_message) {
+                    try diag_messages.append(owned);
+                    codegen_info.owns_message = false;
+                }
+            }
+            var diag_span: ?span = null;
+            if (codegen_info.node) |node_id| {
+                const idx: usize = @intCast(node_id.idx);
+                if (idx < ir_result.spans.len) {
+                    diag_span = ir_result.spans[idx];
+                }
+            }
+            var diag_source_id: ?src.source_id = null;
+            if (codegen_info.node) |node_id| {
+                const idx: usize = @intCast(node_id.idx);
+                if (idx < ir_result.sources.len) {
+                    diag_source_id = ir_result.sources[idx];
+                }
+            }
+            try diags.append(.{
+                .danger = .@"error",
+                .message = msg,
+                .span = diag_span,
+                .source_id = diag_source_id,
+            });
+            return finish(&diags, &diag_messages, null, null, data_entries, null, foreigns, false);
+        };
         const bytecode = try ink.vm.encode.encode(allocator, program.instructions);
 
         return finish(
@@ -451,14 +543,19 @@ pub const compiler = struct {
         );
     }
 
-    fn lex_all(allocator: mem_allocator, source_text: []const u8, diags: *array_list(diagnostic)) ![]const ink.token {
+    fn lex_all(
+        allocator: mem_allocator,
+        source_text: []const u8,
+        diags: *array_list(diagnostic),
+        src_id: src.source_id,
+    ) ![]const ink.token {
         var lexer = try ink.lexer.init(source_text);
         var tokens = array_list(ink.token).init(allocator);
         errdefer tokens.deinit();
 
         while (true) {
             const maybe_tok = lexer.next() catch {
-                try diags.append(.{ .danger = .@"error", .message = "lexer error", .span = null, .code = "E1000" });
+                try diags.append(.{ .danger = .@"error", .message = "lexer error", .span = null, .source_id = src_id, .code = "E1000" });
                 break;
             };
             if (maybe_tok) |tok| {
@@ -579,19 +676,23 @@ pub const compiler = struct {
         var need_free = false;
         var need_deref = false;
         var need_store = false;
-        var need_borrow = false;
         var need_result_ok = false;
         var need_result_err = false;
         var need_result_is_ok = false;
         var need_result_unwrap = false;
         var need_result_unwrap_err = false;
         var need_try = false;
-        var need_slice_ptr = false;
+        var need_ptr_of = false;
         var need_string_new = false;
         var need_string_concat = false;
         var need_string_from_int = false;
         var need_string_from_float = false;
         var need_string_from_bool = false;
+        var need_sleep = false;
+        var need_sleep_until = false;
+        var need_timeout = false;
+        var need_deadline = false;
+        var need_yield = false;
 
         for (nodes) |node| {
             if (node == .record_literal) {
@@ -601,7 +702,8 @@ pub const compiler = struct {
                 need_deref = true;
             } else if (node == .binary and node.binary.op == .index) {
                 need_deref = true;
-                need_slice_ptr = true;
+            } else if (node == .unary and node.unary.op == .deref) {
+                need_deref = true;
             } else if (node == .intrinsic) {
                 const call = node.intrinsic;
                 const name_idx: usize = @intCast(call.name.idx);
@@ -613,8 +715,6 @@ pub const compiler = struct {
                     need_free = true;
                 } else if (std.mem.eql(u8, name, "deref")) {
                     need_deref = true;
-                } else if (std.mem.eql(u8, name, "borrow") or std.mem.eql(u8, name, "borrow_mut")) {
-                    need_borrow = true;
                 } else if (std.mem.eql(u8, name, "result_ok")) {
                     need_result_ok = true;
                 } else if (std.mem.eql(u8, name, "result_err")) {
@@ -636,8 +736,27 @@ pub const compiler = struct {
                 need_alloc = true;
                 need_deref = true;
                 need_store = true;
+            } else if (node == .unary and (node.unary.op == .borrow or node.unary.op == .borrow_mut)) {
+                need_ptr_of = true;
             } else if (node == .unary and node.unary.op == .@"try") {
                 need_try = true;
+            } else if (node == .unary) {
+                switch (node.unary.op) {
+                    .sleep => {
+                        need_sleep = true;
+                        need_sleep_until = true;
+                    },
+                    .timeout => {
+                        need_timeout = true;
+                    },
+                    .deadline => {
+                        need_deadline = true;
+                        need_timeout = true;
+                    },
+                    else => {},
+                }
+            } else if (node == .yield_expr) {
+                need_yield = true;
             }
         }
 
@@ -645,17 +764,12 @@ pub const compiler = struct {
         if (need_free) try add_foreign_name(foreign_set, foreign_names, "std::free");
         if (need_deref) try add_foreign_name(foreign_set, foreign_names, "std::deref");
         if (need_store) try add_foreign_name(foreign_set, foreign_names, "std::store");
-        if (need_borrow) {
-            try add_foreign_name(foreign_set, foreign_names, "std::alloc");
-            try add_foreign_name(foreign_set, foreign_names, "std::store");
-            try add_foreign_name(foreign_set, foreign_names, "std::ptr_of");
-        }
+        if (need_ptr_of) try add_foreign_name(foreign_set, foreign_names, "std::ptr_of");
         if (need_result_ok) try add_foreign_name(foreign_set, foreign_names, "std::result_ok");
         if (need_result_err) try add_foreign_name(foreign_set, foreign_names, "std::result_err");
         if (need_result_is_ok) try add_foreign_name(foreign_set, foreign_names, "std::result_is_ok");
         if (need_result_unwrap) try add_foreign_name(foreign_set, foreign_names, "std::result_unwrap");
         if (need_result_unwrap_err) try add_foreign_name(foreign_set, foreign_names, "std::result_unwrap_err");
-        if (need_slice_ptr) try add_foreign_name(foreign_set, foreign_names, "std::slice_ptr");
         if (need_string_new) try add_foreign_name(foreign_set, foreign_names, "std::string_new");
         if (need_string_concat) try add_foreign_name(foreign_set, foreign_names, "std::string_concat");
         if (need_string_from_int) try add_foreign_name(foreign_set, foreign_names, "std::string_from_int");
@@ -665,6 +779,13 @@ pub const compiler = struct {
             try add_foreign_name(foreign_set, foreign_names, "std::result_is_ok");
             try add_foreign_name(foreign_set, foreign_names, "std::result_unwrap");
         }
+        if (need_sleep) try add_foreign_name(foreign_set, foreign_names, "std::sleep");
+        if (need_sleep_until) try add_foreign_name(foreign_set, foreign_names, "std::sleep_until");
+        if (need_timeout) try add_foreign_name(foreign_set, foreign_names, "std::timeout");
+        if (need_deadline) try add_foreign_name(foreign_set, foreign_names, "std::deadline");
+        if (need_yield) try add_foreign_name(foreign_set, foreign_names, "std::yield");
+        try add_foreign_name(foreign_set, foreign_names, "std::atomic_lock");
+        try add_foreign_name(foreign_set, foreign_names, "std::atomic_unlock");
     }
 
     fn finish(
@@ -837,6 +958,7 @@ pub const compiler = struct {
             .empty_block => try writer.writeAll("empty block"),
             .multiple_statements => try writer.writeAll("expected a single statement"),
             .string_literal => try writer.writeAll("invalid string interpolation"),
+            .invalid_duration_literal => try writer.writeAll("invalid duration literal"),
         }
 
         return buf.toOwnedSlice(allocator);

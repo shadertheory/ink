@@ -286,6 +286,16 @@ fn handle_message(
                 try writer.flush();
             }
             return true;
+        } else if (std.mem.eql(u8, name, "textDocument/signatureHelp")) {
+            if (get_field(root, "params")) |params| {
+                const response_body = try build_signature_help_response(allocator, docs, id_value, params);
+                defer allocator.free(response_body);
+
+                try log_message(log_file, log_writer, .server_to_client, response_body);
+                try write_message(writer, response_body);
+                try writer.flush();
+            }
+            return true;
         }
     }
 
@@ -316,7 +326,7 @@ fn build_response_body(
         if (std.mem.eql(u8, name, "initialize")) {
             try writer.writeAll("{\"capabilities\":{\"textDocumentSync\":1,\"semanticTokensProvider\":{\"legend\":");
             try writer.writeAll(semantic_tokens_legend_json);
-            try writer.writeAll(",\"full\":true},\"completionProvider\":{\"triggerCharacters\":[\".\",\":\"]},\"hoverProvider\":true,\"inlayHintProvider\":true}}");
+            try writer.writeAll(",\"full\":true},\"completionProvider\":{\"triggerCharacters\":[\".\",\":\"]},\"hoverProvider\":true,\"inlayHintProvider\":true,\"signatureHelpProvider\":{\"triggerCharacters\":[\"(\",\",\"]}}}}");
         } else if (std.mem.eql(u8, name, "workspace/configuration")) {
             try writer.writeAll("[]");
         } else {
@@ -346,7 +356,7 @@ fn build_initialize_response(
     try writer.writeAll("\"semanticTokensProvider\":{\"legend\":");
     try writer.writeAll(semantic_tokens_legend_json);
     try writer.writeAll(",\"full\":true},");
-    try writer.writeAll("\"completionProvider\":{\"triggerCharacters\":[\".\",\":\"]},\"hoverProvider\":true,\"inlayHintProvider\":true}}}");
+    try writer.writeAll("\"completionProvider\":{\"triggerCharacters\":[\".\",\":\"]},\"hoverProvider\":true,\"inlayHintProvider\":true,\"signatureHelpProvider\":{\"triggerCharacters\":[\"(\",\",\"]}}}}");
 
     const result = try allocating.toOwnedSlice();
     allocating.deinit();
@@ -416,7 +426,7 @@ fn handle_did_close(
     docs.remove(uri);
 
     const empty_diags: []const ink.diagnostic = &[_]ink.diagnostic{};
-    const body = try build_publish_diagnostics(allocator, uri, "", empty_diags);
+    const body = try build_publish_diagnostics(allocator, uri, "", null, empty_diags);
     defer allocator.free(body);
 
     try log_message(log_file, log_writer, .server_to_client, body);
@@ -474,7 +484,7 @@ fn compile_and_publish(
             try diags.append(.{ .danger = .@"error", .message = "ast error", .span = null, .code = "E1002" });
         }
 
-        const body = try build_publish_diagnostics(allocator, uri, text, diags.items);
+        const body = try build_publish_diagnostics(allocator, uri, text, null, diags.items);
         defer allocator.free(body);
 
         try log_message(log_file, log_writer, .server_to_client, body);
@@ -548,10 +558,31 @@ fn compile_and_publish(
         .root_module = "main",
     };
 
-    var result = ink.compiler.compile(allocator, req) catch return;
+    var result = ink.compiler.compile(allocator, req) catch |err| {
+        var diags = std.array_list.Managed(ink.diagnostic).init(allocator);
+        defer diags.deinit();
+
+        var msg_buf: [128]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "compiler error: {s}", .{@errorName(err)}) catch "compiler error";
+        try diags.append(.{
+            .danger = .@"error",
+            .message = msg,
+            .span = null,
+            .code = "E0000",
+            .source_id = main_id,
+        });
+
+        const body = try build_publish_diagnostics(allocator, uri, text, main_id, diags.items);
+        defer allocator.free(body);
+
+        try log_message(log_file, log_writer, .server_to_client, body);
+        try write_message(writer, body);
+        try writer.flush();
+        return;
+    };
     defer result.deinit(allocator);
 
-    const body = try build_publish_diagnostics(allocator, uri, text, result.diagnostics);
+    const body = try build_publish_diagnostics(allocator, uri, text, main_id, result.diagnostics);
     defer allocator.free(body);
 
     try log_message(log_file, log_writer, .server_to_client, body);
@@ -838,6 +869,89 @@ fn build_inlay_hint_empty(allocator: mem_allocator, id: std.json.Value) ![]u8 {
     return result;
 }
 
+fn build_signature_help_response(
+    allocator: mem_allocator,
+    docs: *document_store,
+    id: std.json.Value,
+    params: std.json.Value,
+) ![]u8 {
+    const text_doc = get_field(params, "textDocument") orelse return build_signature_help_empty(allocator, id);
+    const uri = get_string_field(text_doc, "uri") orelse return build_signature_help_empty(allocator, id);
+    const position_value = get_field(params, "position") orelse return build_signature_help_empty(allocator, id);
+    const pos = parse_position(position_value) orelse return build_signature_help_empty(allocator, id);
+    const entry = docs.get_entry(uri) orelse return build_signature_help_empty(allocator, id);
+    const text = entry.text;
+
+    const cache = entry.ast orelse return build_signature_help_empty(allocator, id);
+    const line_offsets = try build_line_offsets(allocator, text);
+    defer allocator.free(line_offsets);
+    const offset = offset_from_position(text, line_offsets, pos);
+    const context = find_signature_context(cache.tokens, offset) orelse return build_signature_help_empty(allocator, id);
+
+    var sigs = std.array_list.Managed(function_sig).init(allocator);
+    defer sigs.deinit();
+    if (cache.nodes) |nodes| {
+        for (nodes) |node| try collect_function_sigs(&sigs, node);
+    }
+    const sig = find_function_sig(sigs.items, context.name) orelse return build_signature_help_empty(allocator, id);
+
+    var label_buf = std.array_list.Managed(u8).init(allocator);
+    defer label_buf.deinit();
+    const skip_self = context.is_method and sig.params.len > 0 and is_receiver_param_name(sig.params[0].name.string);
+    try write_signature_label(&label_buf, sig, skip_self);
+    const label = try label_buf.toOwnedSlice();
+    defer allocator.free(label);
+
+    const param_start: usize = if (skip_self) 1 else 0;
+    const param_count = if (sig.params.len >= param_start) sig.params.len - param_start else 0;
+    var active_param: ?usize = null;
+    if (param_count > 0) {
+        active_param = if (context.arg_index >= param_count) param_count - 1 else context.arg_index;
+    }
+
+    var allocating = std.Io.Writer.Allocating.init(allocator);
+    errdefer allocating.deinit();
+    const writer = &allocating.writer;
+
+    try writer.writeAll("{\"jsonrpc\":\"2.0\",\"id\":");
+    try std.json.Stringify.value(id, .{}, writer);
+    try writer.writeAll(",\"result\":{\"signatures\":[{\"label\":");
+    try std.json.Stringify.value(label, .{}, writer);
+    try writer.writeAll(",\"parameters\":[");
+    if (param_count > 0) {
+        for (sig.params[param_start..], 0..) |param, idx| {
+            if (idx != 0) try writer.writeAll(",");
+            try writer.writeAll("{\"label\":");
+            try std.json.Stringify.value(param.name.string, .{}, writer);
+            try writer.writeAll("}");
+        }
+    }
+    try writer.writeAll("]}],\"activeSignature\":0");
+    if (active_param) |idx| {
+        try writer.writeAll(",\"activeParameter\":");
+        try writer.print("{d}", .{idx});
+    }
+    try writer.writeAll("}}");
+
+    const result = try allocating.toOwnedSlice();
+    allocating.deinit();
+    return result;
+}
+
+fn build_signature_help_empty(allocator: mem_allocator, id: std.json.Value) ![]u8 {
+    var allocating = std.Io.Writer.Allocating.init(allocator);
+    errdefer allocating.deinit();
+    const writer = &allocating.writer;
+
+    try writer.writeAll("{\"jsonrpc\":\"2.0\",\"id\":");
+    try std.json.Stringify.value(id, .{}, writer);
+    try writer.writeAll(",\"result\":null}");
+
+    const result = try allocating.toOwnedSlice();
+    allocating.deinit();
+    return result;
+}
+
 fn tokens_for_semantic(
     allocator: mem_allocator,
     entry: *document_entry,
@@ -1045,7 +1159,7 @@ fn emit_interpolated_string_tokens(
             i += 2;
             continue;
         }
-            i += 1;
+        i += 1;
     }
 
     try emit_string_segment(emitter, tok.where.start, literal_start, content.len);
@@ -1182,7 +1296,7 @@ fn collect_semantic_spans(map: *std.AutoHashMap(usize, semantic_span), nodes: []
 
 fn collect_node_spans(map: *std.AutoHashMap(usize, semantic_span), node: *const ink.node) semantic_error!void {
     switch (node.*) {
-        .integer, .float, .string => {},
+        .integer, .float, .duration, .string => {},
         .identifier => {},
         .unary => |un| try collect_node_spans(map, ink.ast.deref(un.right)),
         .binary => |bin| {
@@ -1225,6 +1339,54 @@ fn collect_node_spans(map: *std.AutoHashMap(usize, semantic_span), node: *const 
         .with_expr => |we| {
             try record_ident(map, we.name, .variable);
             try collect_node_spans(map, ink.ast.deref(we.body));
+        },
+        .label_expr => |label_expr| {
+            try record_ident(map, label_expr.name, .variable);
+            try collect_node_spans(map, ink.ast.deref(label_expr.body));
+        },
+        .loop_expr => |loop_expr| {
+            try collect_node_spans(map, ink.ast.deref(loop_expr.body));
+        },
+        .while_expr => |while_expr| {
+            try collect_node_spans(map, ink.ast.deref(while_expr.condition));
+            try collect_node_spans(map, ink.ast.deref(while_expr.body));
+        },
+        .while_in_expr => |while_in_expr| {
+            try collect_node_spans(map, ink.ast.deref(while_in_expr.pattern));
+            try collect_node_spans(map, ink.ast.deref(while_in_expr.iter));
+            try collect_node_spans(map, ink.ast.deref(while_in_expr.body));
+        },
+        .until_expr => |until_expr| {
+            try collect_node_spans(map, ink.ast.deref(until_expr.condition));
+            try collect_node_spans(map, ink.ast.deref(until_expr.body));
+        },
+        .repeat_expr => |repeat_expr| {
+            try collect_node_spans(map, ink.ast.deref(repeat_expr.count));
+            try collect_node_spans(map, ink.ast.deref(repeat_expr.body));
+        },
+        .for_expr => |for_expr| {
+            try collect_node_spans(map, ink.ast.deref(for_expr.pattern));
+            try collect_node_spans(map, ink.ast.deref(for_expr.iter));
+            try collect_node_spans(map, ink.ast.deref(for_expr.body));
+        },
+        .each_expr => |each_expr| {
+            try collect_node_spans(map, ink.ast.deref(each_expr.pattern));
+            try collect_node_spans(map, ink.ast.deref(each_expr.iter));
+            try collect_node_spans(map, ink.ast.deref(each_expr.body));
+        },
+        .break_expr => |break_expr| {
+            if (break_expr.label) |label| try record_ident(map, label, .variable);
+            if (break_expr.value) |ref| try collect_node_spans(map, ink.ast.deref(ref));
+        },
+        .continue_expr => |continue_expr| {
+            if (continue_expr.label) |label| try record_ident(map, label, .variable);
+        },
+        .yield_expr => |yield_expr| {
+            if (yield_expr.value) |ref| try collect_node_spans(map, ink.ast.deref(ref));
+        },
+        .atomic_expr => |atomic_expr| {
+            try collect_node_spans(map, ink.ast.deref(atomic_expr.value));
+            try record_ident(map, atomic_expr.ordering, .variable);
         },
         .record => |rec| {
             for (rec.items) |assoc| {
@@ -1404,14 +1566,8 @@ fn semantic_token_type_for(
         .number => return .number,
         .string => return .string,
         .logical_true, .logical_false => return .boolean,
-        .function, .constant, .variable, .expr_if, .expr_else, .expr_match, .expr_select, .case, .detached,
-        .stmt_return, .spawn, .await, .@"try", .logical_or, .logical_and, .logical_xor, .logical_not, .in, .trait,
-        .impl, .as, .import, .from, .dynamic, .@"for", .@"struct", .where,
-        .@"comptime", .self, .this, .type, .@"enum", .requires, .dyn => return .keyword,
-        .plus, .minus, .asterisk, .slash, .assign, .pipe, .coalesce, .double_colon, .dot, .question_dot,
-        .less_than, .greater_than, .less_or_equal, .greater_or_equal, .equal, .not_equal, .arrow,
-        .paren_left, .paren_right, .bracket_left, .bracket_right, .comma, .colon, .bar, .ampersand,
-        .question, .range, .range_inclusive, .ellipsis, .at_sign, .hash => return .operator,
+        .function, .constant, .variable, .mut, .expr_if, .expr_else, .expr_match, .expr_select, .case, .detached, .stmt_return, .spawn, .await, .@"try", .logical_or, .logical_and, .logical_xor, .logical_not, .in, .trait, .impl, .as, .import, .from, .dynamic, .@"for", .@"struct", .where, .@"comptime", .self, .this, .type, .@"enum", .requires, .dyn => return .keyword,
+        .plus, .minus, .asterisk, .slash, .assign, .pipe, .coalesce, .double_colon, .dot, .question_dot, .less_than, .greater_than, .less_or_equal, .greater_or_equal, .equal, .not_equal, .arrow, .paren_left, .paren_right, .bracket_left, .bracket_right, .comma, .colon, .bar, .ampersand, .question, .range, .range_inclusive, .ellipsis, .at_sign, .hash => return .operator,
         else => return null,
     }
 }
@@ -1483,6 +1639,12 @@ const function_sig = struct {
 const call_info = struct {
     callee: *const ink.node,
     args: []const *ink.node,
+};
+
+const signature_context = struct {
+    name: []const u8,
+    arg_index: usize,
+    is_method: bool,
 };
 
 const type_label = struct {
@@ -1631,6 +1793,50 @@ fn collect_completion_node(
                 try collect_completion_node(items, ink.ast.deref(arm.task), prefix);
                 try collect_completion_node(items, ink.ast.deref(arm.body), prefix);
             }
+        },
+        .label_expr => |label_expr| {
+            try push_completion(items, label_expr.name.string, completion_kind_variable, prefix);
+            try collect_completion_node(items, ink.ast.deref(label_expr.body), prefix);
+        },
+        .loop_expr => |loop_expr| {
+            try collect_completion_node(items, ink.ast.deref(loop_expr.body), prefix);
+        },
+        .while_expr => |while_expr| {
+            try collect_completion_node(items, ink.ast.deref(while_expr.condition), prefix);
+            try collect_completion_node(items, ink.ast.deref(while_expr.body), prefix);
+        },
+        .while_in_expr => |while_in_expr| {
+            try collect_completion_node(items, ink.ast.deref(while_in_expr.pattern), prefix);
+            try collect_completion_node(items, ink.ast.deref(while_in_expr.iter), prefix);
+            try collect_completion_node(items, ink.ast.deref(while_in_expr.body), prefix);
+        },
+        .until_expr => |until_expr| {
+            try collect_completion_node(items, ink.ast.deref(until_expr.condition), prefix);
+            try collect_completion_node(items, ink.ast.deref(until_expr.body), prefix);
+        },
+        .repeat_expr => |repeat_expr| {
+            try collect_completion_node(items, ink.ast.deref(repeat_expr.count), prefix);
+            try collect_completion_node(items, ink.ast.deref(repeat_expr.body), prefix);
+        },
+        .for_expr => |for_expr| {
+            try collect_completion_node(items, ink.ast.deref(for_expr.pattern), prefix);
+            try collect_completion_node(items, ink.ast.deref(for_expr.iter), prefix);
+            try collect_completion_node(items, ink.ast.deref(for_expr.body), prefix);
+        },
+        .each_expr => |each_expr| {
+            try collect_completion_node(items, ink.ast.deref(each_expr.pattern), prefix);
+            try collect_completion_node(items, ink.ast.deref(each_expr.iter), prefix);
+            try collect_completion_node(items, ink.ast.deref(each_expr.body), prefix);
+        },
+        .break_expr => |break_expr| {
+            if (break_expr.value) |ref| try collect_completion_node(items, ink.ast.deref(ref), prefix);
+        },
+        .continue_expr => {},
+        .yield_expr => |yield_expr| {
+            if (yield_expr.value) |ref| try collect_completion_node(items, ink.ast.deref(ref), prefix);
+        },
+        .atomic_expr => |atomic_expr| {
+            try collect_completion_node(items, ink.ast.deref(atomic_expr.value), prefix);
         },
         .record => |rec| {
             for (rec.items) |assoc| {
@@ -1785,6 +1991,63 @@ fn find_hover_info_node(node: *const ink.node, name: []const u8) ?hover_info {
                 if (find_hover_info_node(ink.ast.deref(arm.task), name)) |info| return info;
                 if (find_hover_info_node(ink.ast.deref(arm.body), name)) |info| return info;
             }
+        },
+        .label_expr => |label_expr| {
+            if (std.mem.eql(u8, label_expr.name.string, name)) {
+                return .{ .variable = label_expr.name };
+            }
+            if (find_hover_info_node(ink.ast.deref(label_expr.body), name)) |info| return info;
+        },
+        .loop_expr => |loop_expr| {
+            if (find_hover_info_node(ink.ast.deref(loop_expr.body), name)) |info| return info;
+        },
+        .while_expr => |while_expr| {
+            if (find_hover_info_node(ink.ast.deref(while_expr.condition), name)) |info| return info;
+            if (find_hover_info_node(ink.ast.deref(while_expr.body), name)) |info| return info;
+        },
+        .while_in_expr => |while_in_expr| {
+            if (find_hover_info_node(ink.ast.deref(while_in_expr.pattern), name)) |info| return info;
+            if (find_hover_info_node(ink.ast.deref(while_in_expr.iter), name)) |info| return info;
+            if (find_hover_info_node(ink.ast.deref(while_in_expr.body), name)) |info| return info;
+        },
+        .until_expr => |until_expr| {
+            if (find_hover_info_node(ink.ast.deref(until_expr.condition), name)) |info| return info;
+            if (find_hover_info_node(ink.ast.deref(until_expr.body), name)) |info| return info;
+        },
+        .repeat_expr => |repeat_expr| {
+            if (find_hover_info_node(ink.ast.deref(repeat_expr.count), name)) |info| return info;
+            if (find_hover_info_node(ink.ast.deref(repeat_expr.body), name)) |info| return info;
+        },
+        .for_expr => |for_expr| {
+            if (find_hover_info_node(ink.ast.deref(for_expr.pattern), name)) |info| return info;
+            if (find_hover_info_node(ink.ast.deref(for_expr.iter), name)) |info| return info;
+            if (find_hover_info_node(ink.ast.deref(for_expr.body), name)) |info| return info;
+        },
+        .each_expr => |each_expr| {
+            if (find_hover_info_node(ink.ast.deref(each_expr.pattern), name)) |info| return info;
+            if (find_hover_info_node(ink.ast.deref(each_expr.iter), name)) |info| return info;
+            if (find_hover_info_node(ink.ast.deref(each_expr.body), name)) |info| return info;
+        },
+        .break_expr => |break_expr| {
+            if (break_expr.label) |label| {
+                if (std.mem.eql(u8, label.string, name)) return .{ .variable = label };
+            }
+            if (break_expr.value) |ref| {
+                if (find_hover_info_node(ink.ast.deref(ref), name)) |info| return info;
+            }
+        },
+        .continue_expr => |continue_expr| {
+            if (continue_expr.label) |label| {
+                if (std.mem.eql(u8, label.string, name)) return .{ .variable = label };
+            }
+        },
+        .yield_expr => |yield_expr| {
+            if (yield_expr.value) |ref| {
+                if (find_hover_info_node(ink.ast.deref(ref), name)) |info| return info;
+            }
+        },
+        .atomic_expr => |atomic_expr| {
+            if (find_hover_info_node(ink.ast.deref(atomic_expr.value), name)) |info| return info;
         },
         .record => |rec| {
             for (rec.items) |assoc| {
@@ -1942,6 +2205,25 @@ fn write_function_signature(writer: anytype, func: ink.ast.function_decl, is_for
     }
 }
 
+fn write_signature_label(buf: *std.array_list.Managed(u8), sig: function_sig, skip_self: bool) !void {
+    const writer = buf.writer();
+    try writer.writeAll("fn ");
+    try writer.writeAll(sig.name);
+    try writer.writeAll("(");
+    const param_start: usize = if (skip_self and sig.params.len > 0) 1 else 0;
+    for (sig.params[param_start..], 0..) |param, idx| {
+        if (idx != 0) try writer.writeAll(", ");
+        try writer.writeAll(param.name.string);
+        try writer.writeAll(": ");
+        try write_type_node(writer, ink.ast.deref(param.ty));
+    }
+    try writer.writeAll(")");
+    if (sig.return_type) |ref| {
+        try writer.writeAll(" -> ");
+        try write_type_node(writer, ink.ast.deref(ref));
+    }
+}
+
 fn write_type_node(writer: anytype, node: *const ink.node) anyerror!void {
     switch (node.*) {
         .type => |ty| try write_type_expr(writer, ty),
@@ -2044,8 +2326,9 @@ fn write_type_list(writer: anytype, args: []const ink.ast.node_ref, sep: []const
 fn write_expr_brief(writer: anytype, node: *const ink.node) anyerror!void {
     switch (node.*) {
         .identifier => |id| try writer.writeAll(id.string),
-        .integer => |val| try writer.print("{d}", .{val}),
-        .float => |val| try writer.print("{d}", .{val}),
+        .integer => |val| try writer.print("{d}", .{val.value}),
+        .float => |val| try writer.print("{d}", .{val.value}),
+        .duration => |val| try writer.print("{d}", .{val.value}),
         .string => |id| {
             try writer.writeAll("\"");
             try writer.writeAll(id.string);
@@ -2053,6 +2336,83 @@ fn write_expr_brief(writer: anytype, node: *const ink.node) anyerror!void {
         },
         .type => |ty| try write_type_expr(writer, ty),
         else => try writer.writeAll("expr"),
+    }
+}
+
+const numeric_hint_kind = enum { integer, float, duration };
+
+fn is_digit_char(ch: u8) bool {
+    return ch >= '0' and ch <= '9';
+}
+
+fn add_digit_group_hints(
+    hints: *std.array_list.Managed(inlay_hint),
+    line_offsets: []const usize,
+    text: []const u8,
+    digits: []const u8,
+    base_offset: usize,
+    start_offset: usize,
+    end_offset: usize,
+) !void {
+    if (digits.len <= 3) return;
+    var first_group = digits.len % 3;
+    if (first_group == 0) first_group = 3;
+    var idx = first_group;
+    while (idx < digits.len) : (idx += 3) {
+        const hint_offset = base_offset + idx;
+        if (hint_offset < start_offset or hint_offset > end_offset) continue;
+        const pos = position_from_offset_with_lines(text, line_offsets, hint_offset);
+        try hints.append(.{
+            .position = pos,
+            .label = "_",
+            .owned = false,
+            .kind = inlay_hint_kind_type,
+            .padding_left = false,
+            .padding_right = false,
+        });
+    }
+}
+
+fn maybe_add_numeric_group_hints(
+    hints: *std.array_list.Managed(inlay_hint),
+    line_offsets: []const usize,
+    text: []const u8,
+    span: source.span,
+    kind: numeric_hint_kind,
+    start_offset: usize,
+    end_offset: usize,
+) !void {
+    if (span.start >= text.len or span.end > text.len or span.start >= span.end) return;
+    const literal = text[span.start..span.end];
+    switch (kind) {
+        .integer => try add_digit_group_hints(hints, line_offsets, text, literal, span.start, start_offset, end_offset),
+        .float => {
+            var cut = literal.len;
+            if (std.mem.indexOfScalar(u8, literal, '.')) |idx| {
+                if (idx < cut) cut = idx;
+            }
+            if (std.mem.indexOfScalar(u8, literal, 'e')) |idx| {
+                if (idx < cut) cut = idx;
+            }
+            if (std.mem.indexOfScalar(u8, literal, 'E')) |idx| {
+                if (idx < cut) cut = idx;
+            }
+            if (cut == 0) return;
+            try add_digit_group_hints(hints, line_offsets, text, literal[0..cut], span.start, start_offset, end_offset);
+        },
+        .duration => {
+            var idx: usize = 0;
+            while (idx < literal.len) {
+                if (!is_digit_char(literal[idx])) {
+                    idx += 1;
+                    continue;
+                }
+                const start = idx;
+                idx += 1;
+                while (idx < literal.len and is_digit_char(literal[idx])) : (idx += 1) {}
+                try add_digit_group_hints(hints, line_offsets, text, literal[start..idx], span.start + start, start_offset, end_offset);
+            }
+        },
     }
 }
 
@@ -2261,6 +2621,53 @@ fn collect_inlay_hints_node(
                 try collect_inlay_hints_node(allocator, hints, sigs, variants, line_offsets, text, ink.ast.deref(arm.body), start_offset, end_offset);
             }
         },
+        .label_expr => |label_expr| {
+            try collect_inlay_hints_node(allocator, hints, sigs, variants, line_offsets, text, ink.ast.deref(label_expr.body), start_offset, end_offset);
+        },
+        .loop_expr => |loop_expr| {
+            try collect_inlay_hints_node(allocator, hints, sigs, variants, line_offsets, text, ink.ast.deref(loop_expr.body), start_offset, end_offset);
+        },
+        .while_expr => |while_expr| {
+            try collect_inlay_hints_node(allocator, hints, sigs, variants, line_offsets, text, ink.ast.deref(while_expr.condition), start_offset, end_offset);
+            try collect_inlay_hints_node(allocator, hints, sigs, variants, line_offsets, text, ink.ast.deref(while_expr.body), start_offset, end_offset);
+        },
+        .while_in_expr => |while_in_expr| {
+            try collect_inlay_hints_node(allocator, hints, sigs, variants, line_offsets, text, ink.ast.deref(while_in_expr.pattern), start_offset, end_offset);
+            try collect_inlay_hints_node(allocator, hints, sigs, variants, line_offsets, text, ink.ast.deref(while_in_expr.iter), start_offset, end_offset);
+            try collect_inlay_hints_node(allocator, hints, sigs, variants, line_offsets, text, ink.ast.deref(while_in_expr.body), start_offset, end_offset);
+        },
+        .until_expr => |until_expr| {
+            try collect_inlay_hints_node(allocator, hints, sigs, variants, line_offsets, text, ink.ast.deref(until_expr.condition), start_offset, end_offset);
+            try collect_inlay_hints_node(allocator, hints, sigs, variants, line_offsets, text, ink.ast.deref(until_expr.body), start_offset, end_offset);
+        },
+        .repeat_expr => |repeat_expr| {
+            try collect_inlay_hints_node(allocator, hints, sigs, variants, line_offsets, text, ink.ast.deref(repeat_expr.count), start_offset, end_offset);
+            try collect_inlay_hints_node(allocator, hints, sigs, variants, line_offsets, text, ink.ast.deref(repeat_expr.body), start_offset, end_offset);
+        },
+        .for_expr => |for_expr| {
+            try collect_inlay_hints_node(allocator, hints, sigs, variants, line_offsets, text, ink.ast.deref(for_expr.pattern), start_offset, end_offset);
+            try collect_inlay_hints_node(allocator, hints, sigs, variants, line_offsets, text, ink.ast.deref(for_expr.iter), start_offset, end_offset);
+            try collect_inlay_hints_node(allocator, hints, sigs, variants, line_offsets, text, ink.ast.deref(for_expr.body), start_offset, end_offset);
+        },
+        .each_expr => |each_expr| {
+            try collect_inlay_hints_node(allocator, hints, sigs, variants, line_offsets, text, ink.ast.deref(each_expr.pattern), start_offset, end_offset);
+            try collect_inlay_hints_node(allocator, hints, sigs, variants, line_offsets, text, ink.ast.deref(each_expr.iter), start_offset, end_offset);
+            try collect_inlay_hints_node(allocator, hints, sigs, variants, line_offsets, text, ink.ast.deref(each_expr.body), start_offset, end_offset);
+        },
+        .break_expr => |break_expr| {
+            if (break_expr.value) |ref| {
+                try collect_inlay_hints_node(allocator, hints, sigs, variants, line_offsets, text, ink.ast.deref(ref), start_offset, end_offset);
+            }
+        },
+        .continue_expr => {},
+        .yield_expr => |yield_expr| {
+            if (yield_expr.value) |ref| {
+                try collect_inlay_hints_node(allocator, hints, sigs, variants, line_offsets, text, ink.ast.deref(ref), start_offset, end_offset);
+            }
+        },
+        .atomic_expr => |atomic_expr| {
+            try collect_inlay_hints_node(allocator, hints, sigs, variants, line_offsets, text, ink.ast.deref(atomic_expr.value), start_offset, end_offset);
+        },
         .record => |rec| {
             for (rec.items) |assoc| {
                 if (assoc.value) |ref| try collect_inlay_hints_node(
@@ -2310,12 +2717,21 @@ fn collect_inlay_hints_node(
                     find_function_sig(sigs, name)
                 else
                     null;
+                var param_offset: usize = 0;
+                if (sig) |found_sig| {
+                    if (call.callee.* == .binary and call.callee.binary.op == .access) {
+                        if (found_sig.params.len > 0 and is_receiver_param_name(found_sig.params[0].name.string)) {
+                            param_offset = 1;
+                        }
+                    }
+                }
                 for (call.args, 0..) |arg, idx| {
                     if (sig) |found_sig| {
-                        if (idx < found_sig.params.len) {
+                        const param_idx = idx + param_offset;
+                        if (param_idx < found_sig.params.len) {
                             if (node_start_span(arg)) |span| {
                                 if (span.start >= start_offset and span.start <= end_offset) {
-                                    const label = try std.fmt.allocPrint(allocator, "{s}:", .{found_sig.params[idx].name.string});
+                                    const label = try std.fmt.allocPrint(allocator, "{s}:", .{found_sig.params[param_idx].name.string});
                                     const pos = position_from_offset_with_lines(text, line_offsets, span.start);
                                     try hints.append(.{
                                         .position = pos,
@@ -2459,6 +2875,49 @@ fn collect_function_sigs(sigs: *std.array_list.Managed(function_sig), node: *con
                 try collect_function_sigs(sigs, ink.ast.deref(arm.body));
             }
         },
+        .label_expr => |label_expr| {
+            try collect_function_sigs(sigs, ink.ast.deref(label_expr.body));
+        },
+        .loop_expr => |loop_expr| {
+            try collect_function_sigs(sigs, ink.ast.deref(loop_expr.body));
+        },
+        .while_expr => |while_expr| {
+            try collect_function_sigs(sigs, ink.ast.deref(while_expr.condition));
+            try collect_function_sigs(sigs, ink.ast.deref(while_expr.body));
+        },
+        .while_in_expr => |while_in_expr| {
+            try collect_function_sigs(sigs, ink.ast.deref(while_in_expr.pattern));
+            try collect_function_sigs(sigs, ink.ast.deref(while_in_expr.iter));
+            try collect_function_sigs(sigs, ink.ast.deref(while_in_expr.body));
+        },
+        .until_expr => |until_expr| {
+            try collect_function_sigs(sigs, ink.ast.deref(until_expr.condition));
+            try collect_function_sigs(sigs, ink.ast.deref(until_expr.body));
+        },
+        .repeat_expr => |repeat_expr| {
+            try collect_function_sigs(sigs, ink.ast.deref(repeat_expr.count));
+            try collect_function_sigs(sigs, ink.ast.deref(repeat_expr.body));
+        },
+        .for_expr => |for_expr| {
+            try collect_function_sigs(sigs, ink.ast.deref(for_expr.pattern));
+            try collect_function_sigs(sigs, ink.ast.deref(for_expr.iter));
+            try collect_function_sigs(sigs, ink.ast.deref(for_expr.body));
+        },
+        .each_expr => |each_expr| {
+            try collect_function_sigs(sigs, ink.ast.deref(each_expr.pattern));
+            try collect_function_sigs(sigs, ink.ast.deref(each_expr.iter));
+            try collect_function_sigs(sigs, ink.ast.deref(each_expr.body));
+        },
+        .break_expr => |break_expr| {
+            if (break_expr.value) |ref| try collect_function_sigs(sigs, ink.ast.deref(ref));
+        },
+        .continue_expr => {},
+        .yield_expr => |yield_expr| {
+            if (yield_expr.value) |ref| try collect_function_sigs(sigs, ink.ast.deref(ref));
+        },
+        .atomic_expr => |atomic_expr| {
+            try collect_function_sigs(sigs, ink.ast.deref(atomic_expr.value));
+        },
         .record => |rec| {
             for (rec.items) |assoc| {
                 if (assoc.value) |ref| try collect_function_sigs(sigs, ink.ast.deref(ref));
@@ -2525,6 +2984,49 @@ fn collect_variant_infos(variants: *std.array_list.Managed(variant_info), node: 
                 try collect_variant_infos(variants, ink.ast.deref(arm.body));
             }
         },
+        .label_expr => |label_expr| {
+            try collect_variant_infos(variants, ink.ast.deref(label_expr.body));
+        },
+        .loop_expr => |loop_expr| {
+            try collect_variant_infos(variants, ink.ast.deref(loop_expr.body));
+        },
+        .while_expr => |while_expr| {
+            try collect_variant_infos(variants, ink.ast.deref(while_expr.condition));
+            try collect_variant_infos(variants, ink.ast.deref(while_expr.body));
+        },
+        .while_in_expr => |while_in_expr| {
+            try collect_variant_infos(variants, ink.ast.deref(while_in_expr.pattern));
+            try collect_variant_infos(variants, ink.ast.deref(while_in_expr.iter));
+            try collect_variant_infos(variants, ink.ast.deref(while_in_expr.body));
+        },
+        .until_expr => |until_expr| {
+            try collect_variant_infos(variants, ink.ast.deref(until_expr.condition));
+            try collect_variant_infos(variants, ink.ast.deref(until_expr.body));
+        },
+        .repeat_expr => |repeat_expr| {
+            try collect_variant_infos(variants, ink.ast.deref(repeat_expr.count));
+            try collect_variant_infos(variants, ink.ast.deref(repeat_expr.body));
+        },
+        .for_expr => |for_expr| {
+            try collect_variant_infos(variants, ink.ast.deref(for_expr.pattern));
+            try collect_variant_infos(variants, ink.ast.deref(for_expr.iter));
+            try collect_variant_infos(variants, ink.ast.deref(for_expr.body));
+        },
+        .each_expr => |each_expr| {
+            try collect_variant_infos(variants, ink.ast.deref(each_expr.pattern));
+            try collect_variant_infos(variants, ink.ast.deref(each_expr.iter));
+            try collect_variant_infos(variants, ink.ast.deref(each_expr.body));
+        },
+        .break_expr => |break_expr| {
+            if (break_expr.value) |ref| try collect_variant_infos(variants, ink.ast.deref(ref));
+        },
+        .continue_expr => {},
+        .yield_expr => |yield_expr| {
+            if (yield_expr.value) |ref| try collect_variant_infos(variants, ink.ast.deref(ref));
+        },
+        .atomic_expr => |atomic_expr| {
+            try collect_variant_infos(variants, ink.ast.deref(atomic_expr.value));
+        },
         .record => |rec| {
             for (rec.items) |assoc| {
                 if (assoc.value) |ref| try collect_variant_infos(variants, ink.ast.deref(ref));
@@ -2586,6 +3088,10 @@ fn callee_name(node: *const ink.node) ?[]const u8 {
         else => {},
     }
     return null;
+}
+
+fn is_receiver_param_name(name: []const u8) bool {
+    return std.mem.eql(u8, name, "self") or std.mem.eql(u8, name, "this");
 }
 
 fn maybe_add_type_hint(
@@ -2753,6 +3259,49 @@ fn collect_return_labels(
         .select_expr => |se| {
             for (se.arms) |arm| try collect_return_labels(allocator, sigs, ink.ast.deref(arm.body), state);
         },
+        .label_expr => |label_expr| {
+            try collect_return_labels(allocator, sigs, ink.ast.deref(label_expr.body), state);
+        },
+        .loop_expr => |loop_expr| {
+            try collect_return_labels(allocator, sigs, ink.ast.deref(loop_expr.body), state);
+        },
+        .while_expr => |while_expr| {
+            try collect_return_labels(allocator, sigs, ink.ast.deref(while_expr.condition), state);
+            try collect_return_labels(allocator, sigs, ink.ast.deref(while_expr.body), state);
+        },
+        .while_in_expr => |while_in_expr| {
+            try collect_return_labels(allocator, sigs, ink.ast.deref(while_in_expr.pattern), state);
+            try collect_return_labels(allocator, sigs, ink.ast.deref(while_in_expr.iter), state);
+            try collect_return_labels(allocator, sigs, ink.ast.deref(while_in_expr.body), state);
+        },
+        .until_expr => |until_expr| {
+            try collect_return_labels(allocator, sigs, ink.ast.deref(until_expr.condition), state);
+            try collect_return_labels(allocator, sigs, ink.ast.deref(until_expr.body), state);
+        },
+        .repeat_expr => |repeat_expr| {
+            try collect_return_labels(allocator, sigs, ink.ast.deref(repeat_expr.count), state);
+            try collect_return_labels(allocator, sigs, ink.ast.deref(repeat_expr.body), state);
+        },
+        .for_expr => |for_expr| {
+            try collect_return_labels(allocator, sigs, ink.ast.deref(for_expr.pattern), state);
+            try collect_return_labels(allocator, sigs, ink.ast.deref(for_expr.iter), state);
+            try collect_return_labels(allocator, sigs, ink.ast.deref(for_expr.body), state);
+        },
+        .each_expr => |each_expr| {
+            try collect_return_labels(allocator, sigs, ink.ast.deref(each_expr.pattern), state);
+            try collect_return_labels(allocator, sigs, ink.ast.deref(each_expr.iter), state);
+            try collect_return_labels(allocator, sigs, ink.ast.deref(each_expr.body), state);
+        },
+        .break_expr => |break_expr| {
+            if (break_expr.value) |ref| try collect_return_labels(allocator, sigs, ink.ast.deref(ref), state);
+        },
+        .continue_expr => {},
+        .yield_expr => |yield_expr| {
+            if (yield_expr.value) |ref| try collect_return_labels(allocator, sigs, ink.ast.deref(ref), state);
+        },
+        .atomic_expr => |atomic_expr| {
+            try collect_return_labels(allocator, sigs, ink.ast.deref(atomic_expr.value), state);
+        },
         .record => |rec| {
             for (rec.items) |assoc| {
                 if (assoc.value) |ref| try collect_return_labels(allocator, sigs, ink.ast.deref(ref), state);
@@ -2782,6 +3331,7 @@ fn infer_expr_type_label(
     switch (node.*) {
         .integer => return .{ .text = "int", .owned = false },
         .float => return .{ .text = "float", .owned = false },
+        .duration => return .{ .text = "duration", .owned = false },
         .string => return .{ .text = "string", .owned = false },
         .identifier => |id| {
             if (std.mem.eql(u8, id.string, "true") or std.mem.eql(u8, id.string, "false")) {
@@ -2793,6 +3343,7 @@ fn infer_expr_type_label(
             return null;
         },
         .record => return null,
+        .label_expr => |label_expr| return infer_expr_type_label(allocator, sigs, ink.ast.deref(label_expr.body)),
         .unary => |un| return infer_expr_type_label(allocator, sigs, ink.ast.deref(un.right)),
         .binary => |bin| switch (bin.op) {
             .call => {
@@ -2812,8 +3363,7 @@ fn infer_expr_type_label(
                 try infer_expr_type_label(allocator, sigs, ink.ast.deref(bin.left)),
                 try infer_expr_type_label(allocator, sigs, ink.ast.deref(bin.right)),
             ),
-            .logical_and, .logical_or, .logical_xor, .less_than, .less_or_equal, .greater_than,
-            .greater_or_equal, .equal, .not_equal => return .{ .text = "bool", .owned = false },
+            .logical_and, .logical_or, .logical_xor, .less_than, .less_or_equal, .greater_than, .greater_or_equal, .equal, .not_equal => return .{ .text = "bool", .owned = false },
             .add, .sub, .mul, .div, .mod, .min, .max => {
                 const left = try infer_expr_type_label(allocator, sigs, ink.ast.deref(bin.left));
                 const right = try infer_expr_type_label(allocator, sigs, ink.ast.deref(bin.right));
@@ -2957,6 +3507,9 @@ fn free_type_label(allocator: mem_allocator, label: type_label) void {
 
 fn node_start_span(node: *const ink.node) ?source.span {
     switch (node.*) {
+        .integer => |val| return .{ .start = val.where.start, .end = val.where.end },
+        .float => |val| return .{ .start = val.where.start, .end = val.where.end },
+        .duration => |val| return .{ .start = val.where.start, .end = val.where.end },
         .identifier => |id| return .{ .start = id.where.start, .end = id.where.end },
         .string => |id| return .{ .start = id.where.start, .end = id.where.end },
         .type => |ty| switch (ty) {
@@ -3040,6 +3593,85 @@ fn identifier_span_at(text: []const u8, offset: usize) ?source.span {
     while (end < text.len and is_ident_byte(text[end])) : (end += 1) {}
     if (start == end) return null;
     return .{ .start = start, .end = end };
+}
+
+fn token_index_at_offset(tokens: []const ink.token, offset: usize) ?usize {
+    var idx: ?usize = null;
+    for (tokens, 0..) |tok, i| {
+        if (tok.where.start <= offset) {
+            idx = i;
+            continue;
+        }
+        break;
+    }
+    return idx;
+}
+
+fn token_is_layout(kind: ink.token.kind) bool {
+    return kind == .new_line or kind == .indent or kind == .dedent;
+}
+
+fn find_call_callee(tokens: []const ink.token, paren_idx: usize) ?signature_context {
+    if (paren_idx == 0) return null;
+    var idx = paren_idx;
+    while (idx > 0) {
+        idx -= 1;
+        const tok = tokens[idx];
+        if (token_is_layout(tok.which)) continue;
+        if (tok.which == .identifier) {
+            var is_method = false;
+            if (idx > 0 and tokens[idx - 1].which == .dot) {
+                is_method = true;
+            }
+            return .{ .name = tok.what.string, .arg_index = 0, .is_method = is_method };
+        }
+    }
+    return null;
+}
+
+fn count_call_commas(tokens: []const ink.token, start_idx: usize, end_idx: usize) usize {
+    if (start_idx > end_idx) return 0;
+    var depth: i32 = 0;
+    var count: usize = 0;
+    var idx = start_idx;
+    while (idx <= end_idx) : (idx += 1) {
+        const tok = tokens[idx];
+        switch (tok.which) {
+            .paren_left, .bracket_left => depth += 1,
+            .paren_right, .bracket_right => {
+                if (depth > 0) depth -= 1;
+            },
+            .comma => {
+                if (depth == 0) count += 1;
+            },
+            else => {},
+        }
+    }
+    return count;
+}
+
+fn find_signature_context(tokens: []const ink.token, offset: usize) ?signature_context {
+    const idx = token_index_at_offset(tokens, offset) orelse return null;
+    var depth: i32 = 0;
+    var i = idx;
+    while (true) {
+        const tok = tokens[i];
+        switch (tok.which) {
+            .paren_right => depth += 1,
+            .paren_left => {
+                if (depth == 0) {
+                    const callee = find_call_callee(tokens, i) orelse return null;
+                    const arg_index = count_call_commas(tokens, i + 1, idx);
+                    return .{ .name = callee.name, .arg_index = arg_index, .is_method = callee.is_method };
+                }
+                depth -= 1;
+            },
+            else => {},
+        }
+        if (i == 0) break;
+        i -= 1;
+    }
+    return null;
 }
 
 fn build_ast_cache(allocator: mem_allocator, text: []const u8) !ast_cache {
@@ -3207,6 +3839,7 @@ fn format_ast_error(
         .empty_block => try writer.writeAll("empty block"),
         .multiple_statements => try writer.writeAll("expected a single statement"),
         .string_literal => try writer.writeAll("string literals are not supported here"),
+        .invalid_duration_literal => try writer.writeAll("invalid duration literal"),
     }
 
     return buf.toOwnedSlice();
@@ -3320,6 +3953,7 @@ fn build_publish_diagnostics(
     allocator: mem_allocator,
     uri: []const u8,
     text: []const u8,
+    source_id_filter: ?ink.compiler.source_id,
     diags: []const ink.diagnostic,
 ) ![]u8 {
     var allocating = std.Io.Writer.Allocating.init(allocator);
@@ -3330,9 +3964,14 @@ fn build_publish_diagnostics(
     try std.json.Stringify.value(uri, .{}, writer);
     try writer.writeAll(",\"diagnostics\":[");
 
-    for (diags, 0..) |diag, i| {
-        if (i != 0) try writer.writeAll(",");
+    var wrote_any = false;
+    for (diags) |diag| {
+        if (source_id_filter != null and diag.source_id != null and diag.source_id.? != source_id_filter.?) {
+            continue;
+        }
+        if (wrote_any) try writer.writeAll(",");
         try write_diag(writer, diag, text);
+        wrote_any = true;
     }
 
     try writer.writeAll("]}}");

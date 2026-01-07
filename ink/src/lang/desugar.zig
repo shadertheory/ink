@@ -31,6 +31,7 @@ const desugarer = struct {
     const bit_alias_info = struct {
         base: []const u8,
         bits: i64,
+        where: ink.location,
     };
     const operator_target = struct {
         name: []const u8,
@@ -228,7 +229,7 @@ const desugarer = struct {
 
     fn desugar_node(self: *desugarer, node: *ink.node) desugar_error!*ink.node {
         switch (node.*) {
-            .integer, .float, .string => return node,
+            .integer, .float, .duration, .string => return node,
             .identifier => |id| {
                 if (id.owner == .ref) {
                     if (self.symbol_imports.get(id.string)) |sym| {
@@ -286,6 +287,96 @@ const desugarer = struct {
                 } };
                 return node;
             },
+            .label_expr => |le| {
+                const body = try self.desugar_node(ink.ast.deref(le.body));
+                node.* = .{ .label_expr = .{
+                    .name = le.name,
+                    .body = ink.ast.ref(body),
+                } };
+                return node;
+            },
+            .loop_expr => |le| {
+                const body = try self.desugar_node(ink.ast.deref(le.body));
+                node.* = .{ .loop_expr = .{ .body = ink.ast.ref(body) } };
+                return node;
+            },
+            .while_expr => |we| {
+                const condition = try self.desugar_node(ink.ast.deref(we.condition));
+                const body = try self.desugar_node(ink.ast.deref(we.body));
+                node.* = .{ .while_expr = .{
+                    .condition = ink.ast.ref(condition),
+                    .body = ink.ast.ref(body),
+                } };
+                return node;
+            },
+            .while_in_expr => |we| {
+                const pattern = try self.desugar_node(ink.ast.deref(we.pattern));
+                const iter = try self.desugar_node(ink.ast.deref(we.iter));
+                const body = try self.desugar_node(ink.ast.deref(we.body));
+                node.* = .{ .while_in_expr = .{
+                    .pattern = ink.ast.ref(pattern),
+                    .iter = ink.ast.ref(iter),
+                    .body = ink.ast.ref(body),
+                } };
+                return node;
+            },
+            .until_expr => |ue| {
+                const condition = try self.desugar_node(ink.ast.deref(ue.condition));
+                const body = try self.desugar_node(ink.ast.deref(ue.body));
+                node.* = .{ .until_expr = .{
+                    .condition = ink.ast.ref(condition),
+                    .body = ink.ast.ref(body),
+                } };
+                return node;
+            },
+            .repeat_expr => |re| {
+                const count = try self.desugar_node(ink.ast.deref(re.count));
+                const body = try self.desugar_node(ink.ast.deref(re.body));
+                node.* = .{ .repeat_expr = .{
+                    .count = ink.ast.ref(count),
+                    .body = ink.ast.ref(body),
+                } };
+                return node;
+            },
+            .for_expr => |fe| {
+                const pattern = try self.desugar_node(ink.ast.deref(fe.pattern));
+                const iter = try self.desugar_node(ink.ast.deref(fe.iter));
+                const body = try self.desugar_node(ink.ast.deref(fe.body));
+                node.* = .{ .for_expr = .{
+                    .pattern = ink.ast.ref(pattern),
+                    .iter = ink.ast.ref(iter),
+                    .body = ink.ast.ref(body),
+                } };
+                return node;
+            },
+            .each_expr => |ee| {
+                const pattern = try self.desugar_node(ink.ast.deref(ee.pattern));
+                const iter = try self.desugar_node(ink.ast.deref(ee.iter));
+                const body = try self.desugar_node(ink.ast.deref(ee.body));
+                node.* = .{ .each_expr = .{
+                    .pattern = ink.ast.ref(pattern),
+                    .iter = ink.ast.ref(iter),
+                    .body = ink.ast.ref(body),
+                } };
+                return node;
+            },
+            .break_expr => |be| {
+                const value = if (be.value) |ref| try self.desugar_node(ink.ast.deref(ref)) else null;
+                node.* = .{ .break_expr = .{
+                    .label = be.label,
+                    .value = ink.ast.ref_opt(value),
+                } };
+                return node;
+            },
+            .continue_expr => |ce| {
+                node.* = .{ .continue_expr = .{ .label = ce.label } };
+                return node;
+            },
+            .yield_expr => |ye| {
+                const value = if (ye.value) |ref| try self.desugar_node(ink.ast.deref(ref)) else null;
+                node.* = .{ .yield_expr = .{ .value = ink.ast.ref_opt(value) } };
+                return node;
+            },
             .match_expr => |me| {
                 const target = try self.desugar_node(ink.ast.deref(me.target));
                 const arms = @constCast(me.arms);
@@ -331,6 +422,14 @@ const desugarer = struct {
                 node.* = .{ .intrinsic = .{
                     .name = call.name,
                     .args = args,
+                } };
+                return node;
+            },
+            .atomic_expr => |ae| {
+                const value = try self.desugar_node(ink.ast.deref(ae.value));
+                node.* = .{ .atomic_expr = .{
+                    .value = ink.ast.ref(value),
+                    .ordering = ae.ordering,
                 } };
                 return node;
             },
@@ -489,7 +588,7 @@ const desugarer = struct {
             'b' => "uint",
             else => return null,
         };
-        return .{ .base = base, .bits = bits };
+        return .{ .base = base, .bits = bits, .where = id.where };
     }
 
     fn desugar_bit_alias(
@@ -498,7 +597,7 @@ const desugarer = struct {
         alias: bit_alias_info,
     ) desugar_error!ink.ast.type_expr {
         const int_node = try self.node_allocator.create(ink.node);
-        int_node.* = .{ .integer = alias.bits };
+        int_node.* = .{ .integer = .{ .value = alias.bits, .where = alias.where } };
 
         const args = try self.node_allocator.alloc(*ink.node, 1);
         args[0] = int_node;
@@ -664,6 +763,7 @@ const desugarer = struct {
 
         return .{
             .attributes = attributes,
+            .is_auto = tr.is_auto,
             .name = tr.name,
             .generics = generics,
             .items = items,
@@ -722,6 +822,7 @@ const desugarer = struct {
 
         return .{
             .attributes = attributes,
+            .negative = im.negative,
             .by_trait = im.by_trait,
             .for_struct = im.for_struct,
             .functions = functions,
@@ -820,9 +921,8 @@ const desugarer = struct {
     }
 
     fn new_integer(self: *desugarer, origin_node: *ink.node, value: i64, where: ink.location) desugar_error!*ink.node {
-        _ = where;
         const node = try self.node_allocator.create(ink.node);
-        node.* = .{ .integer = value };
+        node.* = .{ .integer = .{ .value = value, .where = where } };
         try self.origin.put(node, origin_node);
         return node;
     }

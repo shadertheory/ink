@@ -6,6 +6,6 @@
 #[foreign] fn buf_write_ptr(value: buf) -> int
 #[foreign] fn buf_read_advance(value: buf, count: int)
 #[foreign] fn buf_write_advance(value: buf, count: int)
-#[foreign] fn buf_write_bytes(value: buf, data: bytes) -> int
-#[foreign] fn buf_read_bytes(value: buf, out: bytes) -> int
+#[foreign] fn buf_write_bytes(value: buf, data: []u8) -> int
+#[foreign] fn buf_read_bytes(value: buf, out: []u8) -> int
 #[foreign] fn buf_reset(value: buf)

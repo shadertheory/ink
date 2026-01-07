@@ -38,7 +38,7 @@ Return value is written to:
 All values are 64-bit slots. Scalars/pointers are passed as raw bits.
 
 ## Lookup Order
-1) Built-ins (`std::print`, `std::alloc`, `std::free`, `std::deref`, `std::store`, `std::borrow`, `std::borrow_mut`, `std::ptr_of`)
+1) Built-ins (`std::print`, `std::alloc`, `std::free`, `std::deref`, `std::store`, `std::ptr_of`)
 2) Per-VM cache
 3) `.quill/lib` (package manager output directory)
 4) `$INK_FOREIGN_PATH` (path list)

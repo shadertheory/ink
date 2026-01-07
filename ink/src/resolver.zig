@@ -58,6 +58,7 @@ pub const resolver = struct {
         allocated_names: std.ArrayListUnmanaged([]const u8) = .{},
         ctx_span_of: ?*const fn (*const ink.node) ?span = null,
         diag_messages: ?*array_list([]const u8) = null,
+        current_source_id: ?source.source_id = null,
 
         fn deinit(self: *context) void {
             self.base_values.deinit();
@@ -84,7 +85,12 @@ pub const resolver = struct {
         fn declare_value(self: *context, name: []const u8, diags: *array_list(diagnostic), node: ?*const ink.node) alloc_error!void {
             var s = &self.scopes.items[self.scopes.items.len - 1];
             if (s.values.contains(name)) {
-                try diags.append(.{ .danger = .@"error", .message = "duplicate  symbol", .span = span_of(self, node) });
+                try diags.append(.{
+                    .danger = .@"error",
+                    .message = "duplicate  symbol",
+                    .span = span_of(self, node),
+                    .source_id = self.current_source_id,
+                });
                 return;
             }
             try s.values.put(name, {});
@@ -117,7 +123,12 @@ pub const resolver = struct {
                 const has_other = (existing & type_flag_other) != 0 or (flag & type_flag_other) != 0;
                 const duplicate = (existing & flag) != 0;
                 if (has_other or duplicate) {
-                    try diags.append(.{ .danger = .@"error", .message = "duplicate symbol", .span = span_of(self, node) });
+                    try diags.append(.{
+                        .danger = .@"error",
+                        .message = "duplicate symbol",
+                        .span = span_of(self, node),
+                        .source_id = self.current_source_id,
+                    });
                     return;
                 }
                 try s.types.put(name, existing | flag);
@@ -219,6 +230,7 @@ pub const resolver = struct {
         self: *resolver,
         id: module_id,
         items: []const *ink.node,
+        item_sources: []const source.source_id,
         diags: *array_list(diagnostic),
     ) alloc_error!void {
         const state = self.modules.get(id) orelse return;
@@ -250,7 +262,6 @@ pub const resolver = struct {
         try ctx.base_types.put("result", type_flag_other);
         try ctx.base_types.put("error", type_flag_other);
         try ctx.base_types.put("task", type_flag_other);
-        try ctx.base_types.put("bytes", type_flag_other);
         try ctx.base_types.put("buf", type_flag_other);
         try ctx.base_types.put("arena", type_flag_other);
         try ctx.base_types.put("union", type_flag_other);
@@ -259,6 +270,12 @@ pub const resolver = struct {
         try ctx.base_types.put("fn", type_flag_other);
         try ctx.base_types.put("slice", type_flag_other);
         try ctx.base_types.put("array", type_flag_other);
+        try ctx.base_types.put("box", type_flag_other);
+        try ctx.base_types.put("atomic", type_flag_other);
+        try ctx.base_types.put("duration", type_flag_other);
+        try ctx.base_types.put("instant", type_flag_other);
+        try ctx.base_types.put("deadline", type_flag_other);
+        try ctx.base_types.put("not", type_flag_other);
 
         try merge_symbols(&ctx.base_values, &ctx.base_types, state);
         for (state.imports) |imported| {
@@ -267,7 +284,12 @@ pub const resolver = struct {
             }
         }
 
-        for (items) |item| {
+        for (items, 0..) |item, idx| {
+            if (idx < item_sources.len) {
+                ctx.current_source_id = item_sources[idx];
+            } else {
+                ctx.current_source_id = null;
+            }
             try resolve_node(&ctx, item, diags);
         }
     }
@@ -380,7 +402,7 @@ pub const resolver = struct {
 
     fn resolve_node(ctx: *context, node: *const ink.node, diags: *array_list(diagnostic)) alloc_error!void {
         switch (node.*) {
-            .integer, .float, .string => {},
+            .integer, .float, .duration, .string => {},
             .identifier => |id| {
                 if (!ctx.resolve_value(id.string)) {
                     const hint = try suggest_value(ctx, id.string);
@@ -398,19 +420,49 @@ pub const resolver = struct {
             .type => |ty| try resolve_type_expr(ctx, ty, diags),
             .unary => |un| {
                 if (un.op == .ret) {
-                    if (borrowed_identifier(ink.ast.deref(un.right))) |borrowed| {
-                        if (ctx.resolve_local_value(borrowed.string)) {
-                            try diags.append(.{
-                                .danger = .@"error",
-                                .message = "borrowed local escapes scope",
-                                .span = span{ .start = borrowed.where.start, .end = borrowed.where.end },
-                            });
-                        }
-                    }
                 }
                 try resolve_node(ctx, ink.ast.deref(un.right), diags);
             },
             .binary => |bin| try resolve_binary(ctx, bin, diags),
+            .label_expr => |le| try resolve_node(ctx, ink.ast.deref(le.body), diags),
+            .loop_expr => |le| try resolve_node(ctx, ink.ast.deref(le.body), diags),
+            .while_expr => |we| {
+                try resolve_node(ctx, ink.ast.deref(we.condition), diags);
+                try resolve_node(ctx, ink.ast.deref(we.body), diags);
+            },
+            .while_in_expr => |we| {
+                try resolve_node(ctx, ink.ast.deref(we.iter), diags);
+                try ctx.push();
+                defer ctx.pop();
+                try bind_pattern(ctx, ink.ast.deref(we.pattern), diags);
+                try resolve_node(ctx, ink.ast.deref(we.body), diags);
+            },
+            .until_expr => |ue| {
+                try resolve_node(ctx, ink.ast.deref(ue.condition), diags);
+                try resolve_node(ctx, ink.ast.deref(ue.body), diags);
+            },
+            .repeat_expr => |re| {
+                try resolve_node(ctx, ink.ast.deref(re.count), diags);
+                try resolve_node(ctx, ink.ast.deref(re.body), diags);
+            },
+            .for_expr => |fe| {
+                try resolve_node(ctx, ink.ast.deref(fe.iter), diags);
+                try ctx.push();
+                defer ctx.pop();
+                try bind_pattern(ctx, ink.ast.deref(fe.pattern), diags);
+                try resolve_node(ctx, ink.ast.deref(fe.body), diags);
+            },
+            .each_expr => |ee| {
+                try resolve_node(ctx, ink.ast.deref(ee.iter), diags);
+                try ctx.push();
+                defer ctx.pop();
+                try bind_pattern(ctx, ink.ast.deref(ee.pattern), diags);
+                try resolve_node(ctx, ink.ast.deref(ee.body), diags);
+            },
+            .break_expr => |be| if (be.value) |ref| try resolve_node(ctx, ink.ast.deref(ref), diags),
+            .continue_expr => |_| {},
+            .yield_expr => |ye| if (ye.value) |ref| try resolve_node(ctx, ink.ast.deref(ref), diags),
+            .atomic_expr => |ae| try resolve_node(ctx, ink.ast.deref(ae.value), diags),
             .block => |blk| {
                 try ctx.push();
                 defer ctx.pop();
@@ -486,6 +538,7 @@ pub const resolver = struct {
                         .message = msg,
                         .span = span{ .start = call.name.where.start, .end = call.name.where.end },
                         .code = "E2004",
+                        .source_id = ctx.current_source_id,
                     });
                 }
                 for (call.args) |arg_ref| {
@@ -542,43 +595,6 @@ pub const resolver = struct {
                 try resolve_node(ctx, ink.ast.deref(bin.right), diags);
             },
         }
-    }
-
-    fn borrowed_identifier(node: *const ink.node) ?ink.identifier {
-        if (node.* == .intrinsic) {
-            const call = node.intrinsic;
-            if (!std.mem.eql(u8, call.name.string, "borrow") and !std.mem.eql(u8, call.name.string, "borrow_mut")) {
-                return null;
-            }
-            if (call.args.len != 1) return null;
-            const arg = ink.ast.deref(call.args[0]);
-            if (arg.* != .identifier) return null;
-            return arg.identifier;
-        }
-
-        var base = node;
-        var count: usize = 0;
-        var arg: ?*const ink.node = null;
-
-        while (base.* == .binary and base.binary.op == .call) {
-            const call = base.binary;
-            count += 1;
-            if (count == 1) {
-                arg = ink.ast.deref(call.right);
-            }
-            base = ink.ast.deref(call.left);
-        }
-
-        if (count != 1 or arg == null or base.* != .identifier or arg.?.* != .identifier) {
-            return null;
-        }
-
-        const name = base.identifier.string;
-        if (!std.mem.endsWith(u8, name, "::borrow") and !std.mem.endsWith(u8, name, "::borrow_mut")) {
-            return null;
-        }
-
-        return arg.?.identifier;
     }
 
     fn declare_decl(ctx: *context, decl: ink.ast.decl, diags: *array_list(diagnostic), node: *const ink.node) alloc_error!void {
@@ -679,6 +695,7 @@ pub const resolver = struct {
                         .danger = .@"error",
                         .message = "type packs must be declared as type generics",
                         .span = span{ .start = param.name.where.start, .end = param.name.where.end },
+                        .source_id = ctx.current_source_id,
                     });
                 }
                 pack_params.put(param.name.string, {}) catch return error.OutOfMemory;
@@ -693,6 +710,7 @@ pub const resolver = struct {
                     .danger = .@"error",
                     .message = "only one variadic param is allowed",
                     .span = span{ .start = param.name.where.start, .end = param.name.where.end },
+                    .source_id = ctx.current_source_id,
                 });
             }
             if (idx + 1 != func.params.len) {
@@ -700,6 +718,7 @@ pub const resolver = struct {
                     .danger = .@"error",
                     .message = "variadic param must be the last parameter",
                     .span = span{ .start = param.name.where.start, .end = param.name.where.end },
+                    .source_id = ctx.current_source_id,
                 });
             }
             seen_variadic = true;
@@ -710,12 +729,14 @@ pub const resolver = struct {
                     .danger = .@"error",
                     .message = "variadic params must use a named type",
                     .span = span{ .start = param.name.where.start, .end = param.name.where.end },
+                    .source_id = ctx.current_source_id,
                 });
             } else if (type_params.contains(ty_node.type.name.string) and !pack_params.contains(ty_node.type.name.string)) {
                 try diags.append(.{
                     .danger = .@"error",
                     .message = "variadic param must reference a type pack generic",
                     .span = span{ .start = param.name.where.start, .end = param.name.where.end },
+                    .source_id = ctx.current_source_id,
                 });
             }
         }
@@ -737,6 +758,7 @@ pub const resolver = struct {
                 .danger = .@"error",
                 .message = "foreign functions cannot have bodies",
                 .span = .{ .start = func.name.where.start, .end = func.name.where.end },
+                .source_id = ctx.current_source_id,
             });
         }
         if (!is_foreign) {
@@ -861,6 +883,18 @@ pub const resolver = struct {
             );
         }
 
+        if (im.negative and im.functions.len != 0) {
+            try diags.append(.{
+                .danger = .@"error",
+                .message = "negative impls cannot define functions",
+                .span = span{ .start = im.by_trait.where.start, .end = im.by_trait.where.end },
+                .source_id = ctx.current_source_id,
+            });
+            return;
+        }
+
+        if (im.negative) return;
+
         for (im.functions) |func| {
             try resolve_function_decl(ctx, func, diags);
         }
@@ -910,26 +944,38 @@ pub const resolver = struct {
             .dyn => |ref| {
                 const inner = ink.ast.deref(ref);
                 try resolve_type_node(ctx, inner, diags);
-                const trait_name = switch (inner.*) {
-                    .type => |inner_ty| switch (inner_ty) {
-                        .name => |name_id| name_id.string,
-                        .applied => |ap| ap.base.string,
-                        else => null,
-                    },
-                    else => null,
-                };
-                if (trait_name == null or !ctx.resolve_trait(trait_name.?)) {
-                    const where = ctx.span_of(inner);
-                    const hint = if (trait_name) |name| try suggest_type(ctx, name) else null;
-                    try report_unknown(
-                        ctx,
-                        diags,
-                        "unknown trait",
-                        trait_name orelse "trait",
-                        where orelse span{ .start = 0, .end = 0 },
-                        "E2002",
-                        hint,
-                    );
+                var pos = std.array_list.Managed([]const u8).init(ctx.allocator);
+                defer pos.deinit();
+                var neg = std.array_list.Managed([]const u8).init(ctx.allocator);
+                defer neg.deinit();
+                var base: ?[]const u8 = null;
+                collect_dyn_trait_names(ctx, inner, &base, &pos, &neg);
+
+                if (base == null) {
+                    const where = ctx.span_of(inner) orelse span{ .start = 0, .end = 0 };
+                    try diags.append(.{
+                        .danger = .@"error",
+                        .message = "dyn types require at least one positive trait",
+                        .span = where,
+                        .code = "E2003",
+                        .source_id = ctx.current_source_id,
+                    });
+                    return;
+                }
+
+                for (pos.items) |name| {
+                    if (!ctx.resolve_trait(name)) {
+                        const hint = try suggest_type(ctx, name);
+                        const where = ctx.span_of(inner) orelse span{ .start = 0, .end = 0 };
+                        try report_unknown(ctx, diags, "unknown trait", name, where, "E2002", hint);
+                    }
+                }
+                for (neg.items) |name| {
+                    if (!ctx.resolve_trait(name)) {
+                        const hint = try suggest_type(ctx, name);
+                        const where = ctx.span_of(inner) orelse span{ .start = 0, .end = 0 };
+                        try report_unknown(ctx, diags, "unknown trait", name, where, "E2002", hint);
+                    }
                 }
             },
             .applied => |ap| {
@@ -951,6 +997,7 @@ pub const resolver = struct {
                         .message = "slice type expects 1 argument",
                         .span = span{ .start = ap.base.where.start, .end = ap.base.where.end },
                         .code = "E2003",
+                        .source_id = ctx.current_source_id,
                     });
                 }
                 if (std.mem.eql(u8, ap.base.string, "array") and ap.args.len != 2) {
@@ -959,6 +1006,7 @@ pub const resolver = struct {
                         .message = "array type expects length and element type",
                         .span = span{ .start = ap.base.where.start, .end = ap.base.where.end },
                         .code = "E2003",
+                        .source_id = ctx.current_source_id,
                     });
                 }
                 if (std.mem.eql(u8, ap.base.string, "int") or std.mem.eql(u8, ap.base.string, "uint")) {
@@ -972,6 +1020,65 @@ pub const resolver = struct {
                     try resolve_type_node(ctx, arg_node, diags);
                 }
             },
+        }
+    }
+
+    fn append_dyn_trait_name(base: *?[]const u8, list: *array_list([]const u8), name: []const u8) void {
+        if (base.* == null) {
+            base.* = name;
+            return;
+        }
+        for (list.items) |item| {
+            if (std.mem.eql(u8, item, name)) return;
+        }
+        list.append(name) catch {};
+    }
+
+    fn type_name_from_node(node: *const ink.node) ?[]const u8 {
+        return switch (node.*) {
+            .type => |ty| switch (ty) {
+                .name => |name_id| name_id.string,
+                .applied => |ap| ap.base.string,
+                else => null,
+            },
+            .identifier => |ident| ident.string,
+            else => null,
+        };
+    }
+
+    fn collect_dyn_trait_names(
+        ctx: *context,
+        node: *const ink.node,
+        base: *?[]const u8,
+        pos: *array_list([]const u8),
+        neg: *array_list([]const u8),
+    ) void {
+        switch (node.*) {
+            .type => |ty| switch (ty) {
+                .name => |name_id| append_dyn_trait_name(base, pos, name_id.string),
+                .applied => |ap| {
+                    if (std.mem.eql(u8, ap.base.string, "intersect")) {
+                        for (ap.args) |arg_ref| {
+                            collect_dyn_trait_names(ctx, ink.ast.deref(arg_ref), base, pos, neg);
+                        }
+                        return;
+                    }
+                    if (std.mem.eql(u8, ap.base.string, "not") and ap.args.len >= 1) {
+                        const inner_node = ink.ast.deref(ap.args[0]);
+                        if (type_name_from_node(inner_node)) |inner_name| {
+                            for (neg.items) |item| {
+                                if (std.mem.eql(u8, item, inner_name)) return;
+                            }
+                            neg.append(inner_name) catch {};
+                        }
+                        return;
+                    }
+                    append_dyn_trait_name(base, pos, ap.base.string);
+                },
+                else => {},
+            },
+            .identifier => |ident| append_dyn_trait_name(base, pos, ident.string),
+            else => {},
         }
     }
 
@@ -996,10 +1103,22 @@ pub const resolver = struct {
                 .{ base_message, name, suggestion_name.? },
             );
             try ctx.diag_messages.?.append(msg);
-            try diags.append(.{ .danger = .@"error", .message = msg, .span = where, .code = code });
+            try diags.append(.{
+                .danger = .@"error",
+                .message = msg,
+                .span = where,
+                .code = code,
+                .source_id = ctx.current_source_id,
+            });
             return;
         }
-        try diags.append(.{ .danger = .@"error", .message = base_message, .span = where, .code = code });
+        try diags.append(.{
+            .danger = .@"error",
+            .message = base_message,
+            .span = where,
+            .code = code,
+            .source_id = ctx.current_source_id,
+        });
     }
 
     fn suggest_value(ctx: *context, name: []const u8) alloc_error!?[]const u8 {
@@ -1126,9 +1245,13 @@ pub const resolver = struct {
     }
 
     fn validate_int_bits(ctx: *context, ap: ink.ast.type_applied, diags: *array_list(diagnostic)) alloc_error!void {
-        _ = ctx;
         if (ap.args.len != 1) {
-            try diags.append(.{ .danger = .@"error", .message = "int/uint expects a single bit-width argument", .span = span{ .start = ap.base.where.start, .end = ap.base.where.end } });
+            try diags.append(.{
+                .danger = .@"error",
+                .message = "int/uint expects a single bit-width argument",
+                .span = span{ .start = ap.base.where.start, .end = ap.base.where.end },
+                .source_id = ctx.current_source_id,
+            });
             return;
         }
         const bits_node = ink.ast.deref(ap.args[0]);
@@ -1137,6 +1260,7 @@ pub const resolver = struct {
                 .danger = .@"error",
                 .message = "int/uint bit width must be a constant integer expression",
                 .span = span_of_node(bits_node),
+                .source_id = ctx.current_source_id,
             });
             return;
         };
@@ -1145,13 +1269,14 @@ pub const resolver = struct {
                 .danger = .@"error",
                 .message = "int/uint bit width must be > 0",
                 .span = span_of_node(bits_node),
+                .source_id = ctx.current_source_id,
             });
         }
     }
 
     fn eval_const_int(node: *const ink.node) ?i64 {
         return switch (node.*) {
-            .integer => |value| value,
+            .integer => |value| value.value,
             .unary => |un| switch (un.op) {
                 .neg => blk: {
                     const inner = eval_const_int(ink.ast.deref(un.right)) orelse break :blk null;
@@ -1178,13 +1303,30 @@ pub const resolver = struct {
     fn span_of_node(node: *const ink.node) ?span {
         return switch (node.*) {
             .identifier => |id| span{ .start = id.where.start, .end = id.where.end },
-            .integer => null,
-            .float => null,
+            .integer => |value| span{ .start = value.where.start, .end = value.where.end },
+            .float => |value| span{ .start = value.where.start, .end = value.where.end },
+            .duration => |value| span{ .start = value.where.start, .end = value.where.end },
             .string => |str| span{ .start = str.where.start, .end = str.where.end },
             .unary => |un| span_of_node(ink.ast.deref(un.right)),
             .binary => |bin| span_of_node(ink.ast.deref(bin.left)) orelse span_of_node(ink.ast.deref(bin.right)),
             .intrinsic => |call| span{ .start = call.name.where.start, .end = call.name.where.end },
             .type => |_| null,
+            .label_expr => |le| span{ .start = le.name.where.start, .end = le.name.where.end },
+            .loop_expr => |le| span_of_node(ink.ast.deref(le.body)),
+            .while_expr => |we| span_of_node(ink.ast.deref(we.condition)) orelse span_of_node(ink.ast.deref(we.body)),
+            .while_in_expr => |we| span_of_node(ink.ast.deref(we.pattern)) orelse span_of_node(ink.ast.deref(we.iter)),
+            .until_expr => |ue| span_of_node(ink.ast.deref(ue.condition)) orelse span_of_node(ink.ast.deref(ue.body)),
+            .repeat_expr => |re| span_of_node(ink.ast.deref(re.count)) orelse span_of_node(ink.ast.deref(re.body)),
+            .for_expr => |fe| span_of_node(ink.ast.deref(fe.pattern)) orelse span_of_node(ink.ast.deref(fe.iter)),
+            .each_expr => |ee| span_of_node(ink.ast.deref(ee.pattern)) orelse span_of_node(ink.ast.deref(ee.iter)),
+            .break_expr => |be| blk: {
+                if (be.value) |ref| break :blk span_of_node(ink.ast.deref(ref));
+                if (be.label) |lab| break :blk span{ .start = lab.where.start, .end = lab.where.end };
+                break :blk null;
+            },
+            .continue_expr => |ce| if (ce.label) |lab| span{ .start = lab.where.start, .end = lab.where.end } else null,
+            .yield_expr => |ye| if (ye.value) |ref| span_of_node(ink.ast.deref(ref)) else null,
+            .atomic_expr => |ae| span{ .start = ae.ordering.where.start, .end = ae.ordering.where.end },
             .decl, .if_expr, .match_expr, .select_expr, .with_expr, .block, .record, .associate => null,
         };
     }

@@ -1,4 +1,4 @@
-pub const fundamental = enum { i64, f32, bool, unit, identifier, unary, binary };
+pub const fundamental = enum { i64, f32, bool, unit, identifier, unary, binary, location };
 
 pub const type_ref = union(enum) {
     builtin: fundamental,
@@ -43,6 +43,7 @@ const ref_identifier_opt = type_ref{ .opt = &ref_identifier };
 const ref_binary = type_ref{ .builtin = .binary };
 const ref_unary = type_ref{ .builtin = .unary };
 const ref_bool = type_ref{ .builtin = .bool };
+const ref_location = type_ref{ .builtin = .location };
 
 const ref_match_arm = type_ref{ .named = "match_arm" };
 const ref_match_arm_slice = type_ref{ .slice = .{ .child = &ref_match_arm, .@"const" = true } };
@@ -147,6 +148,7 @@ pub const specification = [_]type_spec{
         .name = "impl_decl",
         .fields = &.{
             .{ .name = "attributes", .ty = ref_attribute_slice },
+            .{ .name = "negative", .ty = ref_bool },
             .{ .name = "by_trait", .ty = ref_identifier },
             .{ .name = "for_struct", .ty = ref_identifier },
             .{ .name = "functions", .ty = ref_function_decl_slice },
@@ -214,6 +216,7 @@ pub const specification = [_]type_spec{
         .name = "trait_decl",
         .fields = &.{
             .{ .name = "attributes", .ty = ref_attribute_slice },
+            .{ .name = "is_auto", .ty = ref_bool },
             .{ .name = "name", .ty = ref_identifier },
             .{ .name = "generics", .ty = ref_generic_param_slice },
             .{ .name = "items", .ty = ref_trait_item_slice },
@@ -247,6 +250,27 @@ pub const specification = [_]type_spec{
             .{ .name = "constraint", .ty = ref_node_ptr_opt },
             .{ .name = "default", .ty = ref_node_ptr_opt },
             .{ .name = "is_pack", .ty = ref_bool },
+        },
+    } },
+    .{ .@"struct" = .{
+        .name = "integer_literal",
+        .fields = &.{
+            .{ .name = "value", .ty = type_ref{ .builtin = .i64 } },
+            .{ .name = "where", .ty = ref_location },
+        },
+    } },
+    .{ .@"struct" = .{
+        .name = "float_literal",
+        .fields = &.{
+            .{ .name = "value", .ty = type_ref{ .builtin = .f32 } },
+            .{ .name = "where", .ty = ref_location },
+        },
+    } },
+    .{ .@"struct" = .{
+        .name = "duration_literal",
+        .fields = &.{
+            .{ .name = "value", .ty = type_ref{ .builtin = .i64 } },
+            .{ .name = "where", .ty = ref_location },
         },
     } },
 
@@ -294,6 +318,90 @@ pub const specification = [_]type_spec{
         .fields = &.{
             .{ .name = "name", .ty = ref_identifier },
             .{ .name = "body", .ty = ref_node_ptr },
+        },
+    } },
+    .{ .@"struct" = .{
+        .name = "label_expr",
+        .fields = &.{
+            .{ .name = "name", .ty = ref_identifier },
+            .{ .name = "body", .ty = ref_node_ptr },
+        },
+    } },
+    .{ .@"struct" = .{
+        .name = "loop_expr",
+        .fields = &.{
+            .{ .name = "body", .ty = ref_node_ptr },
+        },
+    } },
+    .{ .@"struct" = .{
+        .name = "while_expr",
+        .fields = &.{
+            .{ .name = "condition", .ty = ref_node_ptr },
+            .{ .name = "body", .ty = ref_node_ptr },
+        },
+    } },
+    .{ .@"struct" = .{
+        .name = "while_in_expr",
+        .fields = &.{
+            .{ .name = "pattern", .ty = ref_node_ptr },
+            .{ .name = "iter", .ty = ref_node_ptr },
+            .{ .name = "body", .ty = ref_node_ptr },
+        },
+    } },
+    .{ .@"struct" = .{
+        .name = "until_expr",
+        .fields = &.{
+            .{ .name = "condition", .ty = ref_node_ptr },
+            .{ .name = "body", .ty = ref_node_ptr },
+        },
+    } },
+    .{ .@"struct" = .{
+        .name = "repeat_expr",
+        .fields = &.{
+            .{ .name = "count", .ty = ref_node_ptr },
+            .{ .name = "body", .ty = ref_node_ptr },
+        },
+    } },
+    .{ .@"struct" = .{
+        .name = "for_expr",
+        .fields = &.{
+            .{ .name = "pattern", .ty = ref_node_ptr },
+            .{ .name = "iter", .ty = ref_node_ptr },
+            .{ .name = "body", .ty = ref_node_ptr },
+        },
+    } },
+    .{ .@"struct" = .{
+        .name = "each_expr",
+        .fields = &.{
+            .{ .name = "pattern", .ty = ref_node_ptr },
+            .{ .name = "iter", .ty = ref_node_ptr },
+            .{ .name = "body", .ty = ref_node_ptr },
+        },
+    } },
+    .{ .@"struct" = .{
+        .name = "break_expr",
+        .fields = &.{
+            .{ .name = "label", .ty = ref_identifier_opt },
+            .{ .name = "value", .ty = ref_node_ptr_opt },
+        },
+    } },
+    .{ .@"struct" = .{
+        .name = "continue_expr",
+        .fields = &.{
+            .{ .name = "label", .ty = ref_identifier_opt },
+        },
+    } },
+    .{ .@"struct" = .{
+        .name = "yield_expr",
+        .fields = &.{
+            .{ .name = "value", .ty = ref_node_ptr_opt },
+        },
+    } },
+    .{ .@"struct" = .{
+        .name = "atomic_expr",
+        .fields = &.{
+            .{ .name = "value", .ty = ref_node_ptr },
+            .{ .name = "ordering", .ty = ref_identifier },
         },
     } },
 
@@ -365,8 +473,9 @@ pub const specification = [_]type_spec{
 pub const node_union = union_spec{
     .name = "node",
     .fields = &.{
-        .{ .name = "integer", .ty = type_ref{ .builtin = .i64 } },
-        .{ .name = "float", .ty = type_ref{ .builtin = .f32 } },
+        .{ .name = "integer", .ty = type_ref{ .named = "integer_literal" } },
+        .{ .name = "float", .ty = type_ref{ .named = "float_literal" } },
+        .{ .name = "duration", .ty = type_ref{ .named = "duration_literal" } },
         .{ .name = "string", .ty = ref_identifier },
         .{ .name = "identifier", .ty = ref_identifier },
         .{ .name = "decl", .ty = type_ref{ .named = "decl" } },
@@ -376,6 +485,18 @@ pub const node_union = union_spec{
         .{ .name = "match_expr", .ty = type_ref{ .named = "match_expr" } },
         .{ .name = "select_expr", .ty = type_ref{ .named = "select_expr" } },
         .{ .name = "with_expr", .ty = type_ref{ .named = "with_expr" } },
+        .{ .name = "label_expr", .ty = type_ref{ .named = "label_expr" } },
+        .{ .name = "loop_expr", .ty = type_ref{ .named = "loop_expr" } },
+        .{ .name = "while_expr", .ty = type_ref{ .named = "while_expr" } },
+        .{ .name = "while_in_expr", .ty = type_ref{ .named = "while_in_expr" } },
+        .{ .name = "until_expr", .ty = type_ref{ .named = "until_expr" } },
+        .{ .name = "repeat_expr", .ty = type_ref{ .named = "repeat_expr" } },
+        .{ .name = "for_expr", .ty = type_ref{ .named = "for_expr" } },
+        .{ .name = "each_expr", .ty = type_ref{ .named = "each_expr" } },
+        .{ .name = "break_expr", .ty = type_ref{ .named = "break_expr" } },
+        .{ .name = "continue_expr", .ty = type_ref{ .named = "continue_expr" } },
+        .{ .name = "yield_expr", .ty = type_ref{ .named = "yield_expr" } },
+        .{ .name = "atomic_expr", .ty = type_ref{ .named = "atomic_expr" } },
         .{ .name = "block", .ty = type_ref{ .named = "block_expr" } },
         .{ .name = "record", .ty = type_ref{ .named = "record_expr" } },
         .{ .name = "intrinsic", .ty = type_ref{ .named = "intrinsic_call" } },
@@ -434,7 +555,16 @@ pub const unarys = [_]unary{
     .{ .name = "neg", .ir_name = "neg" },
     .{ .name = "not", .ir_name = "not" },
     .{ .name = "bit_not", .ir_name = "bit_not" },
+    .{ .name = "deref", .ir_name = "deref" },
+    .{ .name = "borrow", .ir_name = "borrow" },
+    .{ .name = "borrow_mut", .ir_name = "borrow_mut" },
+    .{ .name = "ref", .ir_name = "ref" },
+    .{ .name = "ref_mut", .ir_name = "ref_mut" },
     .{ .name = "comptime", .ir_name = "comptime" },
+    .{ .name = "box", .ir_name = "box" },
+    .{ .name = "sleep", .ir_name = "sleep" },
+    .{ .name = "timeout", .ir_name = "timeout" },
+    .{ .name = "deadline", .ir_name = "deadline" },
     .{ .name = "abs", .ir_name = "abs" },
     .{ .name = "sqrt", .ir_name = "sqrt" },
     .{ .name = "sin", .ir_name = "sin" },
@@ -457,8 +587,13 @@ pub const unarys = [_]unary{
 
 pub const keyword_lexemes = [_]lexeme{
     .{ .text = "fn", .kind = "function" },
-    .{ .text = "const", .kind = "constant" },
-    .{ .text = "var", .kind = "variable" },
+    .{ .text = "let", .kind = "constant" },
+    .{ .text = "loop", .kind = "loop" },
+    .{ .text = "while", .kind = "while" },
+    .{ .text = "until", .kind = "until" },
+    .{ .text = "repeat", .kind = "repeat" },
+    .{ .text = "for", .kind = "for" },
+    .{ .text = "each", .kind = "each" },
     .{ .text = "if", .kind = "expr_if" },
     .{ .text = "else", .kind = "expr_else" },
     .{ .text = "match", .kind = "expr_match" },
@@ -466,11 +601,20 @@ pub const keyword_lexemes = [_]lexeme{
     .{ .text = "case", .kind = "case" },
     .{ .text = "detached", .kind = "detached" },
     .{ .text = "return", .kind = "stmt_return" },
+    .{ .text = "break", .kind = "stmt_break" },
+    .{ .text = "continue", .kind = "stmt_continue" },
+    .{ .text = "yield", .kind = "yield" },
+    .{ .text = "sleep", .kind = "sleep" },
+    .{ .text = "timeout", .kind = "timeout" },
+    .{ .text = "deadline", .kind = "deadline" },
     .{ .text = "dynamic", .kind = "dynamic" },
     .{ .text = "comptime", .kind = "comptime" },
+    .{ .text = "atomic", .kind = "atomic" },
+    .{ .text = "auto", .kind = "auto" },
     .{ .text = "spawn", .kind = "spawn" },
     .{ .text = "await", .kind = "await" },
     .{ .text = "try", .kind = "try" },
+    .{ .text = "box", .kind = "box" },
     .{ .text = "or", .kind = "logical_or" },
     .{ .text = "and", .kind = "logical_and" },
     .{ .text = "xor", .kind = "logical_xor" },
@@ -484,10 +628,11 @@ pub const keyword_lexemes = [_]lexeme{
     .{ .text = "import", .kind = "import" },
     .{ .text = "from", .kind = "from" },
     .{ .text = "with", .kind = "with" },
-    .{ .text = "for", .kind = "for" },
     .{ .text = "struct", .kind = "struct" },
     .{ .text = "self", .kind = "self" },
     .{ .text = "this", .kind = "this" },
+    .{ .text = "mut", .kind = "mut" },
+    .{ .text = "ref", .kind = "ref" },
     .{ .text = "type", .kind = "type" },
     .{ .text = "enum", .kind = "enum" },
     .{ .text = "where", .kind = "where" },
@@ -616,8 +761,14 @@ pub const parser_unary_ops = [_]struct { kind: []const u8, op: []const u8 }{
     .{ .kind = "bang", .op = "not" },
     .{ .kind = "logical_not", .op = "not" },
     .{ .kind = "tilde", .op = "bit_not" },
+    .{ .kind = "asterisk", .op = "deref" },
+    .{ .kind = "ampersand", .op = "borrow" },
     .{ .kind = "dynamic", .op = "dynamic" },
     .{ .kind = "comptime", .op = "comptime" },
+    .{ .kind = "box", .op = "box" },
+    .{ .kind = "sleep", .op = "sleep" },
+    .{ .kind = "timeout", .op = "timeout" },
+    .{ .kind = "deadline", .op = "deadline" },
     .{ .kind = "spawn", .op = "spawn" },
     .{ .kind = "await", .op = "await" },
     .{ .kind = "try", .op = "try" },
@@ -648,10 +799,23 @@ pub const parser_binary_ops = [_]struct { kind: []const u8, op: []const u8 }{
 pub const parser_prefix_kinds = [_][]const u8{
     "number",
     "identifier",
+    "label",
     "expr_if",
     "expr_match",
     "expr_select",
     "with",
+    "loop",
+    "while",
+    "until",
+    "repeat",
+    "for",
+    "each",
+    "stmt_break",
+    "stmt_continue",
+    "yield",
+    "sleep",
+    "timeout",
+    "deadline",
     "function",
     "struct",
     "trait",
@@ -660,11 +824,15 @@ pub const parser_prefix_kinds = [_][]const u8{
     "stmt_return",
     "dynamic",
     "comptime",
+    "box",
+    "atomic",
     "spawn",
     "await",
     "try",
     "paren_left",
     "bracket_left",
+    "ampersand",
+    "asterisk",
     "minus",
     "bang",
     "logical_not",

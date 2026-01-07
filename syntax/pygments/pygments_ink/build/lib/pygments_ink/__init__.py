@@ -11,8 +11,8 @@ __all__ = ["InkLexer"]
 
 DEFAULT_KEYWORDS = [
     "fn",
-    "const",
-    "var",
+    "let",
+    "mut",
     "if",
     "else",
     "match",

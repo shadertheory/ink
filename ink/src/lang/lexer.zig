@@ -169,6 +169,21 @@ pub const lexer = struct {
         return self.delineate_from(kind, start);
     }
 
+    fn match_label_token(self: *lexer) ?token {
+        if (self.current != '\'') return null;
+        const start = self.head;
+        const next_char = self.peek_char();
+        if (!is_identifier_start(next_char)) {
+            self.read_char();
+            return self.delineate_from(.illegal, start);
+        }
+        self.read_char();
+        while (is_identifier_continue(self.current)) {
+            self.read_char();
+        }
+        return self.delineate_from(.label, start);
+    }
+
     fn match_string_token(self: *lexer) ?token {
         if (self.current != '"') return null;
         const start_quote = self.head;
@@ -263,6 +278,7 @@ pub const lexer = struct {
         if (self.match_whitespace_token()) |whitespace| return whitespace;
         if (self.match_simple_token_greedy()) |simple| return simple;
         if (self.match_string_token()) |string| return string;
+        if (self.match_label_token()) |label| return label;
         if (self.match_alpha_token()) |alpha| return alpha;
         if (self.match_number_token()) |number| return number;
         if (self.match_end_of_file()) |eof| return eof;

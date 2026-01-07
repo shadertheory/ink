@@ -23,6 +23,7 @@ pub const error_kind = enum {
     empty_block,
     multiple_statements,
     string_literal,
+    invalid_duration_literal,
 };
 
 pub const error_info = struct {
@@ -88,9 +89,9 @@ pub const builder = struct {
         var args: []const *ink.node = &[_]*ink.node{};
 
         for (children) |child| {
-            if (self.is_terminal(child, .identifier) or self.is_terminal(child, .@"comptime")) {
+            if (self.is_name_node(child)) {
                 if (name != null) return self.fail(.unexpected_node, id);
-                name = self.token_of(child).what;
+                name = self.name_token_of(child).?.what;
                 continue;
             }
             if (self.is_nonterminal(child, .attribute_args)) {
@@ -157,10 +158,21 @@ pub const builder = struct {
         }
 
         for (self.child_nodes(id)) |child| {
+            if (self.is_nonterminal(child, .label_expr)) return self.build_label_expr(child);
             if (self.is_nonterminal(child, .if_expr)) return self.build_if_expr(child);
             if (self.is_nonterminal(child, .match_expr)) return self.build_match_expr(child);
             if (self.is_nonterminal(child, .select_expr)) return self.build_select_expr(child);
             if (self.is_nonterminal(child, .with_expr)) return self.build_with_expr(child);
+            if (self.is_nonterminal(child, .loop_expr)) return self.build_loop_expr(child);
+            if (self.is_nonterminal(child, .while_in_expr)) return self.build_while_in_expr(child);
+            if (self.is_nonterminal(child, .while_expr)) return self.build_while_expr(child);
+            if (self.is_nonterminal(child, .until_expr)) return self.build_until_expr(child);
+            if (self.is_nonterminal(child, .repeat_expr)) return self.build_repeat_expr(child);
+            if (self.is_nonterminal(child, .for_expr)) return self.build_for_expr(child);
+            if (self.is_nonterminal(child, .each_expr)) return self.build_each_expr(child);
+            if (self.is_nonterminal(child, .break_expr)) return self.build_break_expr(child);
+            if (self.is_nonterminal(child, .continue_expr)) return self.build_continue_expr(child);
+            if (self.is_nonterminal(child, .yield_expr)) return self.build_yield_expr(child);
             if (self.is_nonterminal(child, .return_expr)) return self.build_return_expr(child);
             if (self.is_nonterminal(child, .assign)) return self.build_assign(child);
         }
@@ -214,20 +226,22 @@ pub const builder = struct {
         idx += 1;
 
         while (idx < children.len and self.is_nonterminal(children[idx], .layout)) : (idx += 1) {}
-        if (idx >= children.len or !self.is_terminal(children[idx], .identifier)) {
+        const arena_token = if (idx < children.len) self.name_token_of(children[idx]) else null;
+        if (arena_token == null) {
             return self.fail(.unexpected_node, id);
         }
-        const arena_token = self.token_of(children[idx]).what;
-        if (!std.mem.eql(u8, arena_token.string, "arena")) {
+        const arena_name = arena_token.?.what;
+        if (!std.mem.eql(u8, arena_name.string, "arena")) {
             return self.fail(.unexpected_node, id);
         }
         idx += 1;
 
         while (idx < children.len and self.is_nonterminal(children[idx], .layout)) : (idx += 1) {}
-        if (idx >= children.len or !self.is_terminal(children[idx], .identifier)) {
+        const name_token = if (idx < children.len) self.name_token_of(children[idx]) else null;
+        if (name_token == null) {
             return self.fail(.unexpected_node, id);
         }
-        const name = self.token_of(children[idx]).what;
+        const name = name_token.?.what;
         idx += 1;
 
         while (idx < children.len and self.is_nonterminal(children[idx], .layout)) : (idx += 1) {}
@@ -239,6 +253,238 @@ pub const builder = struct {
         return self.new_node(.{ .with_expr = .{
             .name = name,
             .body = ink.ast.ref(body),
+        } });
+    }
+
+    fn build_label_expr(self: *builder, id: peg_parser.node_id) build_error!*ink.node {
+        const children = self.child_nodes(id);
+        var idx: usize = 0;
+        if (idx >= children.len or !self.is_terminal(children[idx], .label)) {
+            return self.fail(.unexpected_node, id);
+        }
+        const name = self.token_of(children[idx]).what;
+        idx += 1;
+
+        while (idx < children.len and self.is_nonterminal(children[idx], .layout)) : (idx += 1) {}
+        if (idx >= children.len) return self.fail(.unexpected_node, id);
+
+        var body: ?*ink.node = null;
+        const body_id = children[idx];
+        if (self.is_nonterminal(body_id, .loop_expr)) body = try self.build_loop_expr(body_id);
+        if (self.is_nonterminal(body_id, .while_in_expr)) body = try self.build_while_in_expr(body_id);
+        if (self.is_nonterminal(body_id, .while_expr)) body = try self.build_while_expr(body_id);
+        if (self.is_nonterminal(body_id, .until_expr)) body = try self.build_until_expr(body_id);
+        if (self.is_nonterminal(body_id, .repeat_expr)) body = try self.build_repeat_expr(body_id);
+        if (self.is_nonterminal(body_id, .for_expr)) body = try self.build_for_expr(body_id);
+        if (self.is_nonterminal(body_id, .each_expr)) body = try self.build_each_expr(body_id);
+        if (self.is_nonterminal(body_id, .block)) body = try self.build_block_expr(body_id);
+
+        if (body == null) return self.fail(.unexpected_node, id);
+        return self.new_node(.{ .label_expr = .{
+            .name = name,
+            .body = ink.ast.ref(body.?),
+        } });
+    }
+
+    fn build_loop_expr(self: *builder, id: peg_parser.node_id) build_error!*ink.node {
+        const children = self.child_nodes(id);
+        if (children.len < 2 or !self.is_terminal(children[0], .loop)) {
+            return self.fail(.unexpected_node, id);
+        }
+        if (!self.is_nonterminal(children[1], .branch)) {
+            return self.fail(.unexpected_node, id);
+        }
+        const body = try self.build_branch(children[1]);
+        return self.new_node(.{ .loop_expr = .{
+            .body = ink.ast.ref(body),
+        } });
+    }
+
+    fn build_while_expr(self: *builder, id: peg_parser.node_id) build_error!*ink.node {
+        const children = self.child_nodes(id);
+        if (children.len < 3 or !self.is_terminal(children[0], .@"while")) {
+            return self.fail(.unexpected_node, id);
+        }
+        if (!self.is_nonterminal(children[1], .expr) or !self.is_nonterminal(children[2], .branch)) {
+            return self.fail(.unexpected_node, id);
+        }
+        const condition = try self.build_expr(children[1]);
+        const body = try self.build_branch(children[2]);
+        return self.new_node(.{ .while_expr = .{
+            .condition = ink.ast.ref(condition),
+            .body = ink.ast.ref(body),
+        } });
+    }
+
+    fn build_while_in_expr(self: *builder, id: peg_parser.node_id) build_error!*ink.node {
+        const children = self.child_nodes(id);
+        if (children.len < 5 or !self.is_terminal(children[0], .@"while")) {
+            return self.fail(.unexpected_node, id);
+        }
+        if (!self.is_nonterminal(children[1], .pattern)) return self.fail(.unexpected_node, id);
+        if (!self.is_terminal(children[2], .in)) return self.fail(.unexpected_node, id);
+        if (!self.is_nonterminal(children[3], .expr)) return self.fail(.unexpected_node, id);
+        if (!self.is_nonterminal(children[4], .branch)) return self.fail(.unexpected_node, id);
+
+        const pattern = try self.build_pattern(children[1]);
+        const iter = try self.build_expr(children[3]);
+        const body = try self.build_branch(children[4]);
+        return self.new_node(.{ .while_in_expr = .{
+            .pattern = ink.ast.ref(pattern),
+            .iter = ink.ast.ref(iter),
+            .body = ink.ast.ref(body),
+        } });
+    }
+
+    fn build_until_expr(self: *builder, id: peg_parser.node_id) build_error!*ink.node {
+        const children = self.child_nodes(id);
+        if (children.len < 3 or !self.is_terminal(children[0], .until)) {
+            return self.fail(.unexpected_node, id);
+        }
+        if (!self.is_nonterminal(children[1], .expr) or !self.is_nonterminal(children[2], .branch)) {
+            return self.fail(.unexpected_node, id);
+        }
+        const condition = try self.build_expr(children[1]);
+        const body = try self.build_branch(children[2]);
+        return self.new_node(.{ .until_expr = .{
+            .condition = ink.ast.ref(condition),
+            .body = ink.ast.ref(body),
+        } });
+    }
+
+    fn build_repeat_expr(self: *builder, id: peg_parser.node_id) build_error!*ink.node {
+        const children = self.child_nodes(id);
+        if (children.len < 3 or !self.is_terminal(children[0], .repeat)) {
+            return self.fail(.unexpected_node, id);
+        }
+        if (!self.is_nonterminal(children[1], .expr) or !self.is_nonterminal(children[2], .branch)) {
+            return self.fail(.unexpected_node, id);
+        }
+        const count = try self.build_expr(children[1]);
+        const body = try self.build_branch(children[2]);
+        return self.new_node(.{ .repeat_expr = .{
+            .count = ink.ast.ref(count),
+            .body = ink.ast.ref(body),
+        } });
+    }
+
+    fn build_for_expr(self: *builder, id: peg_parser.node_id) build_error!*ink.node {
+        const children = self.child_nodes(id);
+        if (children.len < 5 or !self.is_terminal(children[0], .@"for")) {
+            return self.fail(.unexpected_node, id);
+        }
+        if (!self.is_nonterminal(children[1], .pattern)) return self.fail(.unexpected_node, id);
+        if (!self.is_terminal(children[2], .in)) return self.fail(.unexpected_node, id);
+        if (!self.is_nonterminal(children[3], .expr)) return self.fail(.unexpected_node, id);
+        if (!self.is_nonterminal(children[4], .branch)) return self.fail(.unexpected_node, id);
+
+        const pattern = try self.build_pattern(children[1]);
+        const iter = try self.build_expr(children[3]);
+        const body = try self.build_branch(children[4]);
+        return self.new_node(.{ .for_expr = .{
+            .pattern = ink.ast.ref(pattern),
+            .iter = ink.ast.ref(iter),
+            .body = ink.ast.ref(body),
+        } });
+    }
+
+    fn build_each_expr(self: *builder, id: peg_parser.node_id) build_error!*ink.node {
+        const children = self.child_nodes(id);
+        if (children.len < 5 or !self.is_terminal(children[0], .each)) {
+            return self.fail(.unexpected_node, id);
+        }
+        if (!self.is_nonterminal(children[1], .pattern)) return self.fail(.unexpected_node, id);
+        if (!self.is_terminal(children[2], .in)) return self.fail(.unexpected_node, id);
+        if (!self.is_nonterminal(children[3], .expr)) return self.fail(.unexpected_node, id);
+        if (!self.is_nonterminal(children[4], .branch)) return self.fail(.unexpected_node, id);
+
+        const pattern = try self.build_pattern(children[1]);
+        const iter = try self.build_expr(children[3]);
+        const body = try self.build_branch(children[4]);
+        return self.new_node(.{ .each_expr = .{
+            .pattern = ink.ast.ref(pattern),
+            .iter = ink.ast.ref(iter),
+            .body = ink.ast.ref(body),
+        } });
+    }
+
+    fn build_break_expr(self: *builder, id: peg_parser.node_id) build_error!*ink.node {
+        const children = self.child_nodes(id);
+        if (children.len == 0 or !self.is_terminal(children[0], .stmt_break)) {
+            return self.fail(.unexpected_node, id);
+        }
+        var label: ?ink.identifier = null;
+        var value: ?*ink.node = null;
+
+        for (children[1..]) |child| {
+            if (self.is_terminal(child, .label)) {
+                if (label != null) return self.fail(.unexpected_node, id);
+                label = self.token_of(child).what;
+                continue;
+            }
+            if (self.is_nonterminal(child, .expr)) {
+                if (value != null) return self.fail(.unexpected_node, id);
+                value = try self.build_expr(child);
+                continue;
+            }
+        }
+
+        return self.new_node(.{ .break_expr = .{
+            .label = label,
+            .value = ink.ast.ref_opt(value),
+        } });
+    }
+
+    fn build_continue_expr(self: *builder, id: peg_parser.node_id) build_error!*ink.node {
+        const children = self.child_nodes(id);
+        if (children.len == 0 or !self.is_terminal(children[0], .stmt_continue)) {
+            return self.fail(.unexpected_node, id);
+        }
+        var label: ?ink.identifier = null;
+        if (children.len > 1 and self.is_terminal(children[1], .label)) {
+            label = self.token_of(children[1]).what;
+        }
+        return self.new_node(.{ .continue_expr = .{ .label = label } });
+    }
+
+    fn build_yield_expr(self: *builder, id: peg_parser.node_id) build_error!*ink.node {
+        const children = self.child_nodes(id);
+        if (children.len == 0 or !self.is_terminal(children[0], .yield)) {
+            return self.fail(.unexpected_node, id);
+        }
+        var value: ?*ink.node = null;
+        for (children[1..]) |child| {
+            if (self.is_nonterminal(child, .expr)) {
+                value = try self.build_expr(child);
+                break;
+            }
+        }
+        return self.new_node(.{ .yield_expr = .{ .value = ink.ast.ref_opt(value) } });
+    }
+
+    fn build_atomic_expr(self: *builder, id: peg_parser.node_id) build_error!*ink.node {
+        const children = self.child_nodes(id);
+        if (children.len < 3 or !self.is_terminal(children[0], .atomic)) {
+            return self.fail(.unexpected_node, id);
+        }
+        var value: ?*ink.node = null;
+        var ordering: ?ink.identifier = null;
+        for (children[1..]) |child| {
+            if (self.is_nonterminal(child, .expr)) {
+                if (value != null) return self.fail(.unexpected_node, id);
+                value = try self.build_expr(child);
+                continue;
+            }
+            if (self.is_name_node(child)) {
+                if (ordering != null) return self.fail(.unexpected_node, id);
+                ordering = self.name_token_of(child).?.what;
+                continue;
+            }
+        }
+        if (value == null or ordering == null) return self.fail(.unexpected_node, id);
+        return self.new_node(.{ .atomic_expr = .{
+            .value = ink.ast.ref(value.?),
+            .ordering = ordering.?,
         } });
     }
 
@@ -298,10 +544,11 @@ pub const builder = struct {
     fn build_record_field(self: *builder, id: peg_parser.node_id) build_error!ink.ast.associate {
         const children = self.child_nodes(id);
         var idx: usize = 0;
-        if (idx >= children.len or !self.is_foreign_name(children[idx])) {
+        const name_token = if (idx < children.len) self.name_token_of(children[idx]) else null;
+        if (name_token == null) {
             return self.fail(.unexpected_node, id);
         }
-        const name = self.token_of(children[idx]).what;
+        const name = name_token.?.what;
         idx += 1;
 
         if (idx >= children.len or !self.is_terminal(children[idx], .assign)) {
@@ -403,11 +650,12 @@ pub const builder = struct {
             while (idx < children.len and self.is_nonterminal(children[idx], .layout)) : (idx += 1) {}
         }
 
-        if (idx >= children.len or !self.is_terminal(children[idx], .identifier)) {
+        const name_token = if (idx < children.len) self.name_token_of(children[idx]) else null;
+        if (name_token == null) {
             return self.fail(.unexpected_node, id);
         }
-        const name_token = self.token_of(children[idx]).what;
-        const name = if (std.mem.eql(u8, name_token.string, "_")) null else name_token;
+        const name_value = name_token.?.what;
+        const name = if (std.mem.eql(u8, name_value.string, "_")) null else name_value;
         idx += 1;
 
         while (idx < children.len and self.is_nonterminal(children[idx], .layout)) : (idx += 1) {}
@@ -498,6 +746,9 @@ pub const builder = struct {
 
     fn build_pattern(self: *builder, id: peg_parser.node_id) build_error!*ink.node {
         for (self.child_nodes(id)) |child| {
+            if (self.is_nonterminal(child, .pattern_prefix)) {
+                return self.build_pattern_prefix(child);
+            }
             if (self.is_nonterminal(child, .pattern_postfix)) {
                 return self.build_pattern_postfix(child);
             }
@@ -506,6 +757,42 @@ pub const builder = struct {
             }
         }
         return self.fail(.unexpected_node, id);
+    }
+
+    fn build_pattern_prefix(self: *builder, id: peg_parser.node_id) build_error!*ink.node {
+        for (self.child_nodes(id)) |child| {
+            if (self.is_nonterminal(child, .pattern_ref)) {
+                return self.build_pattern_ref(child);
+            }
+            if (self.is_nonterminal(child, .pattern_postfix)) {
+                return self.build_pattern_postfix(child);
+            }
+        }
+        return self.fail(.unexpected_node, id);
+    }
+
+    fn build_pattern_ref(self: *builder, id: peg_parser.node_id) build_error!*ink.node {
+        const children = self.child_nodes(id);
+        if (children.len < 2 or !self.is_terminal(children[0], .ref)) {
+            return self.fail(.unexpected_node, id);
+        }
+
+        var idx: usize = 1;
+        var op: ink.unary = .ref;
+        if (idx < children.len and self.is_terminal(children[idx], .mut)) {
+            op = .ref_mut;
+            idx += 1;
+        }
+
+        if (idx >= children.len or !self.is_nonterminal(children[idx], .pattern)) {
+            return self.fail(.unexpected_node, id);
+        }
+
+        const right = try self.build_pattern(children[idx]);
+        return self.new_node(.{ .unary = .{
+            .op = op,
+            .right = ink.ast.ref(right),
+        } });
     }
 
     fn build_pattern_postfix(self: *builder, id: peg_parser.node_id) build_error!*ink.node {
@@ -568,11 +855,14 @@ pub const builder = struct {
         if (self.is_terminal(first, .number)) {
             return self.build_number(first);
         }
-        if (self.is_terminal(first, .asterisk) or self.is_terminal(first, .identifier)) {
-            return self.new_node(.{ .identifier = self.token_of(first).what });
-        }
         if (self.is_terminal(first, .logical_true) or self.is_terminal(first, .logical_false) or self.is_terminal(first, .this)) {
             return self.new_node(.{ .identifier = self.token_of(first).what });
+        }
+        if (self.is_terminal(first, .asterisk)) {
+            return self.new_node(.{ .identifier = self.token_of(first).what });
+        }
+        if (self.is_name_node(first)) {
+            return self.new_node(.{ .identifier = self.name_token_of(first).?.what });
         }
         if (self.is_terminal(first, .string)) {
             const value = self.token_of(first).what;
@@ -949,9 +1239,28 @@ pub const builder = struct {
         if (children.len == 0) return self.fail(.unexpected_node, id);
 
         const first = children[0];
+        if (self.is_terminal(first, .ampersand)) {
+            var idx: usize = 1;
+            var op: ink.unary = .borrow;
+            if (idx < children.len and self.is_terminal(children[idx], .mut)) {
+                op = .borrow_mut;
+                idx += 1;
+            }
+            if (idx >= children.len or !self.is_nonterminal(children[idx], .unary)) {
+                return self.fail(.unexpected_node, id);
+            }
+            const right = try self.build_unary(children[idx]);
+            return self.new_node(.{ .unary = .{
+                .op = op,
+                .right = ink.ast.ref(right),
+            } });
+        }
+
         if (self.is_terminal(first, .minus) or self.is_terminal(first, .bang) or self.is_terminal(first, .logical_not) or
-            self.is_terminal(first, .tilde) or self.is_terminal(first, .dynamic) or self.is_terminal(first, .@"comptime") or
-            self.is_terminal(first, .spawn) or self.is_terminal(first, .await) or self.is_terminal(first, .@"try"))
+            self.is_terminal(first, .tilde) or self.is_terminal(first, .asterisk) or self.is_terminal(first, .dynamic) or
+            self.is_terminal(first, .@"comptime") or self.is_terminal(first, .box) or self.is_terminal(first, .sleep) or
+            self.is_terminal(first, .timeout) or self.is_terminal(first, .deadline) or self.is_terminal(first, .spawn) or
+            self.is_terminal(first, .await) or self.is_terminal(first, .@"try"))
         {
             if (children.len < 2 or !self.is_nonterminal(children[1], .unary)) {
                 return self.fail(.unexpected_node, id);
@@ -1301,8 +1610,8 @@ pub const builder = struct {
         {
             return self.fail(.unexpected_node, id);
         }
-        if (!self.is_foreign_name_token(children[1])) return self.fail(.unexpected_node, id);
-        const field = self.token_of(children[1]).what;
+        const field_token = self.name_token_of(children[1]) orelse return self.fail(.unexpected_node, id);
+        const field = field_token.what;
         const op: ink.binary = if (self.is_terminal(children[0], .double_colon)) .scope_access else .access;
         const field_node = try self.new_node(.{ .identifier = field });
         return self.new_node(.{ .binary = .{
@@ -1344,16 +1653,28 @@ pub const builder = struct {
             if (self.is_nonterminal(child, .intrinsic_call)) {
                 return self.build_intrinsic_call(child);
             }
+            if (self.is_nonterminal(child, .atomic_expr)) {
+                return self.build_atomic_expr(child);
+            }
+            if (self.is_nonterminal(child, .duration_literal)) {
+                return self.build_duration_literal(child);
+            }
+            if (self.is_nonterminal(child, .block)) {
+                return self.build_block_expr(child);
+            }
         }
 
         const first = children[0];
         if (self.is_terminal(first, .number)) {
             return self.build_number(first);
         }
-        if (self.is_terminal(first, .identifier)) {
+        if (self.is_terminal(first, .logical_true) or self.is_terminal(first, .logical_false) or self.is_terminal(first, .this)) {
             return self.new_node(.{ .identifier = self.token_of(first).what });
         }
-        if (self.is_terminal(first, .logical_true) or self.is_terminal(first, .logical_false) or self.is_terminal(first, .this)) {
+        if (self.is_name_node(first)) {
+            return self.new_node(.{ .identifier = self.name_token_of(first).?.what });
+        }
+        if (self.is_terminal(first, .label)) {
             return self.new_node(.{ .identifier = self.token_of(first).what });
         }
         if (self.is_terminal(first, .string)) {
@@ -1377,9 +1698,9 @@ pub const builder = struct {
         var args: []const *ink.node = &[_]*ink.node{};
 
         for (children) |child| {
-            if (self.is_terminal(child, .identifier)) {
+            if (self.is_name_node(child)) {
                 if (name != null) return self.fail(.unexpected_node, id);
-                name = self.token_of(child).what;
+                name = self.name_token_of(child).?.what;
                 continue;
             }
             if (self.is_nonterminal(child, .arg_list)) {
@@ -1396,17 +1717,68 @@ pub const builder = struct {
         } });
     }
 
+    fn build_duration_literal(self: *builder, id: peg_parser.node_id) build_error!*ink.node {
+        const children = self.child_nodes(id);
+        if (children.len == 0) return self.fail(.invalid_duration_literal, id);
+
+        var total: i64 = 0;
+        var start: ?usize = null;
+        var end: usize = 0;
+
+        for (children) |child| {
+            if (!self.is_nonterminal(child, .duration_item)) continue;
+            const item_children = self.child_nodes(child);
+            if (item_children.len < 2) return self.fail(.invalid_duration_literal, child);
+            if (!self.is_terminal(item_children[0], .number) or !self.is_terminal(item_children[1], .identifier)) {
+                return self.fail(.invalid_duration_literal, child);
+            }
+
+            const number_token = self.token_of(item_children[0]);
+            const unit_token = self.token_of(item_children[1]);
+
+            if (unit_token.where.start == number_token.where.end) {
+                return self.fail(.invalid_duration_literal, item_children[1]);
+            }
+
+            if (start == null) start = number_token.where.start;
+            end = unit_token.where.end;
+
+            const digits = number_token.what.string;
+            if (std.mem.indexOfScalar(u8, digits, '.') != null or
+                std.mem.indexOfScalar(u8, digits, 'e') != null or
+                std.mem.indexOfScalar(u8, digits, 'E') != null)
+            {
+                return self.fail(.invalid_duration_literal, item_children[0]);
+            }
+
+            const value = std.fmt.parseInt(i64, digits, 10) catch return error.parse_integer;
+            const unit_ns = self.duration_unit_ns(unit_token.what.string) orelse
+                return self.fail(.invalid_duration_literal, item_children[1]);
+
+            const mul_info = @mulWithOverflow(value, unit_ns);
+            if (mul_info[1] != 0) return self.fail(.invalid_duration_literal, item_children[0]);
+            const add_info = @addWithOverflow(total, mul_info[0]);
+            if (add_info[1] != 0) return self.fail(.invalid_duration_literal, item_children[0]);
+            total = add_info[0];
+        }
+
+        if (start == null) return self.fail(.invalid_duration_literal, id);
+        const where = ink.location{ .start = start.?, .end = end };
+        return self.new_node(.{ .duration = .{ .value = total, .where = where } });
+    }
+
     fn build_number(self: *builder, id: peg_parser.node_id) build_error!*ink.node {
-        const slice = self.token_of(id).what;
+        const tok = self.token_of(id);
+        const slice = tok.what;
         const is_float = std.mem.indexOfScalar(u8, slice.string, '.') != null or
             std.mem.indexOfScalar(u8, slice.string, 'e') != null or
             std.mem.indexOfScalar(u8, slice.string, 'E') != null;
         if (is_float) {
             const val = std.fmt.parseFloat(f32, slice.string) catch return error.parse_float;
-            return self.new_node(.{ .float = val });
+            return self.new_node(.{ .float = .{ .value = val, .where = tok.where } });
         }
         const val = std.fmt.parseInt(i64, slice.string, 10) catch return error.parse_integer;
-        return self.new_node(.{ .integer = val });
+        return self.new_node(.{ .integer = .{ .value = val, .where = tok.where } });
     }
 
     fn build_function_decl(self: *builder, id: peg_parser.node_id) build_error!*ink.node {
@@ -1418,10 +1790,11 @@ pub const builder = struct {
         }
         idx += 1;
 
-        if (idx >= children.len or !self.is_foreign_name_token(children[idx])) {
+        const name_token = if (idx < children.len) self.name_token_of(children[idx]) else null;
+        if (name_token == null) {
             return self.fail(.unexpected_node, id);
         }
-        const name = self.token_of(children[idx]).what;
+        const name = name_token.?.what;
         idx += 1;
 
         var generics: []const ink.ast.generic_param = &.{};
@@ -1483,10 +1856,11 @@ pub const builder = struct {
         }
         idx += 1;
 
-        if (idx >= children.len or !self.is_foreign_name_token(children[idx])) {
+        const name_token = if (idx < children.len) self.name_token_of(children[idx]) else null;
+        if (name_token == null) {
             return self.fail(.unexpected_node, id);
         }
-        const name = self.token_of(children[idx]).what;
+        const name = name_token.?.what;
         idx += 1;
 
         var generics: []const ink.ast.generic_param = &.{};
@@ -1512,15 +1886,21 @@ pub const builder = struct {
         const children = self.child_nodes(id);
         var idx: usize = 0;
         const attributes = try self.parse_attributes(children, &idx);
+        var is_auto = false;
+        if (idx < children.len and self.is_terminal(children[idx], .auto)) {
+            is_auto = true;
+            idx += 1;
+        }
         if (idx >= children.len or !self.is_terminal(children[idx], .trait)) {
             return self.fail(.unexpected_node, id);
         }
         idx += 1;
 
-        if (idx >= children.len or !self.is_foreign_name_token(children[idx])) {
+        const name_token = if (idx < children.len) self.name_token_of(children[idx]) else null;
+        if (name_token == null) {
             return self.fail(.unexpected_node, id);
         }
-        const name = self.token_of(children[idx]).what;
+        const name = name_token.?.what;
         idx += 1;
 
         var generics: []const ink.ast.generic_param = &.{};
@@ -1539,6 +1919,7 @@ pub const builder = struct {
 
         return self.new_node(.{ .decl = .{ .trait = .{
             .attributes = attributes,
+            .is_auto = is_auto,
             .name = name,
             .generics = generics,
             .items = items,
@@ -1555,10 +1936,11 @@ pub const builder = struct {
         }
         idx += 1;
 
-        if (idx >= children.len or !self.is_terminal(children[idx], .identifier)) {
+        const name_token = if (idx < children.len) self.name_token_of(children[idx]) else null;
+        if (name_token == null) {
             return self.fail(.unexpected_node, id);
         }
-        const name = self.token_of(children[idx]).what;
+        const name = name_token.?.what;
         idx += 1;
 
         var generics: []const ink.ast.generic_param = &.{};
@@ -1589,10 +1971,17 @@ pub const builder = struct {
         }
         idx += 1;
 
-        if (idx >= children.len or !self.is_terminal(children[idx], .identifier)) {
+        var negative = false;
+        if (idx < children.len and self.is_terminal(children[idx], .bang)) {
+            negative = true;
+            idx += 1;
+        }
+
+        const trait_token = if (idx < children.len) self.name_token_of(children[idx]) else null;
+        if (trait_token == null) {
             return self.fail(.unexpected_node, id);
         }
-        const by_trait = self.token_of(children[idx]).what;
+        const by_trait = trait_token.?.what;
         idx += 1;
 
         if (idx >= children.len or !self.is_terminal(children[idx], .@"for")) {
@@ -1600,10 +1989,11 @@ pub const builder = struct {
         }
         idx += 1;
 
-        if (idx >= children.len or !self.is_terminal(children[idx], .identifier)) {
+        const struct_token = if (idx < children.len) self.name_token_of(children[idx]) else null;
+        if (struct_token == null) {
             return self.fail(.unexpected_node, id);
         }
-        const for_struct = self.token_of(children[idx]).what;
+        const for_struct = struct_token.?.what;
         idx += 1;
 
         var functions: []const ink.ast.function_decl = &.{};
@@ -1613,6 +2003,7 @@ pub const builder = struct {
 
         return self.new_node(.{ .decl = .{ .impl = .{
             .attributes = attributes,
+            .negative = negative,
             .by_trait = by_trait,
             .for_struct = for_struct,
             .functions = functions,
@@ -1627,26 +2018,29 @@ pub const builder = struct {
             return self.fail(.unexpected_node, id);
         }
         idx += 1;
-        if (!self.is_terminal(children[idx], .identifier)) {
+        const first_token = self.name_token_of(children[idx]);
+        if (first_token == null) {
             return self.fail(.unexpected_node, id);
         }
-        const first = self.token_of(children[idx]).what;
+        const first = first_token.?.what;
         idx += 1;
         var alias: ?ink.identifier = null;
         if (idx + 1 < children.len and self.is_terminal(children[idx], .as)) {
-            if (!self.is_terminal(children[idx + 1], .identifier)) {
+            const alias_token = self.name_token_of(children[idx + 1]);
+            if (alias_token == null) {
                 return self.fail(.unexpected_node, id);
             }
-            alias = self.token_of(children[idx + 1]).what;
+            alias = alias_token.?.what;
             idx += 2;
         }
         var module = first;
         var item: ?ink.identifier = null;
         if (idx + 1 < children.len and self.is_terminal(children[idx], .from)) {
-            if (!self.is_terminal(children[idx + 1], .identifier)) {
+            const module_token = self.name_token_of(children[idx + 1]);
+            if (module_token == null) {
                 return self.fail(.unexpected_node, id);
             }
-            module = self.token_of(children[idx + 1]).what;
+            module = module_token.?.what;
             item = first;
             idx += 2;
         }
@@ -1667,10 +2061,11 @@ pub const builder = struct {
         }
         idx += 1;
 
-        if (idx >= children.len or !self.is_terminal(children[idx], .identifier)) {
+        const name_token = if (idx < children.len) self.name_token_of(children[idx]) else null;
+        if (name_token == null) {
             return self.fail(.unexpected_node, id);
         }
-        const name = self.token_of(children[idx]).what;
+        const name = name_token.?.what;
         idx += 1;
 
         var ty: ?*ink.node = null;
@@ -1705,15 +2100,16 @@ pub const builder = struct {
         const children = self.child_nodes(id);
         var idx: usize = 0;
         const attributes = try self.parse_attributes(children, &idx);
-        if (idx >= children.len or !self.is_terminal(children[idx], .variable)) {
+        if (idx >= children.len or !self.is_terminal(children[idx], .mut)) {
             return self.fail(.unexpected_node, id);
         }
         idx += 1;
 
-        if (idx >= children.len or !self.is_terminal(children[idx], .identifier)) {
+        const name_token = if (idx < children.len) self.name_token_of(children[idx]) else null;
+        if (name_token == null) {
             return self.fail(.unexpected_node, id);
         }
-        const name = self.token_of(children[idx]).what;
+        const name = name_token.?.what;
         idx += 1;
 
         var ty: ?*ink.node = null;
@@ -1753,10 +2149,11 @@ pub const builder = struct {
         }
         idx += 1;
 
-        if (idx >= children.len or !self.is_terminal(children[idx], .identifier)) {
+        const name_token = if (idx < children.len) self.name_token_of(children[idx]) else null;
+        if (name_token == null) {
             return self.fail(.unexpected_node, id);
         }
-        const name = self.token_of(children[idx]).what;
+        const name = name_token.?.what;
         idx += 1;
 
         var generics: []const ink.ast.generic_param = &.{};
@@ -1796,10 +2193,11 @@ pub const builder = struct {
     fn build_struct_field(self: *builder, id: peg_parser.node_id) build_error!ink.ast.struct_field {
         const children = self.child_nodes(id);
         if (children.len < 3) return self.fail(.unexpected_node, id);
-        if (!self.is_terminal(children[0], .identifier)) return self.fail(.unexpected_node, id);
+        const name_token = self.name_token_of(children[0]);
+        if (name_token == null) return self.fail(.unexpected_node, id);
         if (!self.is_terminal(children[1], .colon)) return self.fail(.unexpected_node, id);
         if (!self.is_nonterminal(children[2], .type_expr)) return self.fail(.unexpected_node, id);
-        const name = self.token_of(children[0]).what;
+        const name = name_token.?.what;
         const ty = try self.build_type_expr(children[2]);
         return .{ .name = name, .ty = ink.ast.ref(ty) };
     }
@@ -1869,10 +2267,11 @@ pub const builder = struct {
             return self.fail(.unexpected_node, id);
         }
         idx += 1;
-        if (idx >= children.len or !self.is_terminal(children[idx], .identifier)) {
+        const name_token = if (idx < children.len) self.name_token_of(children[idx]) else null;
+        if (name_token == null) {
             return self.fail(.unexpected_node, id);
         }
-        const name = self.token_of(children[idx]).what;
+        const name = name_token.?.what;
         idx += 1;
         var value: ?*ink.node = null;
         if (idx < children.len) {
@@ -1914,10 +2313,11 @@ pub const builder = struct {
 
     fn build_sum_variant(self: *builder, id: peg_parser.node_id) build_error!ink.ast.sum_variant {
         const children = self.child_nodes(id);
-        if (children.len < 1 or !self.is_terminal(children[0], .identifier)) {
+        const name_token = if (children.len > 0) self.name_token_of(children[0]) else null;
+        if (name_token == null) {
             return self.fail(.unexpected_node, id);
         }
-        const name = self.token_of(children[0]).what;
+        const name = name_token.?.what;
         var payload: ?*ink.node = null;
         var idx: usize = 1;
         if (idx < children.len and self.is_terminal(children[idx], .paren_left)) {
@@ -1932,8 +2332,8 @@ pub const builder = struct {
     fn build_enum_body(self: *builder, id: peg_parser.node_id) build_error![]const ink.identifier {
         var cases = std.array_list.Managed(ink.identifier).init(self.allocator);
         for (self.child_nodes(id)) |child| {
-            if (self.is_terminal(child, .identifier)) {
-                cases.append(self.token_of(child).what) catch return error.out_of_memory;
+            if (self.is_name_node(child)) {
+                cases.append(self.name_token_of(child).?.what) catch return error.out_of_memory;
             }
         }
         return cases.toOwnedSlice() catch return error.out_of_memory;
@@ -1965,10 +2365,14 @@ pub const builder = struct {
 
     fn build_generic_param(self: *builder, id: peg_parser.node_id) build_error!ink.ast.generic_param {
         const children = self.child_nodes(id);
-        if (children.len < 1 or !self.is_terminal(children[0], .identifier)) {
+        if (children.len < 1) {
             return self.fail(.unexpected_node, id);
         }
-        const name = self.token_of(children[0]).what;
+        const name_token = self.name_token_of(children[0]);
+        if (name_token == null and !self.is_terminal(children[0], .label)) {
+            return self.fail(.unexpected_node, id);
+        }
+        const name = if (name_token) |tok| tok.what else self.token_of(children[0]).what;
         var constraint: ?*ink.node = null;
         var default: ?*ink.node = null;
         var is_pack = false;
@@ -2036,13 +2440,14 @@ pub const builder = struct {
             return .{ .name = name, .ty = ink.ast.ref(ty), .variadic = false };
         }
 
-        if (!self.is_terminal(children[0], .identifier)) {
+        const name_token = self.name_token_of(children[0]);
+        if (name_token == null) {
             return self.fail(.unexpected_node, id);
         }
         if (children.len < 3 or !self.is_terminal(children[1], .colon) or !self.is_nonterminal(children[2], .type_expr)) {
             return self.fail(.unexpected_node, id);
         }
-        const name = self.token_of(children[0]).what;
+        const name = name_token.?.what;
         const ty = try self.build_type_expr(children[2]);
         const variadic = children.len > 3 and self.is_terminal(children[3], .ellipsis);
         return .{ .name = name, .ty = ink.ast.ref(ty), .variadic = variadic };
@@ -2067,11 +2472,14 @@ pub const builder = struct {
         var idx: usize = 1;
         var list = std.array_list.Managed(ink.ast.where_req).init(self.allocator);
         while (idx < children.len) {
-            if (!self.is_terminal(children[idx], .identifier)) return self.fail(.unexpected_node, id);
+            const name_token = self.name_token_of(children[idx]);
+            if (name_token == null and !self.is_terminal(children[idx], .label)) {
+                return self.fail(.unexpected_node, id);
+            }
             if (idx + 2 >= children.len or !self.is_terminal(children[idx + 1], .colon) or !self.is_nonterminal(children[idx + 2], .type_expr)) {
                 return self.fail(.unexpected_node, id);
             }
-            const name = self.token_of(children[idx]).what;
+            const name = if (name_token) |tok| tok.what else self.token_of(children[idx]).what;
             const constraint = try self.build_type_expr(children[idx + 2]);
             list.append(.{ .name = name, .constraint = ink.ast.ref(constraint) }) catch return error.out_of_memory;
             idx += 3;
@@ -2193,12 +2601,27 @@ pub const builder = struct {
         const children = self.child_nodes(id);
         if (children.len == 0) return self.fail(.unexpected_node, id);
 
+        if (self.is_terminal(children[0], .bang)) {
+            if (children.len < 2 or !self.is_nonterminal(children[1], .type_prefix)) {
+                return self.fail(.unexpected_node, id);
+            }
+            const inner = try self.build_type_prefix(children[1]);
+            var args = self.allocator.alloc(*ink.node, 1) catch return error.out_of_memory;
+            args[0] = inner;
+            return self.new_node(.{ .type = .{ .applied = .{
+                .base = self.synthetic_ident("not"),
+                .args = ink.ast.ref_slice(args),
+            } } });
+        }
         if (self.is_terminal(children[0], .question)) {
             if (children.len < 2 or !self.is_nonterminal(children[1], .type_prefix)) {
                 return self.fail(.unexpected_node, id);
             }
             const inner = try self.build_type_prefix(children[1]);
             return self.new_node(.{ .type = .{ .optional = ink.ast.ref(inner) } });
+        }
+        if (self.is_nonterminal(children[0], .type_ref)) {
+            return self.build_type_ref(children[0]);
         }
         if (self.is_nonterminal(children[0], .type_array)) {
             return self.build_type_array(children[0]);
@@ -2245,15 +2668,56 @@ pub const builder = struct {
         } } });
     }
 
+    fn build_type_ref(self: *builder, id: peg_parser.node_id) build_error!*ink.node {
+        const children = self.child_nodes(id);
+        if (children.len < 2 or !self.is_terminal(children[0], .ampersand)) {
+            return self.fail(.unexpected_node, id);
+        }
+
+        var idx: usize = 1;
+        var lifetime: ?*ink.node = null;
+        if (idx < children.len and self.is_terminal(children[idx], .label)) {
+            lifetime = try self.new_node(.{ .identifier = self.token_of(children[idx]).what });
+            idx += 1;
+        }
+        var base: []const u8 = "ref";
+        if (idx < children.len and self.is_terminal(children[idx], .mut)) {
+            base = "ref_mut";
+            idx += 1;
+        }
+        if (idx < children.len and self.is_terminal(children[idx], .label)) {
+            if (lifetime != null) return self.fail(.unexpected_node, id);
+            lifetime = try self.new_node(.{ .identifier = self.token_of(children[idx]).what });
+            idx += 1;
+        }
+        if (idx >= children.len or !self.is_nonterminal(children[idx], .type_prefix)) {
+            return self.fail(.unexpected_node, id);
+        }
+
+        const inner = try self.build_type_prefix(children[idx]);
+        const arg_len: usize = if (lifetime == null) 1 else 2;
+        var args = self.allocator.alloc(*ink.node, arg_len) catch return error.out_of_memory;
+        if (lifetime) |life| {
+            args[0] = life;
+            args[1] = inner;
+        } else {
+            args[0] = inner;
+        }
+        return self.new_node(.{ .type = .{ .applied = .{
+            .base = self.synthetic_ident(base),
+            .args = ink.ast.ref_slice(args),
+        } } });
+    }
+
     fn build_type_dyn(self: *builder, id: peg_parser.node_id) build_error!*ink.node {
         const children = self.child_nodes(id);
         if (children.len < 2 or !self.is_terminal(children[0], .dyn)) {
             return self.fail(.unexpected_node, id);
         }
-        if (!self.is_nonterminal(children[1], .type_prefix)) {
+        if (!self.is_nonterminal(children[1], .type_intersect)) {
             return self.fail(.unexpected_node, id);
         }
-        const inner = try self.build_type_prefix(children[1]);
+        const inner = try self.build_type_intersect(children[1]);
         return self.new_node(.{ .type = .{ .dyn = ink.ast.ref(inner) } });
     }
 
@@ -2325,10 +2789,32 @@ pub const builder = struct {
     fn build_type_atom(self: *builder, id: peg_parser.node_id) build_error!ink.identifier {
         const children = self.child_nodes(id);
         if (children.len == 0) return self.fail(.unexpected_node, id);
-        if (self.is_terminal(children[0], .type) or self.is_terminal(children[0], .identifier)) {
+        if (self.is_terminal(children[0], .type) or self.is_terminal(children[0], .ref) or
+            self.is_terminal(children[0], .box) or self.is_terminal(children[0], .atomic))
+        {
             return self.token_of(children[0]).what;
         }
-        return self.fail(.unexpected_node, id);
+        const name_token = self.name_token_of(children[0]) orelse return self.fail(.unexpected_node, id);
+        return name_token.what;
+    }
+
+    fn duration_unit_ns(self: *builder, name: []const u8) ?i64 {
+        _ = self;
+        const ns_per_micro: i64 = 1_000;
+        const ns_per_milli: i64 = 1_000_000;
+        const ns_per_sec: i64 = 1_000_000_000;
+        const ns_per_min: i64 = 60 * ns_per_sec;
+        const ns_per_hour: i64 = 60 * ns_per_min;
+        const ns_per_day: i64 = 24 * ns_per_hour;
+
+        if (std.mem.eql(u8, name, "nano")) return 1;
+        if (std.mem.eql(u8, name, "micro")) return ns_per_micro;
+        if (std.mem.eql(u8, name, "milli")) return ns_per_milli;
+        if (std.mem.eql(u8, name, "sec")) return ns_per_sec;
+        if (std.mem.eql(u8, name, "min")) return ns_per_min;
+        if (std.mem.eql(u8, name, "hour")) return ns_per_hour;
+        if (std.mem.eql(u8, name, "day")) return ns_per_day;
+        return null;
     }
 
     fn is_value_kind(self: *builder, name: []const u8) bool {
@@ -2369,8 +2855,14 @@ pub const builder = struct {
             .minus => .neg,
             .bang, .logical_not => .not,
             .tilde => .bit_not,
+            .ampersand => .borrow,
+            .asterisk => .deref,
+            .box => .box,
             .dynamic => .dynamic,
             .@"comptime" => .@"comptime",
+            .sleep => .sleep,
+            .timeout => .timeout,
+            .deadline => .deadline,
             .spawn => .spawn,
             .await => .await,
             .@"try" => .@"try",
@@ -2435,13 +2927,33 @@ pub const builder = struct {
         return error.build_failed;
     }
 
-    fn is_foreign_name_token(self: *builder, id: peg_parser.node_id) bool {
+    fn is_keyword_kind(self: *builder, kind: token.kind) bool {
+        _ = self;
+        inline for (spec.keyword_lexemes) |lex| {
+            if (kind == @field(token.kind, lex.kind)) return true;
+        }
+        return false;
+    }
+
+    fn is_name_token(self: *builder, id: peg_parser.node_id) bool {
         if (self.tree.nodes.items[id].symbol.kind != .terminal) return false;
         const kind: token.kind = @enumFromInt(self.tree.nodes.items[id].symbol.value);
-        return switch (kind) {
-            .identifier => true,
-            else => false,
-        };
+        return kind == .identifier or self.is_keyword_kind(kind);
+    }
+
+    fn name_token_of(self: *builder, id: peg_parser.node_id) ?token {
+        if (self.is_nonterminal(id, .name)) {
+            for (self.child_nodes(id)) |child| {
+                if (self.is_name_token(child)) return self.token_of(child);
+            }
+            return null;
+        }
+        if (self.is_name_token(id)) return self.token_of(id);
+        return null;
+    }
+
+    fn is_name_node(self: *builder, id: peg_parser.node_id) bool {
+        return self.name_token_of(id) != null;
     }
 
     fn is_comparison_op(self: *builder, id: peg_parser.node_id) bool {
@@ -2473,7 +2985,7 @@ pub const builder = struct {
     }
 
     fn is_foreign_name(self: *builder, id: peg_parser.node_id) bool {
-        return self.is_terminal(id, .identifier);
+        return self.is_name_node(id);
     }
 
     fn is_nonterminal(self: *builder, id: peg_parser.node_id, nt: peg.nonterminal_kind) bool {

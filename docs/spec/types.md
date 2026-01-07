@@ -25,6 +25,7 @@ Phase I: Add syntax, desugar to existing AST
 - Union: `A | B`
 - Intersection: `A & B`
 - Optional: `?T`
+- Reference: `&T`, `&mut T`
 - Function type: `A -> B`
 - Tuple type: `(A, B, C)`
 - Array/slice: `[]T` and `[N]T`
@@ -34,7 +35,7 @@ Phase I: Add syntax, desugar to existing AST
 
 Operator precedence and associativity
 1) Postfix: `Type<Args>`, `[]T`, `[N]T`
-2) Prefix: `?T`
+2) Prefix: `?T`, `&T`, `&mut T`
 3) Intersection: `A & B` (left associative)
 4) Union: `A | B` (left associative)
 5) Arrow: `A -> B` (right associative)

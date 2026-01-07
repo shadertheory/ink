@@ -1,4 +1,5 @@
 const std = @import("std");
+const spec = @import("spec.zig");
 const token = @import("token.zig").token;
 
 pub const mem_allocator = std.mem.Allocator;
@@ -6,12 +7,14 @@ pub const mem_allocator = std.mem.Allocator;
 pub const nonterminal_kind = enum {
     program,
     layout,
+    name,
     attribute_list,
     attribute,
     attribute_args,
     stmt,
     decl,
     expr,
+    label_expr,
     branch,
     if_expr,
     match_expr,
@@ -19,9 +22,22 @@ pub const nonterminal_kind = enum {
     match_arm_block,
     select_expr,
     with_expr,
+    loop_expr,
+    while_expr,
+    while_in_expr,
+    until_expr,
+    repeat_expr,
+    for_expr,
+    each_expr,
+    break_expr,
+    continue_expr,
+    yield_expr,
+    atomic_expr,
     select_arm,
     select_arm_block,
     pattern,
+    pattern_prefix,
+    pattern_ref,
     pattern_postfix,
     pattern_primary,
     pattern_group,
@@ -44,6 +60,8 @@ pub const nonterminal_kind = enum {
     product,
     unary,
     postfix,
+    duration_literal,
+    duration_item,
     intrinsic_call,
     primary,
     call_suffix,
@@ -85,6 +103,7 @@ pub const nonterminal_kind = enum {
     type_union,
     type_intersect,
     type_prefix,
+    type_ref,
     type_dyn,
     type_postfix,
     type_primary,
@@ -239,6 +258,20 @@ pub fn build(allocator: mem_allocator) !grammar {
     const layout = try b.zero_or_more(try t(&b, .new_line));
     try b.rule(.layout, layout);
 
+    const name = blk: {
+        var items = std.array_list.Managed(expr_id).init(allocator);
+        try items.append(try t(&b, .identifier));
+        inline for (spec.keyword_lexemes) |lex| {
+            try items.append(try t(&b, @field(token.kind, lex.kind)));
+        }
+        const choice = try b.choice(items.items);
+        items.deinit();
+        break :blk choice;
+    };
+    try b.rule(.name, name);
+
+    const name_token = try n(&b, .name);
+
     const attribute_args = try b.sequence(&.{
         try t(&b, .paren_left),
         try n(&b, .layout),
@@ -252,10 +285,7 @@ pub fn build(allocator: mem_allocator) !grammar {
         try t(&b, .hash),
         try t(&b, .bracket_left),
         try n(&b, .layout),
-        try b.choice(&.{
-            try t(&b, .identifier),
-            try t(&b, .@"comptime"),
-        }),
+        name_token,
         try n(&b, .layout),
         try b.optional(try n(&b, .attribute_args)),
         try n(&b, .layout),
@@ -288,7 +318,7 @@ pub fn build(allocator: mem_allocator) !grammar {
     try b.rule(.block, block);
 
     const record_field = try b.sequence(&.{
-        try t(&b, .identifier),
+        name_token,
         try t(&b, .assign),
         try n(&b, .expr),
     });
@@ -335,12 +365,108 @@ pub fn build(allocator: mem_allocator) !grammar {
     const with_expr = try b.sequence(&.{
         try t(&b, .with),
         try n(&b, .layout),
-        try t(&b, .identifier),
+        name_token,
         try n(&b, .layout),
-        try t(&b, .identifier),
+        name_token,
         try n(&b, .branch),
     });
     try b.rule(.with_expr, with_expr);
+
+    const loop_expr = try b.sequence(&.{
+        try t(&b, .loop),
+        try n(&b, .branch),
+    });
+    try b.rule(.loop_expr, loop_expr);
+
+    const while_in_expr = try b.sequence(&.{
+        try t(&b, .@"while"),
+        try n(&b, .pattern),
+        try t(&b, .in),
+        try n(&b, .expr),
+        try n(&b, .branch),
+    });
+    try b.rule(.while_in_expr, while_in_expr);
+
+    const while_expr = try b.sequence(&.{
+        try t(&b, .@"while"),
+        try n(&b, .expr),
+        try n(&b, .branch),
+    });
+    try b.rule(.while_expr, while_expr);
+
+    const until_expr = try b.sequence(&.{
+        try t(&b, .until),
+        try n(&b, .expr),
+        try n(&b, .branch),
+    });
+    try b.rule(.until_expr, until_expr);
+
+    const repeat_expr = try b.sequence(&.{
+        try t(&b, .repeat),
+        try n(&b, .expr),
+        try n(&b, .branch),
+    });
+    try b.rule(.repeat_expr, repeat_expr);
+
+    const for_expr = try b.sequence(&.{
+        try t(&b, .@"for"),
+        try n(&b, .pattern),
+        try t(&b, .in),
+        try n(&b, .expr),
+        try n(&b, .branch),
+    });
+    try b.rule(.for_expr, for_expr);
+
+    const each_expr = try b.sequence(&.{
+        try t(&b, .each),
+        try n(&b, .pattern),
+        try t(&b, .in),
+        try n(&b, .expr),
+        try n(&b, .branch),
+    });
+    try b.rule(.each_expr, each_expr);
+
+    const label_expr = try b.sequence(&.{
+        try t(&b, .label),
+        try n(&b, .layout),
+        try b.choice(&.{
+            try n(&b, .loop_expr),
+            try n(&b, .while_in_expr),
+            try n(&b, .while_expr),
+            try n(&b, .until_expr),
+            try n(&b, .repeat_expr),
+            try n(&b, .for_expr),
+            try n(&b, .each_expr),
+            try n(&b, .block),
+        }),
+    });
+    try b.rule(.label_expr, label_expr);
+
+    const break_expr = try b.sequence(&.{
+        try t(&b, .stmt_break),
+        try b.optional(try t(&b, .label)),
+        try b.optional(try n(&b, .expr)),
+    });
+    try b.rule(.break_expr, break_expr);
+
+    const continue_expr = try b.sequence(&.{
+        try t(&b, .stmt_continue),
+        try b.optional(try t(&b, .label)),
+    });
+    try b.rule(.continue_expr, continue_expr);
+
+    const yield_expr = try b.sequence(&.{
+        try t(&b, .yield),
+        try b.optional(try n(&b, .expr)),
+    });
+    try b.rule(.yield_expr, yield_expr);
+
+    const atomic_expr = try b.sequence(&.{
+        try t(&b, .atomic),
+        try n(&b, .expr),
+        name_token,
+    });
+    try b.rule(.atomic_expr, atomic_expr);
 
     const pattern_group = try b.sequence(&.{
         try t(&b, .paren_left),
@@ -354,12 +480,12 @@ pub fn build(allocator: mem_allocator) !grammar {
     const pattern_primary = try b.choice(&.{
         try n(&b, .pattern_group),
         try t(&b, .asterisk),
-        try t(&b, .identifier),
         try t(&b, .number),
         try t(&b, .string),
         try t(&b, .logical_true),
         try t(&b, .logical_false),
         try t(&b, .this),
+        name_token,
     });
     try b.rule(.pattern_primary, pattern_primary);
 
@@ -383,7 +509,7 @@ pub fn build(allocator: mem_allocator) !grammar {
     });
     try b.rule(.pattern_call_suffix, pattern_call_suffix);
 
-    const access_name = try t(&b, .identifier);
+    const access_name = name_token;
 
     const pattern_access_suffix = try b.sequence(&.{
         try b.choice(&.{
@@ -404,7 +530,20 @@ pub fn build(allocator: mem_allocator) !grammar {
     });
     try b.rule(.pattern_postfix, pattern_postfix);
 
-    const pattern = try n(&b, .pattern_postfix);
+    const pattern_ref = try b.sequence(&.{
+        try t(&b, .ref),
+        try b.optional(try t(&b, .mut)),
+        try n(&b, .pattern),
+    });
+    try b.rule(.pattern_ref, pattern_ref);
+
+    const pattern_prefix = try b.choice(&.{
+        try n(&b, .pattern_ref),
+        try n(&b, .pattern_postfix),
+    });
+    try b.rule(.pattern_prefix, pattern_prefix);
+
+    const pattern = try n(&b, .pattern_prefix);
     try b.rule(.pattern, pattern);
 
     const match_arm = try b.sequence(&.{
@@ -454,7 +593,7 @@ pub fn build(allocator: mem_allocator) !grammar {
             try t(&b, .detached),
             try n(&b, .layout),
         })),
-        try t(&b, .identifier),
+        name_token,
         try n(&b, .layout),
         try t(&b, .assign),
         try n(&b, .layout),
@@ -586,17 +725,26 @@ pub fn build(allocator: mem_allocator) !grammar {
     });
     try b.rule(.bitwise_and, bitwise_and);
 
+    const comparison_guard = try b.not_pred(try b.choice(&.{
+        try t(&b, .indent),
+        try t(&b, .dedent),
+        try t(&b, .new_line),
+    }));
+    const comparison_op = try b.sequence(&.{
+        try b.choice(&.{
+            try t(&b, .less_than),
+            try t(&b, .greater_than),
+            try t(&b, .less_or_equal),
+            try t(&b, .greater_or_equal),
+            try t(&b, .equal),
+            try t(&b, .not_equal),
+        }),
+        comparison_guard,
+    });
     const comparison = try b.sequence(&.{
         try n(&b, .shift),
         try b.zero_or_more(try b.sequence(&.{
-            try b.choice(&.{
-                try t(&b, .less_than),
-                try t(&b, .greater_than),
-                try t(&b, .less_or_equal),
-                try t(&b, .greater_or_equal),
-                try t(&b, .equal),
-                try t(&b, .not_equal),
-            }),
+            comparison_op,
             try n(&b, .shift),
         })),
     });
@@ -644,7 +792,13 @@ pub fn build(allocator: mem_allocator) !grammar {
         try b.sequence(&.{ try t(&b, .bang), try n(&b, .unary) }),
         try b.sequence(&.{ try t(&b, .logical_not), try n(&b, .unary) }),
         try b.sequence(&.{ try t(&b, .tilde), try n(&b, .unary) }),
+        try b.sequence(&.{ try t(&b, .asterisk), try n(&b, .unary) }),
+        try b.sequence(&.{ try t(&b, .ampersand), try b.optional(try t(&b, .mut)), try n(&b, .unary) }),
         try b.sequence(&.{ try t(&b, .@"comptime"), try n(&b, .unary) }),
+        try b.sequence(&.{ try t(&b, .box), try n(&b, .unary) }),
+        try b.sequence(&.{ try t(&b, .sleep), try n(&b, .unary) }),
+        try b.sequence(&.{ try t(&b, .timeout), try n(&b, .unary) }),
+        try b.sequence(&.{ try t(&b, .deadline), try n(&b, .unary) }),
         try b.sequence(&.{ try t(&b, .spawn), try n(&b, .unary) }),
         try b.sequence(&.{ try t(&b, .await), try n(&b, .unary) }),
         try b.sequence(&.{ try t(&b, .@"try"), try n(&b, .unary) }),
@@ -716,9 +870,21 @@ pub fn build(allocator: mem_allocator) !grammar {
     });
     try b.rule(.arg_list, arg_list);
 
+    const duration_item = try b.sequence(&.{
+        try t(&b, .number),
+        try t(&b, .identifier),
+    });
+    try b.rule(.duration_item, duration_item);
+
+    const duration_literal = try b.sequence(&.{
+        try n(&b, .duration_item),
+        try b.zero_or_more(try n(&b, .duration_item)),
+    });
+    try b.rule(.duration_literal, duration_literal);
+
     const intrinsic_call = try b.sequence(&.{
         try t(&b, .at_sign),
-        try t(&b, .identifier),
+        name_token,
         try t(&b, .paren_left),
         try b.optional(try n(&b, .arg_list)),
         try t(&b, .paren_right),
@@ -727,12 +893,16 @@ pub fn build(allocator: mem_allocator) !grammar {
 
     const primary = try b.choice(&.{
         try n(&b, .intrinsic_call),
+        try n(&b, .atomic_expr),
+        try n(&b, .duration_literal),
         try t(&b, .number),
         try t(&b, .string),
-        try t(&b, .identifier),
         try t(&b, .logical_true),
         try t(&b, .logical_false),
         try t(&b, .this),
+        name_token,
+        try t(&b, .label),
+        try n(&b, .block),
         try b.sequence(&.{
             try t(&b, .paren_left),
             try n(&b, .expr),
@@ -741,12 +911,18 @@ pub fn build(allocator: mem_allocator) !grammar {
     });
     try b.rule(.primary, primary);
 
+    const type_arg_guard = try b.and_pred(try b.choice(&.{
+        try t(&b, .comma),
+        try t(&b, .greater_than),
+    }));
     const type_args = try b.sequence(&.{
         try t(&b, .less_than),
         try n(&b, .expr),
+        type_arg_guard,
         try b.zero_or_more(try b.sequence(&.{
             try t(&b, .comma),
             try n(&b, .expr),
+            type_arg_guard,
         })),
         try t(&b, .greater_than),
     });
@@ -754,7 +930,10 @@ pub fn build(allocator: mem_allocator) !grammar {
 
     const type_atom = try b.choice(&.{
         try t(&b, .type),
-        try t(&b, .identifier),
+        try t(&b, .ref),
+        try t(&b, .box),
+        try t(&b, .atomic),
+        name_token,
     });
     try b.rule(.type_atom, type_atom);
 
@@ -800,14 +979,25 @@ pub fn build(allocator: mem_allocator) !grammar {
     });
     try b.rule(.type_array, type_array);
 
+    const type_ref = try b.sequence(&.{
+        try t(&b, .ampersand),
+        try b.optional(try t(&b, .label)),
+        try b.optional(try t(&b, .mut)),
+        try b.optional(try t(&b, .label)),
+        try n(&b, .type_prefix),
+    });
+    try b.rule(.type_ref, type_ref);
+
     const type_dyn = try b.sequence(&.{
         try t(&b, .dyn),
-        try n(&b, .type_prefix),
+        try n(&b, .type_intersect),
     });
     try b.rule(.type_dyn, type_dyn);
 
     const type_prefix = try b.choice(&.{
+        try b.sequence(&.{ try t(&b, .bang), try n(&b, .type_prefix) }),
         try b.sequence(&.{ try t(&b, .question), try n(&b, .type_prefix) }),
+        try n(&b, .type_ref),
         try n(&b, .type_dyn),
         try n(&b, .type_array),
         try n(&b, .type_postfix),
@@ -845,7 +1035,10 @@ pub fn build(allocator: mem_allocator) !grammar {
     try b.rule(.type_expr, type_expr);
 
     const generic_param = try b.sequence(&.{
-        try t(&b, .identifier),
+        try b.choice(&.{
+            name_token,
+            try t(&b, .label),
+        }),
         try b.optional(try b.sequence(&.{
             try t(&b, .colon),
             try n(&b, .type_expr),
@@ -881,7 +1074,7 @@ pub fn build(allocator: mem_allocator) !grammar {
             })),
         }),
         try b.sequence(&.{
-            try t(&b, .identifier),
+            name_token,
             try t(&b, .colon),
             try n(&b, .type_expr),
             try b.optional(try t(&b, .ellipsis)),
@@ -906,12 +1099,18 @@ pub fn build(allocator: mem_allocator) !grammar {
 
     const where_clause = try b.sequence(&.{
         try t(&b, .where),
-        try t(&b, .identifier),
+        try b.choice(&.{
+            name_token,
+            try t(&b, .label),
+        }),
         try t(&b, .colon),
         try n(&b, .type_expr),
         try b.zero_or_more(try b.sequence(&.{
             try t(&b, .comma),
-            try t(&b, .identifier),
+            try b.choice(&.{
+                name_token,
+                try t(&b, .label),
+            }),
             try t(&b, .colon),
             try n(&b, .type_expr),
         })),
@@ -935,7 +1134,7 @@ pub fn build(allocator: mem_allocator) !grammar {
     const assoc_type_decl = try b.sequence(&.{
         try b.optional(try n(&b, .attribute_list)),
         try t(&b, .type),
-        try t(&b, .identifier),
+        name_token,
         try b.optional(try b.sequence(&.{
             try t(&b, .assign),
             try n(&b, .type_expr),
@@ -969,8 +1168,9 @@ pub fn build(allocator: mem_allocator) !grammar {
 
     const trait_decl = try b.sequence(&.{
         try b.optional(try n(&b, .attribute_list)),
+        try b.optional(try t(&b, .auto)),
         try t(&b, .trait),
-        try t(&b, .identifier),
+        name_token,
         try b.optional(try n(&b, .generic_params)),
         try b.optional(try n(&b, .trait_body)),
     });
@@ -987,7 +1187,7 @@ pub fn build(allocator: mem_allocator) !grammar {
     try b.rule(.requires_clause, requires_clause);
 
     const sum_variant = try b.sequence(&.{
-        try t(&b, .identifier),
+        name_token,
         try b.optional(try b.sequence(&.{
             try t(&b, .paren_left),
             try b.optional(try n(&b, .type_expr)),
@@ -1011,14 +1211,14 @@ pub fn build(allocator: mem_allocator) !grammar {
     const enum_decl = try b.sequence(&.{
         try b.optional(try n(&b, .attribute_list)),
         try t(&b, .@"enum"),
-        try t(&b, .identifier),
+        name_token,
         try b.optional(try n(&b, .generic_params)),
         try b.optional(try n(&b, .enum_body)),
     });
     try b.rule(.enum_decl, enum_decl);
 
     const struct_field = try b.sequence(&.{
-        try t(&b, .identifier),
+        name_token,
         try t(&b, .colon),
         try n(&b, .type_expr),
     });
@@ -1039,7 +1239,7 @@ pub fn build(allocator: mem_allocator) !grammar {
     const struct_decl = try b.sequence(&.{
         try b.optional(try n(&b, .attribute_list)),
         try t(&b, .@"struct"),
-        try t(&b, .identifier),
+        name_token,
         try b.optional(try n(&b, .generic_params)),
         try b.optional(try n(&b, .struct_body)),
     });
@@ -1060,9 +1260,10 @@ pub fn build(allocator: mem_allocator) !grammar {
     const impl_decl = try b.sequence(&.{
         try b.optional(try n(&b, .attribute_list)),
         try t(&b, .impl),
-        try t(&b, .identifier),
+        try b.optional(try t(&b, .bang)),
+        name_token,
         try t(&b, .@"for"),
-        try t(&b, .identifier),
+        name_token,
         try b.optional(try n(&b, .impl_body)),
     });
     try b.rule(.impl_decl, impl_decl);
@@ -1070,14 +1271,14 @@ pub fn build(allocator: mem_allocator) !grammar {
     const import_decl = try b.sequence(&.{
         try b.optional(try n(&b, .attribute_list)),
         try t(&b, .import),
-        try t(&b, .identifier),
+        name_token,
         try b.optional(try b.sequence(&.{
             try t(&b, .as),
-            try t(&b, .identifier),
+            name_token,
         })),
         try b.optional(try b.sequence(&.{
             try t(&b, .from),
-            try t(&b, .identifier),
+            name_token,
         })),
     });
     try b.rule(.import_decl, import_decl);
@@ -1085,7 +1286,7 @@ pub fn build(allocator: mem_allocator) !grammar {
     const const_decl = try b.sequence(&.{
         try b.optional(try n(&b, .attribute_list)),
         try t(&b, .constant),
-        try t(&b, .identifier),
+        name_token,
         try b.optional(try b.sequence(&.{
             try t(&b, .colon),
             try n(&b, .type_expr),
@@ -1097,8 +1298,8 @@ pub fn build(allocator: mem_allocator) !grammar {
 
     const var_decl = try b.sequence(&.{
         try b.optional(try n(&b, .attribute_list)),
-        try t(&b, .variable),
-        try t(&b, .identifier),
+        try t(&b, .mut),
+        name_token,
         try b.optional(try b.sequence(&.{
             try t(&b, .colon),
             try n(&b, .type_expr),
@@ -1111,7 +1312,7 @@ pub fn build(allocator: mem_allocator) !grammar {
     const type_decl = try b.sequence(&.{
         try b.optional(try n(&b, .attribute_list)),
         try t(&b, .type),
-        try t(&b, .identifier),
+        name_token,
         try b.optional(try n(&b, .generic_params)),
         try t(&b, .assign),
         try n(&b, .type_expr),
@@ -1132,10 +1333,21 @@ pub fn build(allocator: mem_allocator) !grammar {
     try b.rule(.decl, decl);
 
     const expr_rule = try b.choice(&.{
+        try n(&b, .label_expr),
         try n(&b, .if_expr),
         try n(&b, .match_expr),
         try n(&b, .select_expr),
         try n(&b, .with_expr),
+        try n(&b, .loop_expr),
+        try n(&b, .while_in_expr),
+        try n(&b, .while_expr),
+        try n(&b, .until_expr),
+        try n(&b, .repeat_expr),
+        try n(&b, .for_expr),
+        try n(&b, .each_expr),
+        try n(&b, .break_expr),
+        try n(&b, .continue_expr),
+        try n(&b, .yield_expr),
         try n(&b, .return_expr),
         try n(&b, .assign),
     });

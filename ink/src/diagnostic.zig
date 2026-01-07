@@ -10,6 +10,7 @@ pub const diagnostic = struct {
     message: []const u8,
     span: ?source.span = null,
     code: ?[]const u8 = null,
+    source_id: ?source.source_id = null,
 };
 
 pub const bag = struct {

@@ -16,6 +16,7 @@ pub const record_literal = struct {
 pub const ir = union(enum) {
     integer: i64,
     float: f64,
+    duration: i64,
     string: string_identifier,
     boolean: bool,
     identifier: string_identifier,
@@ -28,6 +29,18 @@ pub const ir = union(enum) {
     if_expr: struct { condition: ir_identifier, then_branch: ir_identifier, else_branch: ?ir_identifier },
     match_expr: struct { target: ir_identifier, arms: []const match_arm },
     select_expr: struct { arms: []const select_arm },
+    label_expr: struct { name: string_identifier, body: ir_identifier },
+    loop_expr: struct { body: ir_identifier },
+    while_expr: struct { condition: ir_identifier, body: ir_identifier },
+    while_in_expr: struct { pattern: ir_identifier, iter: ir_identifier, body: ir_identifier },
+    until_expr: struct { condition: ir_identifier, body: ir_identifier },
+    repeat_expr: struct { count: ir_identifier, body: ir_identifier },
+    for_expr: struct { pattern: ir_identifier, iter: ir_identifier, body: ir_identifier },
+    each_expr: struct { pattern: ir_identifier, iter: ir_identifier, body: ir_identifier },
+    break_expr: struct { label: ?string_identifier, value: ?ir_identifier },
+    continue_expr: struct { label: ?string_identifier },
+    yield_expr: struct { value: ?ir_identifier },
+    atomic_expr: struct { value: ir_identifier, ordering: string_identifier },
 
     associate: struct { name: string_identifier, value: ?ir_identifier },
     record_literal: record_literal,
@@ -66,6 +79,8 @@ pub const ir = union(enum) {
         return_type: ?ir_identifier,
         where_clause: []const where_req,
         body: ?ir_identifier,
+        span: ?ink.source.span = null,
+        source_id: ink.source.source_id = 0,
 
         pub const param = struct { name: string_identifier, ty: ir_identifier, variadic: bool };
         pub const where_req = struct { name: string_identifier, constraint: ir_identifier };
@@ -87,6 +102,7 @@ pub const ir = union(enum) {
     };
 
     pub const impl_decl = struct {
+        negative: bool,
         for_struct: string_identifier,
         by_trait: string_identifier,
         functions: []const function_decl,
@@ -105,6 +121,7 @@ pub const ir = union(enum) {
     };
 
     pub const trait_decl = struct {
+        is_auto: bool,
         name: string_identifier,
         generics: []const generic_param,
         items: []const trait_item,

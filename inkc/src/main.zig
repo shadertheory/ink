@@ -531,19 +531,39 @@ pub fn printer(writer_type: type) type {
     };
 }
 
-fn lineCol(source: []const u8, pos: usize) struct { line: usize, column: usize } {
+const line_info = struct {
+    line: usize,
+    column: usize,
+    line_start: usize,
+    line_end: usize,
+};
+
+fn lineInfo(source: []const u8, pos: usize) line_info {
     var line: usize = 1;
     var column: usize = 1;
+    var line_start: usize = 0;
     var i: usize = 0;
     while (i < pos and i < source.len) : (i += 1) {
         if (source[i] == '\n') {
             line += 1;
             column = 1;
+            line_start = i + 1;
         } else {
             column += 1;
         }
     }
-    return .{ .line = line, .column = column };
+    var line_end = line_start;
+    while (line_end < source.len and source[line_end] != '\n') : (line_end += 1) {}
+    return .{ .line = line, .column = column, .line_start = line_start, .line_end = line_end };
+}
+
+fn digits(value: usize) usize {
+    var v = value;
+    var count: usize = 1;
+    while (v >= 10) : (v /= 10) {
+        count += 1;
+    }
+    return count;
 }
 
 fn severity_label(danger: ink.severity) []const u8 {
@@ -554,15 +574,94 @@ fn severity_label(danger: ink.severity) []const u8 {
     };
 }
 
-fn print_diagnostics(writer: *std.Io.Writer, source: []const u8, path: []const u8, diags: []const ink.diagnostic) void {
+fn find_source_by_id(sources: []const ink.compiler.source, id: ink.compiler.source_id) ?*const ink.compiler.source {
+    for (sources) |*src| {
+        if (src.id == id) return src;
+    }
+    return null;
+}
+
+fn find_source_for_diag(
+    sources: []const ink.compiler.source,
+    fallback_id: ?ink.compiler.source_id,
+    diag: ink.diagnostic,
+) ?*const ink.compiler.source {
+    if (diag.source_id) |sid| {
+        if (find_source_by_id(sources, sid)) |src| return src;
+    }
+    if (fallback_id) |sid| {
+        if (find_source_by_id(sources, sid)) |src| return src;
+    }
+    if (sources.len > 0) return &sources[0];
+    return null;
+}
+
+fn build_marker(
+    allocator: mem_allocator,
+    start: line_info,
+    end: line_info,
+) ?[]u8 {
+    const start_col = if (start.column == 0) 1 else start.column;
+    var mark_len: usize = 1;
+    if (start.line == end.line) {
+        if (end.column > start_col) {
+            mark_len = end.column - start_col;
+        }
+    } else {
+        const line_len = if (start.line_end > start.line_start) start.line_end - start.line_start else 0;
+        if (line_len > start_col - 1) {
+            mark_len = line_len - (start_col - 1);
+        }
+    }
+    if (mark_len == 0) mark_len = 1;
+    const space_len = start_col - 1;
+    var buf = allocator.alloc(u8, space_len + mark_len) catch return null;
+    @memset(buf[0..space_len], ' ');
+    buf[space_len] = '^';
+    if (mark_len > 1) {
+        @memset(buf[space_len + 1 ..], '-');
+    }
+    return buf;
+}
+
+fn print_diagnostics(
+    writer: *std.Io.Writer,
+    allocator: mem_allocator,
+    sources: []const ink.compiler.source,
+    fallback_id: ?ink.compiler.source_id,
+    diags: []const ink.diagnostic,
+) void {
     for (diags) |diag| {
         const label = severity_label(diag.danger);
-        if (diag.span) |span| {
-            const loc = lineCol(source, span.start);
-            writer.print("{s}:{d}:{d}: {s}: {s}\n", .{ path, loc.line, loc.column, label, diag.message }) catch {};
+        if (diag.code) |code| {
+            writer.print("{s}[{s}]: {s}\n", .{ label, code, diag.message }) catch {};
         } else {
             writer.print("{s}: {s}\n", .{ label, diag.message }) catch {};
         }
+
+        const src = find_source_for_diag(sources, fallback_id, diag) orelse continue;
+        const span = diag.span orelse continue;
+
+        const start_info = lineInfo(src.text, @min(span.start, src.text.len));
+        const end_info = lineInfo(src.text, @min(span.end, src.text.len));
+        const line_slice = src.text[start_info.line_start..start_info.line_end];
+        const line_digits = digits(start_info.line);
+        const pad = allocator.alloc(u8, line_digits) catch {
+            writer.print("\n", .{}) catch {};
+            continue;
+        };
+        defer allocator.free(pad);
+        @memset(pad, ' ');
+
+        writer.print("  --> {s}:{d}:{d}\n", .{ src.path, start_info.line, start_info.column }) catch {};
+        writer.print("  {s} |\n", .{pad}) catch {};
+        writer.print("  {d} | {s}\n", .{ start_info.line, line_slice }) catch {};
+
+        if (build_marker(allocator, start_info, end_info)) |marker| {
+            defer allocator.free(marker);
+            writer.print("  {s} | {s}\n", .{ pad, marker }) catch {};
+        }
+        writer.print("\n", .{}) catch {};
     }
 }
 
@@ -600,16 +699,6 @@ fn resolve_output_path(
     return std.fmt.allocPrint(allocator, "{s}/{s}.inkb", .{ out_dir, name });
 }
 
-fn print_diagnostics_simple(writer: *std.Io.Writer, diags: []const ink.diagnostic) void {
-    for (diags) |diag| {
-        const label = severity_label(diag.danger);
-        if (diag.span) |span| {
-            writer.print("{s}: {s} ({d}..{d})\n", .{ label, diag.message, span.start, span.end }) catch {};
-        } else {
-            writer.print("{s}: {s}\n", .{ label, diag.message }) catch {};
-        }
-    }
-}
 
 fn load_module_sources(
     allocator: mem_allocator,
@@ -730,7 +819,7 @@ pub fn main() !void {
         defer result.deinit(allocator);
 
         if (result.diagnostics.len != 0) {
-            print_diagnostics_simple(err_writer, result.diagnostics);
+            print_diagnostics(err_writer, allocator, dep_graph.sources.items, null, result.diagnostics);
             err_writer.flush() catch {};
         }
 
@@ -809,7 +898,7 @@ pub fn main() !void {
     defer result.deinit(allocator);
 
     if (result.diagnostics.len != 0) {
-        print_diagnostics(err_writer, source_text, input_path, result.diagnostics);
+        print_diagnostics(err_writer, allocator, sources.items, main_id, result.diagnostics);
         err_writer.flush() catch {};
     }
 

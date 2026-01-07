@@ -1,6 +1,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const inkb = @import("inkb.zig");
+const thread_mutex = std.Thread.Mutex;
+
+var atomic_mutex = thread_mutex{};
 
 pub const foreign_id = u32;
 
@@ -210,8 +213,12 @@ fn dispatch_builtin(machine: anytype, name: []const u8, debug_checks: bool) bool
         builtin_store(machine, debug_checks);
         return true;
     }
-    if (std.mem.eql(u8, name, "std::borrow") or std.mem.eql(u8, name, "std::borrow_mut")) {
-        set_ret(machine, read_arg(machine, 1));
+    if (std.mem.eql(u8, name, "std::atomic_lock")) {
+        builtin_atomic_lock(machine, debug_checks);
+        return true;
+    }
+    if (std.mem.eql(u8, name, "std::atomic_unlock")) {
+        builtin_atomic_unlock(machine, debug_checks);
         return true;
     }
     if (std.mem.eql(u8, name, "std::ptr_of")) {
@@ -244,6 +251,22 @@ fn dispatch_builtin(machine: anytype, name: []const u8, debug_checks: bool) bool
     }
     if (std.mem.eql(u8, name, "std::sleep")) {
         builtin_sleep(machine, debug_checks);
+        return true;
+    }
+    if (std.mem.eql(u8, name, "std::sleep_until")) {
+        builtin_sleep_until(machine, debug_checks);
+        return true;
+    }
+    if (std.mem.eql(u8, name, "std::timeout")) {
+        builtin_timeout(machine, debug_checks);
+        return true;
+    }
+    if (std.mem.eql(u8, name, "std::deadline")) {
+        builtin_deadline(machine, debug_checks);
+        return true;
+    }
+    if (std.mem.eql(u8, name, "std::yield")) {
+        builtin_yield(machine, debug_checks);
         return true;
     }
     if (std.mem.eql(u8, name, "std::read")) {
@@ -409,7 +432,9 @@ fn builtin_print_int(machine: anytype) void {
     var buffer: [256]u8 = undefined;
     var out_file = std.fs.File.stdout().writer(buffer[0..]);
     var out = &out_file.interface;
-    out.print("{d}", .{read_arg(machine, 1)}) catch {};
+    const raw = read_arg(machine, 1);
+    const value: i64 = @bitCast(raw);
+    out.print("{d}", .{value}) catch {};
     out.flush() catch {};
 }
 
@@ -506,6 +531,18 @@ fn builtin_store(machine: anytype, debug_checks: bool) void {
     store_ptr(machine, ptr, value, debug_checks);
 }
 
+fn builtin_atomic_lock(machine: anytype, debug_checks: bool) void {
+    _ = machine;
+    _ = debug_checks;
+    atomic_mutex.lock();
+}
+
+fn builtin_atomic_unlock(machine: anytype, debug_checks: bool) void {
+    _ = machine;
+    _ = debug_checks;
+    atomic_mutex.unlock();
+}
+
 fn builtin_ptr_of(machine: anytype, debug_checks: bool) void {
     const reg_val = read_arg(machine, 1);
     const reg = to_usize(reg_val, debug_checks, machine) orelse return;
@@ -595,6 +632,67 @@ fn builtin_sleep(machine: anytype, debug_checks: bool) void {
     };
     set_pending(machine, op_id);
     machine.suspend_op(op_id);
+}
+
+fn builtin_sleep_until(machine: anytype, debug_checks: bool) void {
+    const sched = machine.scheduler orelse {
+        set_result(machine, false, 0, debug_checks);
+        return;
+    };
+    if (pending_match(machine)) {
+        const op_id = machine.pending_op_id;
+        if (sched.take_completion(op_id)) |completion| {
+            clear_pending(machine);
+            if (completion.err) |err| {
+                set_result(machine, false, err_code(err), debug_checks);
+                return;
+            }
+            set_result(machine, true, 0, debug_checks);
+            return;
+        }
+        machine.suspend_op(op_id);
+        return;
+    }
+
+    const deadline_ns = read_arg(machine, 1);
+    const now_ns = monotonic_now_ns();
+    const sub = @subWithOverflow(deadline_ns, now_ns);
+    const timeout_ns = if (sub[1] != 0) 0 else sub[0];
+    const op_id = sched.reactor.submit_timer(timeout_ns, @intCast(machine.current_task_id)) catch {
+        set_result(machine, false, 0, debug_checks);
+        return;
+    };
+    set_pending(machine, op_id);
+    machine.suspend_op(op_id);
+}
+
+fn monotonic_now_ns() u64 {
+    const now: i128 = std.time.nanoTimestamp();
+    if (now <= 0) return 0;
+    const max_u64: i128 = @intCast(std.math.maxInt(u64));
+    if (now > max_u64) return std.math.maxInt(u64);
+    return @intCast(now);
+}
+
+fn builtin_timeout(machine: anytype, debug_checks: bool) void {
+    _ = debug_checks;
+    const duration_ns = read_arg(machine, 1);
+    const now_ns = monotonic_now_ns();
+    const add = @addWithOverflow(now_ns, duration_ns);
+    const deadline_ns = if (add[1] != 0) std.math.maxInt(u64) else add[0];
+    set_ret(machine, deadline_ns);
+}
+
+fn builtin_deadline(machine: anytype, debug_checks: bool) void {
+    _ = debug_checks;
+    set_ret(machine, read_arg(machine, 1));
+}
+
+fn builtin_yield(machine: anytype, debug_checks: bool) void {
+    _ = debug_checks;
+    const sched = machine.scheduler orelse return;
+    sched.ready.append(sched.allocator, machine.current_task_id) catch {};
+    machine.suspend_manual();
 }
 
 fn builtin_io_read(machine: anytype, debug_checks: bool) void {
@@ -742,15 +840,17 @@ fn builtin_bytes_from_string(machine: anytype, debug_checks: bool) void {
     const cap = bytes.len;
     const ptr = bytes_alloc(machine, cap, debug_checks) orelse return;
     const info = bytes_info(machine, @intCast(ptr), debug_checks) orelse return;
-    std.mem.copyForwards(u8, info.payload[0..cap], bytes);
-    machine.memory.write(info.ptr, @intCast(cap));
+    var idx: usize = 0;
+    while (idx < cap) : (idx += 1) {
+        machine.memory.write(info.data_ptr + idx, bytes[idx]);
+    }
     set_ret(machine, @intCast(ptr));
 }
 
 fn builtin_bytes_free(machine: anytype, debug_checks: bool) void {
-    const handle = read_arg(machine, 1);
-    const ptr = to_usize(handle, debug_checks, machine) orelse return;
-    free_block(machine, ptr, debug_checks);
+    const info = bytes_info(machine, read_arg(machine, 1), debug_checks) orelse return;
+    free_block(machine, info.data_ptr, debug_checks);
+    free_block(machine, info.ptr, debug_checks);
 }
 
 fn builtin_bytes_len(machine: anytype, debug_checks: bool) void {
@@ -760,22 +860,22 @@ fn builtin_bytes_len(machine: anytype, debug_checks: bool) void {
 
 fn builtin_bytes_cap(machine: anytype, debug_checks: bool) void {
     const info = bytes_info(machine, read_arg(machine, 1), debug_checks) orelse return;
-    set_ret(machine, @intCast(info.cap));
+    set_ret(machine, @intCast(info.len));
 }
 
 fn builtin_bytes_ptr(machine: anytype, debug_checks: bool) void {
     const info = bytes_info(machine, read_arg(machine, 1), debug_checks) orelse return;
-    set_ret(machine, @intCast(info.payload_ptr));
+    set_ret(machine, @intCast(info.data_ptr));
 }
 
 fn builtin_bytes_set_len(machine: anytype, debug_checks: bool) void {
     const info = bytes_info(machine, read_arg(machine, 1), debug_checks) orelse return;
     const new_len = to_usize(read_arg(machine, 2), debug_checks, machine) orelse return;
-    if (new_len > info.cap) {
+    if (new_len > info.len) {
         if (debug_checks) fail(machine, "bytes len out of range");
         return;
     }
-    machine.memory.write(info.ptr, @intCast(new_len));
+    machine.memory.write(info.ptr + 1, @intCast(new_len));
 }
 
 fn builtin_string_new(machine: anytype, debug_checks: bool) void {
@@ -914,7 +1014,11 @@ fn builtin_buf_write_bytes(machine: anytype, debug_checks: bool) void {
         set_ret(machine, 0);
         return;
     }
-    std.mem.copyForwards(u8, buf_data.payload[buf_data.write .. buf_data.write + count], bytes_data.payload[0..count]);
+    var idx: usize = 0;
+    while (idx < count) : (idx += 1) {
+        const word = machine.memory.read(bytes_data.data_ptr + idx);
+        buf_data.payload[buf_data.write + idx] = @intCast(word);
+    }
     machine.memory.write(buf_data.ptr + 1, @intCast(buf_data.write + count));
     set_ret(machine, @intCast(count));
 }
@@ -925,14 +1029,18 @@ fn builtin_buf_read_bytes(machine: anytype, debug_checks: bool) void {
     const buf_data = buf_info(machine, buf_handle, debug_checks) orelse return;
     const bytes_data = bytes_info(machine, bytes_handle, debug_checks) orelse return;
     const available = buf_data.write - buf_data.read;
-    const count = @min(available, bytes_data.cap);
+    const count = @min(available, bytes_data.len);
     if (count == 0) {
-        machine.memory.write(bytes_data.ptr, 0);
+        machine.memory.write(bytes_data.ptr + 1, 0);
         set_ret(machine, 0);
         return;
     }
-    std.mem.copyForwards(u8, bytes_data.payload[0..count], buf_data.payload[buf_data.read .. buf_data.read + count]);
-    machine.memory.write(bytes_data.ptr, @intCast(count));
+    var idx: usize = 0;
+    while (idx < count) : (idx += 1) {
+        const value = buf_data.payload[buf_data.read + idx];
+        machine.memory.write(bytes_data.data_ptr + idx, value);
+    }
+    machine.memory.write(bytes_data.ptr + 1, @intCast(count));
     const next_read = buf_data.read + count;
     if (next_read == buf_data.write) {
         machine.memory.write(buf_data.ptr, 0);
@@ -1066,10 +1174,8 @@ const default_arena_bytes: usize = 64 * 1024;
 
 const bytes_view = struct {
     ptr: usize,
+    data_ptr: usize,
     len: usize,
-    cap: usize,
-    payload_ptr: usize,
-    payload: []u8,
 };
 
 const string_view = struct {
@@ -1139,27 +1245,24 @@ fn bytes_info(machine: anytype, handle: u64, debug_checks: bool) ?bytes_view {
         fail(machine, "bytes handle out of range");
         return null;
     }
-    const len = @as(usize, @intCast(machine.memory.read(ptr)));
-    const cap = @as(usize, @intCast(machine.memory.read(ptr + 1)));
-    const payload_ptr = ptr + bytes_header_words;
-    if (debug_checks and payload_ptr + bytes_to_words(cap) > machine.memory.data.len) {
+    const data_ptr = @as(usize, @intCast(machine.memory.read(ptr)));
+    const len = @as(usize, @intCast(machine.memory.read(ptr + 1)));
+    if (debug_checks and data_ptr + len > machine.memory.data.len) {
         fail(machine, "bytes payload out of range");
         return null;
     }
-    const payload = bytes_payload(machine, payload_ptr, cap);
     return .{
         .ptr = ptr,
+        .data_ptr = data_ptr,
         .len = len,
-        .cap = cap,
-        .payload_ptr = payload_ptr,
-        .payload = payload,
     };
 }
 
 fn bytes_alloc(machine: anytype, cap: usize, debug_checks: bool) ?usize {
-    const words = bytes_header_words + bytes_to_words(cap);
-    const ptr = alloc_block(machine, if (words == 0) 1 else words, debug_checks) orelse return null;
-    machine.memory.write(ptr, 0);
+    const data_words = if (cap == 0) 1 else cap;
+    const data_ptr = alloc_block(machine, data_words, debug_checks) orelse return null;
+    const ptr = alloc_block(machine, bytes_header_words, debug_checks) orelse return null;
+    machine.memory.write(ptr, @intCast(data_ptr));
     machine.memory.write(ptr + 1, @intCast(cap));
     return ptr;
 }
@@ -1447,7 +1550,13 @@ fn heap_header_for_ptr(machine: anytype, ptr: usize) ?usize {
         const size = @as(usize, @intCast(machine.memory.read(header)));
         if (size > 0) {
             const start = header + header_words;
-            const end = start + size;
+            const end_info = @addWithOverflow(start, size);
+            if (end_info[1] != 0) {
+                if (header == 0) break;
+                header -= 1;
+                continue;
+            }
+            const end = end_info[0];
             if (end < start) {
                 if (header == 0) break;
                 header -= 1;
