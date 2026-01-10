@@ -12,6 +12,7 @@ const runtime = @import("../runtime/scheduler.zig");
 pub const struct_field = std.builtin.Type.StructField;
 pub const tuple = std.meta.Tuple;
 pub const tape = @import("./core.zig").machine.tape;
+pub const register_count: u8 = 64;
 const default_step_budget: usize = 10_000;
 const small = packed struct {
     opcode: u12,
@@ -308,7 +309,7 @@ fn poll_vm_task(ctx: *anyopaque, sched: *runtime.scheduler, id: runtime.task_id)
 pub fn control_operators(comptime vm: type) type {
     return struct {
         const self = @This();
-        const register_count = 64;
+        const register_count_local: usize = register_count;
         fn reg_ptr(machine: *vm, index: usize) *u64 {
             const addr = machine.current.fp + index;
             return machine.memory.access(addr);
@@ -384,7 +385,7 @@ pub fn control_operators(comptime vm: type) type {
             machine.memory.write(base, machine.current.pc + machine.last_inst_size);
             machine.memory.write(base + 1, machine.current.fp);
             machine.current.fp = base + 2;
-            const frame_end = base + 2 + register_count;
+            const frame_end = base + 2 + register_count_local;
             if (machine.current.sp < frame_end) {
                 machine.current.sp = frame_end;
             }
@@ -440,13 +441,13 @@ pub fn control_operators(comptime vm: type) type {
             task_ptr.executor.memory.write(0, 0);
             task_ptr.executor.memory.write(1, 0);
             task_ptr.executor.current.fp = 2;
-            task_ptr.executor.current.sp = 2 + register_count;
+            task_ptr.executor.current.sp = 2 + register_count_local;
             task_ptr.executor.current.pc = target_absolute;
             task_ptr.executor.arg_base = task_ptr.executor.current.sp;
             task_ptr.executor.arg_base_valid = false;
 
             var i: usize = 0;
-            while (i < argc and i + 1 < register_count) : (i += 1) {
+            while (i < argc and i + 1 < register_count_local) : (i += 1) {
                 const value = machine.memory.read(base + 2 + i + 1);
                 task_ptr.executor.memory.write(2 + i + 1, value);
             }

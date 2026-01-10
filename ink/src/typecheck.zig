@@ -1,6 +1,6 @@
 const std = @import("std");
 const ink = @import("root.zig");
-const ir_mod = ink.ir;
+const uir_mod = ink.uir;
 const diag = @import("diagnostic.zig");
 const type_key_mod = @import("type_key.zig");
 const source = @import("source.zig");
@@ -31,12 +31,12 @@ pub const typecheck_result = struct {
 };
 
 const TypeId = u32;
-const ir_unary = @TypeOf((ir_mod.ir{ .unary = undefined }).unary);
-const ir_binary = @TypeOf((ir_mod.ir{ .binary = undefined }).binary);
-const ir_if = @TypeOf((ir_mod.ir{ .if_expr = undefined }).if_expr);
-const ir_intrinsic = @TypeOf((ir_mod.ir{ .intrinsic = undefined }).intrinsic);
-const ir_record_literal = @TypeOf((ir_mod.ir{ .record_literal = undefined }).record_literal);
-const ir_decl = @TypeOf((ir_mod.ir{ .decl = undefined }).decl);
+const uir_unary = @TypeOf((uir_mod.uir{ .unary = undefined }).unary);
+const uir_binary = @TypeOf((uir_mod.uir{ .binary = undefined }).binary);
+const uir_if = @TypeOf((uir_mod.uir{ .if_expr = undefined }).if_expr);
+const uir_intrinsic = @TypeOf((uir_mod.uir{ .intrinsic = undefined }).intrinsic);
+const uir_record_literal = @TypeOf((uir_mod.uir{ .record_literal = undefined }).record_literal);
+const uir_decl = @TypeOf((uir_mod.uir{ .decl = undefined }).decl);
 
 const Type = union(enum) {
     tvar: TypeVar,
@@ -234,13 +234,13 @@ const type_ctx = struct {
 };
 
 const function_info = struct {
-    decl: ir_mod.ir.function_decl,
+    decl: uir_mod.uir.function_decl,
     impl_for: ?[]const u8,
 };
 
 const trait_method = struct {
     name: []const u8,
-    return_type: ?ir_mod.ir_identifier,
+    return_type: ?uir_mod.uir_identifier,
 };
 
 const trait_constraint = struct {
@@ -273,13 +273,13 @@ const trait_info = struct {
     methods: []const trait_method,
     requires: []const trait_constraint,
     is_auto: bool,
-    generics: []const ir_mod.ir.generic_param,
+    generics: []const uir_mod.uir.generic_param,
 };
 
 const struct_info = struct {
-    fields: []const ir_mod.ir.struct_decl.field,
+    fields: []const uir_mod.uir.struct_decl.field,
     is_record: bool,
-    generics: []const ir_mod.ir.generic_param,
+    generics: []const uir_mod.uir.generic_param,
 };
 
 const loop_scope = struct {
@@ -290,7 +290,7 @@ const loop_scope = struct {
 
 const typecheck_ctx = struct {
     allocator: std.mem.Allocator,
-    nodes: []const ir_mod.ir,
+    nodes: []const uir_mod.uir,
     strings: []const []const u8,
     spans: []const ?source.span,
     node_sources: []const source.source_id,
@@ -308,7 +308,7 @@ const typecheck_ctx = struct {
 
     fn init(
         allocator: std.mem.Allocator,
-        nodes: []const ir_mod.ir,
+        nodes: []const uir_mod.uir,
         strings: []const []const u8,
         spans: []const ?source.span,
         node_sources: []const source.source_id,
@@ -368,17 +368,17 @@ const typecheck_ctx = struct {
         self.loop_stack.deinit(self.allocator);
     }
 
-    fn string_value(self: *typecheck_ctx, id: ir_mod.string_identifier) []const u8 {
+    fn string_value(self: *typecheck_ctx, id: uir_mod.string_identifier) []const u8 {
         return self.strings[id.idx];
     }
 
-    fn span_for_node(self: *typecheck_ctx, id: ir_mod.ir_identifier) ?source.span {
+    fn span_for_node(self: *typecheck_ctx, id: uir_mod.uir_identifier) ?source.span {
         const idx: usize = @intCast(id.idx);
         if (idx >= self.spans.len) return null;
         return self.spans[idx];
     }
 
-    fn source_for_node(self: *typecheck_ctx, id: ir_mod.ir_identifier) ?source.source_id {
+    fn source_for_node(self: *typecheck_ctx, id: uir_mod.uir_identifier) ?source.source_id {
         const idx: usize = @intCast(id.idx);
         if (idx >= self.node_sources.len) return null;
         return self.node_sources[idx];
@@ -432,7 +432,7 @@ const typecheck_ctx = struct {
 
     fn infer_expr(
         self: *typecheck_ctx,
-        id: ir_mod.ir_identifier,
+        id: uir_mod.uir_identifier,
         self_name: ?[]const u8,
         generics: *string_map(TypeId),
         locals: *string_map(TypeId),
@@ -447,7 +447,7 @@ const typecheck_ctx = struct {
         return ty;
     }
 
-    fn type_name_from_type_node(self: *typecheck_ctx, id: ir_mod.ir_identifier) ?[]const u8 {
+    fn type_name_from_type_node(self: *typecheck_ctx, id: uir_mod.uir_identifier) ?[]const u8 {
         const node = self.nodes[@intCast(id.idx)];
         return switch (node) {
             .type => |ty| switch (ty) {
@@ -470,7 +470,7 @@ const typecheck_ctx = struct {
         };
     }
 
-    fn constraint_from_type_node(self: *typecheck_ctx, id: ir_mod.ir_identifier) ?trait_constraint {
+    fn constraint_from_type_node(self: *typecheck_ctx, id: uir_mod.uir_identifier) ?trait_constraint {
         const node = self.nodes[@intCast(id.idx)];
         if (node == .type and node.type == .applied) {
             const ap = node.type.applied;
@@ -483,7 +483,7 @@ const typecheck_ctx = struct {
         return .{ .name = name, .negative = false };
     }
 
-    fn is_unsized_marker(self: *typecheck_ctx, id: ir_mod.ir_identifier) bool {
+    fn is_unsized_marker(self: *typecheck_ctx, id: uir_mod.uir_identifier) bool {
         const node = self.nodes[@intCast(id.idx)];
         if (node != .type) return false;
         if (node.type != .optional) return false;
@@ -493,8 +493,8 @@ const typecheck_ctx = struct {
 
     fn add_type_generic_constraints(
         self: *typecheck_ctx,
-        generics: []const ir_mod.ir.generic_param,
-        where_clause: []const ir_mod.ir.function_decl.where_req,
+        generics: []const uir_mod.uir.generic_param,
+        where_clause: []const uir_mod.uir.function_decl.where_req,
         local_generics: *string_map(TypeId),
     ) void {
         var unsized_allowed = string_map(void).init(self.allocator);
@@ -564,7 +564,7 @@ const typecheck_ctx = struct {
 
     fn collect_dyn_traits(
         self: *typecheck_ctx,
-        id: ir_mod.ir_identifier,
+        id: uir_mod.uir_identifier,
         base: *?[]const u8,
         pos: *array_list([]const u8),
         neg: *array_list([]const u8),
@@ -603,7 +603,7 @@ const typecheck_ctx = struct {
 
     fn type_from_type_node(
         self: *typecheck_ctx,
-        id: ir_mod.ir_identifier,
+        id: uir_mod.uir_identifier,
         self_name: ?[]const u8,
         generics: *string_map(TypeId),
     ) TypeId {
@@ -665,7 +665,7 @@ const typecheck_ctx = struct {
         };
     }
 
-    fn add_function(self: *typecheck_ctx, func: ir_mod.ir.function_decl, impl_for: ?[]const u8) !void {
+    fn add_function(self: *typecheck_ctx, func: uir_mod.uir.function_decl, impl_for: ?[]const u8) !void {
         const name = self.string_value(func.name);
         if (self.functions.getPtr(name)) |group| {
             try group.append(.{ .decl = func, .impl_for = impl_for });
@@ -784,9 +784,9 @@ const typecheck_ctx = struct {
 
 pub fn check(
     allocator: std.mem.Allocator,
-    nodes: []const ir_mod.ir,
+    nodes: []const uir_mod.uir,
     strings: []const []const u8,
-    roots: []const ir_mod.ir_identifier,
+    roots: []const uir_mod.uir_identifier,
     spans: []const ?source.span,
     node_sources: []const source.source_id,
     diags: *array_list(diagnostic),
@@ -814,7 +814,7 @@ pub fn check(
     return .{ .types = out, .owned_slices = owned };
 }
 
-fn collect_env(ctx: *typecheck_ctx, roots: []const ir_mod.ir_identifier) !void {
+fn collect_env(ctx: *typecheck_ctx, roots: []const uir_mod.uir_identifier) !void {
     for (roots) |root| {
         const node = ctx.nodes[@intCast(root.idx)];
         if (node != .decl) continue;
@@ -909,7 +909,7 @@ fn add_builtin_traits(ctx: *typecheck_ctx) void {
     }
 }
 
-fn infer_roots(ctx: *typecheck_ctx, roots: []const ir_mod.ir_identifier) !void {
+fn infer_roots(ctx: *typecheck_ctx, roots: []const uir_mod.uir_identifier) !void {
     for (roots) |root| {
         const node = ctx.nodes[@intCast(root.idx)];
         if (node != .decl) continue;
@@ -935,9 +935,9 @@ fn infer_roots(ctx: *typecheck_ctx, roots: []const ir_mod.ir_identifier) !void {
 
 fn infer_function(
     ctx: *typecheck_ctx,
-    func: ir_mod.ir.function_decl,
+    func: uir_mod.uir.function_decl,
     self_name: ?[]const u8,
-    body_id: ir_mod.ir_identifier,
+    body_id: uir_mod.uir_identifier,
 ) typecheck_error!TypeId {
     var locals = string_map(TypeId).init(ctx.allocator);
     defer locals.deinit();
@@ -966,7 +966,7 @@ fn infer_function(
     return body_type;
 }
 
-fn run_borrow_check(ctx: *typecheck_ctx, body_id: ir_mod.ir_identifier, locals: *string_map(TypeId)) typecheck_error!void {
+fn run_borrow_check(ctx: *typecheck_ctx, body_id: uir_mod.uir_identifier, locals: *string_map(TypeId)) typecheck_error!void {
     var ref_locals = string_map(void).init(ctx.allocator);
     defer ref_locals.deinit();
     var it = locals.iterator();
@@ -1014,7 +1014,7 @@ const borrow_checker = struct {
         self.ref_bindings.deinit();
     }
 
-    fn check_expr(self: *borrow_checker, id: ir_mod.ir_identifier, scoped: bool) typecheck_error!void {
+    fn check_expr(self: *borrow_checker, id: uir_mod.uir_identifier, scoped: bool) typecheck_error!void {
         defer if (scoped) self.expire_temporary();
         const node = self.ctx.nodes[@intCast(id.idx)];
         switch (node) {
@@ -1035,7 +1035,7 @@ const borrow_checker = struct {
         }
     }
 
-    fn check_block(self: *borrow_checker, items: []const ir_mod.ir_identifier) typecheck_error!void {
+    fn check_block(self: *borrow_checker, items: []const uir_mod.uir_identifier) typecheck_error!void {
         if (items.len == 0) return;
         var live_after_sets = try self.ctx.allocator.alloc(string_map(void), items.len);
         defer {
@@ -1059,7 +1059,7 @@ const borrow_checker = struct {
         }
     }
 
-    fn check_decl(self: *borrow_checker, name_id: ir_mod.string_identifier, value_id: ir_mod.ir_identifier) typecheck_error!void {
+    fn check_decl(self: *borrow_checker, name_id: uir_mod.string_identifier, value_id: uir_mod.uir_identifier) typecheck_error!void {
         const name = self.ctx.string_value(name_id);
         const value_node = self.ctx.nodes[@intCast(value_id.idx)];
         if (value_node == .unary and (value_node.unary.op == .borrow or value_node.unary.op == .borrow_mut)) {
@@ -1078,7 +1078,7 @@ const borrow_checker = struct {
         self.drop_binding(name);
     }
 
-    fn check_binary(self: *borrow_checker, bin: ir_binary) typecheck_error!void {
+    fn check_binary(self: *borrow_checker, bin: uir_binary) typecheck_error!void {
         switch (bin.op) {
             .assign,
             .assign_add,
@@ -1107,7 +1107,7 @@ const borrow_checker = struct {
         }
     }
 
-    fn check_unary(self: *borrow_checker, un: ir_unary) typecheck_error!void {
+    fn check_unary(self: *borrow_checker, un: uir_unary) typecheck_error!void {
         switch (un.op) {
             .borrow, .borrow_mut => {
                 try self.check_expr(un.right, false);
@@ -1117,7 +1117,7 @@ const borrow_checker = struct {
         }
     }
 
-    fn check_if_expr(self: *borrow_checker, ife: ir_if) typecheck_error!void {
+    fn check_if_expr(self: *borrow_checker, ife: uir_if) typecheck_error!void {
         try self.check_expr(ife.condition, false);
         var saved = try self.snapshot();
 
@@ -1140,7 +1140,7 @@ const borrow_checker = struct {
         }
     }
 
-    fn check_subexprs(self: *borrow_checker, id: ir_mod.ir_identifier) typecheck_error!void {
+    fn check_subexprs(self: *borrow_checker, id: uir_mod.uir_identifier) typecheck_error!void {
         const node = self.ctx.nodes[@intCast(id.idx)];
         switch (node) {
             .unary => |un| try self.check_expr(un.right, false),
@@ -1189,7 +1189,7 @@ const borrow_checker = struct {
         }
     }
 
-    fn create_loan(self: *borrow_checker, un: ir_unary, target_id: ir_mod.ir_identifier, temporary: bool) typecheck_error!usize {
+    fn create_loan(self: *borrow_checker, un: uir_unary, target_id: uir_mod.uir_identifier, temporary: bool) typecheck_error!usize {
         const mutable = un.op == .borrow_mut;
         const place = self.place_from_expr(target_id);
         if (place == null) {
@@ -1220,7 +1220,7 @@ const borrow_checker = struct {
         _ = self.ref_bindings.put(name, loan_idx) catch {};
     }
 
-    fn check_write(self: *borrow_checker, place: []const u8, span_id: ir_mod.ir_identifier) void {
+    fn check_write(self: *borrow_checker, place: []const u8, span_id: uir_mod.uir_identifier) void {
         for (self.loans.items) |ln| {
             if (!ln.active) continue;
             if (ln.place == null) continue;
@@ -1248,7 +1248,7 @@ const borrow_checker = struct {
         return false;
     }
 
-    fn place_from_expr(self: *borrow_checker, id: ir_mod.ir_identifier) ?[]const u8 {
+    fn place_from_expr(self: *borrow_checker, id: uir_mod.uir_identifier) ?[]const u8 {
         const node = self.ctx.nodes[@intCast(id.idx)];
         return switch (node) {
             .identifier => |ident| self.ctx.string_value(ident),
@@ -1260,7 +1260,7 @@ const borrow_checker = struct {
         };
     }
 
-    fn collect_ref_uses(self: *borrow_checker, id: ir_mod.ir_identifier, out: *string_map(void)) typecheck_error!void {
+    fn collect_ref_uses(self: *borrow_checker, id: uir_mod.uir_identifier, out: *string_map(void)) typecheck_error!void {
         const node = self.ctx.nodes[@intCast(id.idx)];
         switch (node) {
             .identifier => |ident| {
@@ -1413,13 +1413,13 @@ const borrow_checker = struct {
         }
     }
 
-    fn branch_used_refs(self: *borrow_checker, id: ir_mod.ir_identifier) typecheck_error!string_map(void) {
+    fn branch_used_refs(self: *borrow_checker, id: uir_mod.uir_identifier) typecheck_error!string_map(void) {
         var used = string_map(void).init(self.ctx.allocator);
         try self.collect_ref_uses(id, &used);
         return used;
     }
 
-    fn report(self: *borrow_checker, id: ir_mod.ir_identifier, message: []const u8) typecheck_error!void {
+    fn report(self: *borrow_checker, id: uir_mod.uir_identifier, message: []const u8) typecheck_error!void {
         try self.ctx.diags.append(.{
             .danger = .@"error",
             .message = message,
@@ -1630,7 +1630,7 @@ fn report_type_mismatch(
     message: []const u8,
     left: type_key,
     right: type_key,
-    span_id: ?ir_mod.ir_identifier,
+    span_id: ?uir_mod.uir_identifier,
 ) void {
     var buf = array_list(u8).init(ctx.allocator);
     defer buf.deinit();
@@ -1655,7 +1655,7 @@ fn report_trait_violation(
     message: []const u8,
     ty: type_key,
     trait_name: []const u8,
-    span_id: ir_mod.ir_identifier,
+    span_id: uir_mod.uir_identifier,
 ) void {
     var buf = array_list(u8).init(ctx.allocator);
     defer buf.deinit();
@@ -1677,7 +1677,7 @@ fn report_expected_kind(
     ctx: *typecheck_ctx,
     expected: []const u8,
     actual: type_key,
-    span_id: ir_mod.ir_identifier,
+    span_id: uir_mod.uir_identifier,
 ) void {
     var buf = array_list(u8).init(ctx.allocator);
     defer buf.deinit();
@@ -1698,7 +1698,7 @@ fn report_unknown_field(
     ctx: *typecheck_ctx,
     struct_name: []const u8,
     field_name: []const u8,
-    span_id: ir_mod.ir_identifier,
+    span_id: uir_mod.uir_identifier,
 ) void {
     var buf = array_list(u8).init(ctx.allocator);
     defer buf.deinit();
@@ -1720,7 +1720,7 @@ fn report_unknown_call(
     name: []const u8,
     arg_types: []const TypeId,
     receiver: ?TypeId,
-    call_id: ir_mod.ir_identifier,
+    call_id: uir_mod.uir_identifier,
 ) void {
     var buf = array_list(u8).init(ctx.allocator);
     defer buf.deinit();
@@ -1760,7 +1760,7 @@ fn report_call_failure(
     name: []const u8,
     arg_types: []const TypeId,
     receiver: ?TypeId,
-    call_id: ir_mod.ir_identifier,
+    call_id: uir_mod.uir_identifier,
     failure: ?call_failure,
     arity_options: []const usize,
 ) void {
@@ -1836,7 +1836,7 @@ fn report_missing_impl_method(
     trait_name: []const u8,
     type_name: []const u8,
     method_name: []const u8,
-    span_id: ir_mod.ir_identifier,
+    span_id: uir_mod.uir_identifier,
 ) void {
     var buf = array_list(u8).init(ctx.allocator);
     defer buf.deinit();
@@ -1880,7 +1880,7 @@ fn report_extra_impl_method(
     }) catch {};
 }
 
-fn impl_has_method(ctx: *typecheck_ctx, funcs: []const ir_mod.ir.function_decl, name: []const u8) bool {
+fn impl_has_method(ctx: *typecheck_ctx, funcs: []const uir_mod.uir.function_decl, name: []const u8) bool {
     for (funcs) |func| {
         if (std.mem.eql(u8, ctx.string_value(func.name), name)) return true;
     }
@@ -1894,7 +1894,7 @@ fn trait_has_method(info: trait_info, name: []const u8) bool {
     return false;
 }
 
-fn function_decl_span(ctx: *typecheck_ctx, func: ir_mod.ir.function_decl) ?source.span {
+fn function_decl_span(ctx: *typecheck_ctx, func: uir_mod.uir.function_decl) ?source.span {
     if (func.span) |span| return span;
     if (func.body) |id| {
         if (ctx.span_for_node(id)) |span| return span;
@@ -1908,7 +1908,7 @@ fn function_decl_span(ctx: *typecheck_ctx, func: ir_mod.ir.function_decl) ?sourc
     return null;
 }
 
-fn check_trait_impls(ctx: *typecheck_ctx, roots: []const ir_mod.ir_identifier) void {
+fn check_trait_impls(ctx: *typecheck_ctx, roots: []const uir_mod.uir_identifier) void {
     for (roots) |root| {
         const node = ctx.nodes[@intCast(root.idx)];
         if (node != .decl) continue;
@@ -1945,7 +1945,7 @@ fn type_satisfies_trait_root(ctx: *typecheck_ctx, ty: type_key, trait_name: []co
     return type_satisfies_trait(ctx, ty, trait_name, &visited, &visited_types);
 }
 
-fn ensure_bool(ctx: *typecheck_ctx, ty: TypeId, span_id: ir_mod.ir_identifier) void {
+fn ensure_bool(ctx: *typecheck_ctx, ty: TypeId, span_id: uir_mod.uir_identifier) void {
     const key = ctx.to_type_key(ty);
     if (key == .unknown) {
         _ = ctx.types.unify(ty, ctx.types.named("bool"));
@@ -1956,7 +1956,7 @@ fn ensure_bool(ctx: *typecheck_ctx, ty: TypeId, span_id: ir_mod.ir_identifier) v
     }
 }
 
-fn ensure_numeric(ctx: *typecheck_ctx, ty: TypeId, span_id: ir_mod.ir_identifier) void {
+fn ensure_numeric(ctx: *typecheck_ctx, ty: TypeId, span_id: uir_mod.uir_identifier) void {
     const key = ctx.to_type_key(ty);
     if (key == .unknown) {
         _ = ctx.types.unify(ty, ctx.types.named("int"));
@@ -1967,7 +1967,7 @@ fn ensure_numeric(ctx: *typecheck_ctx, ty: TypeId, span_id: ir_mod.ir_identifier
     }
 }
 
-fn ensure_duration(ctx: *typecheck_ctx, ty: TypeId, span_id: ir_mod.ir_identifier) void {
+fn ensure_duration(ctx: *typecheck_ctx, ty: TypeId, span_id: uir_mod.uir_identifier) void {
     const key = ctx.to_type_key(ty);
     if (key == .unknown) {
         _ = ctx.types.unify(ty, ctx.types.named("duration"));
@@ -1979,7 +1979,7 @@ fn ensure_duration(ctx: *typecheck_ctx, ty: TypeId, span_id: ir_mod.ir_identifie
     report_expected_kind(ctx, "duration", key, span_id);
 }
 
-fn ensure_deadline_source(ctx: *typecheck_ctx, ty: TypeId, span_id: ir_mod.ir_identifier) void {
+fn ensure_deadline_source(ctx: *typecheck_ctx, ty: TypeId, span_id: uir_mod.uir_identifier) void {
     const key = ctx.to_type_key(ty);
     if (key == .unknown) {
         _ = ctx.types.unify(ty, ctx.types.named("duration"));
@@ -2042,7 +2042,7 @@ fn is_unit_type(key: type_key) bool {
     };
 }
 
-fn is_unit_expr(ctx: *typecheck_ctx, id: ir_mod.ir_identifier) bool {
+fn is_unit_expr(ctx: *typecheck_ctx, id: uir_mod.uir_identifier) bool {
     const node = ctx.nodes[@intCast(id.idx)];
     return switch (node) {
         .identifier => |ident| std.mem.eql(u8, ctx.string_value(ident), "unit"),
@@ -2068,7 +2068,7 @@ fn element_type_from_container(ctx: *typecheck_ctx, key: type_key) ?type_key {
     };
 }
 
-fn infer_call_base(ctx: *typecheck_ctx, base_id: ir_mod.ir_identifier) ?struct { name: []const u8, receiver: ?ir_mod.ir_identifier } {
+fn infer_call_base(ctx: *typecheck_ctx, base_id: uir_mod.uir_identifier) ?struct { name: []const u8, receiver: ?uir_mod.uir_identifier } {
     const node = ctx.nodes[@intCast(base_id.idx)];
     return switch (node) {
         .identifier => |ident| .{ .name = ctx.string_value(ident), .receiver = null },
@@ -2082,9 +2082,9 @@ fn infer_call_base(ctx: *typecheck_ctx, base_id: ir_mod.ir_identifier) ?struct {
     };
 }
 
-fn infer_call(ctx: *typecheck_ctx, id: ir_mod.ir_identifier, self_name: ?[]const u8, generics: *string_map(TypeId), locals: *string_map(TypeId)) TypeId {
+fn infer_call(ctx: *typecheck_ctx, id: uir_mod.uir_identifier, self_name: ?[]const u8, generics: *string_map(TypeId), locals: *string_map(TypeId)) TypeId {
     var base_id = id;
-    var args_buf: [7]ir_mod.ir_identifier = undefined;
+    var args_buf: [7]uir_mod.uir_identifier = undefined;
     var arg_count: usize = 0;
 
     while (true) {
@@ -2137,7 +2137,7 @@ fn infer_call(ctx: *typecheck_ctx, id: ir_mod.ir_identifier, self_name: ?[]const
     return ctx.types.new_var();
 }
 
-fn infer_access(ctx: *typecheck_ctx, left_id: ir_mod.ir_identifier, right_id: ir_mod.ir_identifier, self_name: ?[]const u8, generics: *string_map(TypeId), locals: *string_map(TypeId)) TypeId {
+fn infer_access(ctx: *typecheck_ctx, left_id: uir_mod.uir_identifier, right_id: uir_mod.uir_identifier, self_name: ?[]const u8, generics: *string_map(TypeId), locals: *string_map(TypeId)) TypeId {
     const base_type = ctx.infer_expr(left_id, self_name, generics, locals, null);
     const resolved = ctx.types.resolve(base_type);
     const node = ctx.types.types.items[resolved];
@@ -2157,9 +2157,9 @@ fn infer_access(ctx: *typecheck_ctx, left_id: ir_mod.ir_identifier, right_id: ir
 
 fn infer_index(
     ctx: *typecheck_ctx,
-    id: ir_mod.ir_identifier,
-    left_id: ir_mod.ir_identifier,
-    right_id: ir_mod.ir_identifier,
+    id: uir_mod.uir_identifier,
+    left_id: uir_mod.uir_identifier,
+    right_id: uir_mod.uir_identifier,
     self_name: ?[]const u8,
     generics: *string_map(TypeId),
     locals: *string_map(TypeId),
@@ -2176,10 +2176,10 @@ fn infer_index(
 
 fn infer_operator(
     ctx: *typecheck_ctx,
-    id: ir_mod.ir_identifier,
+    id: uir_mod.uir_identifier,
     op: ink.binary,
-    left_id: ir_mod.ir_identifier,
-    right_id: ir_mod.ir_identifier,
+    left_id: uir_mod.uir_identifier,
+    right_id: uir_mod.uir_identifier,
     self_name: ?[]const u8,
     generics: *string_map(TypeId),
     locals: *string_map(TypeId),
@@ -2263,9 +2263,9 @@ fn infer_operator(
 
 fn collect_call_args(
     ctx: *typecheck_ctx,
-    id: ir_mod.ir_identifier,
-    args: *array_list(ir_mod.ir_identifier),
-    base_out: *ir_mod.ir_identifier,
+    id: uir_mod.uir_identifier,
+    args: *array_list(uir_mod.uir_identifier),
+    base_out: *uir_mod.uir_identifier,
 ) bool {
     var base_id = id;
     var saw_call = false;
@@ -2281,14 +2281,14 @@ fn collect_call_args(
     }
     base_out.* = base_id;
     if (!saw_call) return false;
-    std.mem.reverse(ir_mod.ir_identifier, args.items);
+    std.mem.reverse(uir_mod.uir_identifier, args.items);
     if (args.items.len == 1 and is_unit_expr(ctx, args.items[0])) {
         args.items.len = 0;
     }
     return true;
 }
 
-fn infer_unary(ctx: *typecheck_ctx, un: ir_unary, self_name: ?[]const u8, generics: *string_map(TypeId), locals: *string_map(TypeId), return_type: ?TypeId) TypeId {
+fn infer_unary(ctx: *typecheck_ctx, un: uir_unary, self_name: ?[]const u8, generics: *string_map(TypeId), locals: *string_map(TypeId), return_type: ?TypeId) TypeId {
     const right = ctx.infer_expr(un.right, self_name, generics, locals, return_type);
     switch (un.op) {
         .borrow => return ctx.types.ref_type(right, false),
@@ -2319,7 +2319,7 @@ fn infer_unary(ctx: *typecheck_ctx, un: ir_unary, self_name: ?[]const u8, generi
             return ctx.types.named("deadline");
         },
         .spawn => {
-            var args = array_list(ir_mod.ir_identifier).init(ctx.allocator);
+            var args = array_list(uir_mod.uir_identifier).init(ctx.allocator);
             defer args.deinit();
             var base_id = un.right;
             if (!collect_call_args(ctx, un.right, &args, &base_id)) {
@@ -2384,7 +2384,7 @@ fn infer_unary(ctx: *typecheck_ctx, un: ir_unary, self_name: ?[]const u8, generi
     }
 }
 
-fn infer_assign(ctx: *typecheck_ctx, left_id: ir_mod.ir_identifier, right_id: ir_mod.ir_identifier, self_name: ?[]const u8, generics: *string_map(TypeId), locals: *string_map(TypeId), return_type: ?TypeId) TypeId {
+fn infer_assign(ctx: *typecheck_ctx, left_id: uir_mod.uir_identifier, right_id: uir_mod.uir_identifier, self_name: ?[]const u8, generics: *string_map(TypeId), locals: *string_map(TypeId), return_type: ?TypeId) TypeId {
     const right = ctx.infer_expr(right_id, self_name, generics, locals, return_type);
     const left = ctx.infer_expr(left_id, self_name, generics, locals, return_type);
     if (atomic_inner_type(ctx, left)) |inner| {
@@ -2417,7 +2417,7 @@ fn infer_assign(ctx: *typecheck_ctx, left_id: ir_mod.ir_identifier, right_id: ir
     return left;
 }
 
-fn infer_decl(ctx: *typecheck_ctx, decl: ir_decl, self_name: ?[]const u8, generics: *string_map(TypeId), locals: *string_map(TypeId), return_type: ?TypeId) TypeId {
+fn infer_decl(ctx: *typecheck_ctx, decl: uir_decl, self_name: ?[]const u8, generics: *string_map(TypeId), locals: *string_map(TypeId), return_type: ?TypeId) TypeId {
     switch (decl) {
         .@"const" => |c| {
             const value = ctx.infer_expr(c.value, self_name, generics, locals, return_type);
@@ -2457,7 +2457,7 @@ fn infer_decl(ctx: *typecheck_ctx, decl: ir_decl, self_name: ?[]const u8, generi
     }
 }
 
-fn infer_block(ctx: *typecheck_ctx, items: []const ir_mod.ir_identifier, self_name: ?[]const u8, generics: *string_map(TypeId), locals: *string_map(TypeId), return_type: ?TypeId) TypeId {
+fn infer_block(ctx: *typecheck_ctx, items: []const uir_mod.uir_identifier, self_name: ?[]const u8, generics: *string_map(TypeId), locals: *string_map(TypeId), return_type: ?TypeId) TypeId {
     var last = ctx.types.named("unit");
     for (items) |item| {
         last = ctx.infer_expr(item, self_name, generics, locals, return_type);
@@ -2467,7 +2467,7 @@ fn infer_block(ctx: *typecheck_ctx, items: []const ir_mod.ir_identifier, self_na
 
 fn bind_pattern_type(
     ctx: *typecheck_ctx,
-    pattern_id: ir_mod.ir_identifier,
+    pattern_id: uir_mod.uir_identifier,
     elem_type: TypeId,
     locals: *string_map(TypeId),
 ) void {
@@ -2481,7 +2481,7 @@ fn bind_pattern_type(
 fn infer_loop_like(
     ctx: *typecheck_ctx,
     label: ?[]const u8,
-    body_id: ir_mod.ir_identifier,
+    body_id: uir_mod.uir_identifier,
     self_name: ?[]const u8,
     generics: *string_map(TypeId),
     locals: *string_map(TypeId),
@@ -2498,7 +2498,7 @@ fn infer_loop_like(
 fn infer_label_block(
     ctx: *typecheck_ctx,
     label: []const u8,
-    body_id: ir_mod.ir_identifier,
+    body_id: uir_mod.uir_identifier,
     self_name: ?[]const u8,
     generics: *string_map(TypeId),
     locals: *string_map(TypeId),
@@ -2513,7 +2513,7 @@ fn infer_label_block(
     return result;
 }
 
-fn infer_if(ctx: *typecheck_ctx, ife: ir_if, self_name: ?[]const u8, generics: *string_map(TypeId), locals: *string_map(TypeId), return_type: ?TypeId) TypeId {
+fn infer_if(ctx: *typecheck_ctx, ife: uir_if, self_name: ?[]const u8, generics: *string_map(TypeId), locals: *string_map(TypeId), return_type: ?TypeId) TypeId {
     const cond = ctx.infer_expr(ife.condition, self_name, generics, locals, return_type);
     ensure_bool(ctx, cond, ife.condition);
     const then_ty = ctx.infer_expr(ife.then_branch, self_name, generics, locals, return_type);
@@ -2524,7 +2524,7 @@ fn infer_if(ctx: *typecheck_ctx, ife: ir_if, self_name: ?[]const u8, generics: *
     return then_ty;
 }
 
-fn infer_intrinsic(ctx: *typecheck_ctx, call: ir_intrinsic, self_name: ?[]const u8, generics: *string_map(TypeId), locals: *string_map(TypeId)) TypeId {
+fn infer_intrinsic(ctx: *typecheck_ctx, call: uir_intrinsic, self_name: ?[]const u8, generics: *string_map(TypeId), locals: *string_map(TypeId)) TypeId {
     const name = ctx.string_value(call.name);
     for (call.args) |arg| {
         _ = ctx.infer_expr(arg, self_name, generics, locals, null);
@@ -2542,7 +2542,7 @@ fn infer_intrinsic(ctx: *typecheck_ctx, call: ir_intrinsic, self_name: ?[]const 
     return ctx.types.new_var();
 }
 
-fn infer_record_literal(ctx: *typecheck_ctx, rec: ir_record_literal, self_name: ?[]const u8, generics: *string_map(TypeId), locals: *string_map(TypeId)) TypeId {
+fn infer_record_literal(ctx: *typecheck_ctx, rec: uir_record_literal, self_name: ?[]const u8, generics: *string_map(TypeId), locals: *string_map(TypeId)) TypeId {
     const type_name = ctx.string_value(rec.type_name);
     const ty = ctx.types.named(type_name);
     if (ctx.structs.get(type_name)) |info| {
@@ -2572,14 +2572,14 @@ fn infer_record_literal(ctx: *typecheck_ctx, rec: ir_record_literal, self_name: 
     return ty;
 }
 
-fn infer_decl_node(ctx: *typecheck_ctx, node: ir_mod.ir, self_name: ?[]const u8, generics: *string_map(TypeId), locals: *string_map(TypeId), return_type: ?TypeId) TypeId {
+fn infer_decl_node(ctx: *typecheck_ctx, node: uir_mod.uir, self_name: ?[]const u8, generics: *string_map(TypeId), locals: *string_map(TypeId), return_type: ?TypeId) TypeId {
     return switch (node) {
         .decl => |decl| infer_decl(ctx, decl, self_name, generics, locals, return_type),
         else => ctx.types.new_var(),
     };
 }
 
-fn infer_node(ctx: *typecheck_ctx, id: ir_mod.ir_identifier, self_name: ?[]const u8, generics: *string_map(TypeId), locals: *string_map(TypeId), return_type: ?TypeId) TypeId {
+fn infer_node(ctx: *typecheck_ctx, id: uir_mod.uir_identifier, self_name: ?[]const u8, generics: *string_map(TypeId), locals: *string_map(TypeId), return_type: ?TypeId) TypeId {
     const node = ctx.nodes[@intCast(id.idx)];
     return switch (node) {
         .integer => ctx.types.named("int"),
@@ -2788,7 +2788,7 @@ fn resolve_overload(
     self_name: ?[]const u8,
     generics: *string_map(TypeId),
     locals: *string_map(TypeId),
-    call_id: ?ir_mod.ir_identifier,
+    call_id: ?uir_mod.uir_identifier,
     receiver: ?TypeId,
 ) TypeId {
     const group = ctx.functions.get(name) orelse {
@@ -2861,7 +2861,7 @@ fn report_ambiguous_method(
     ctx: *typecheck_ctx,
     name: []const u8,
     recv_type: TypeId,
-    call_id: ir_mod.ir_identifier,
+    call_id: uir_mod.uir_identifier,
 ) void {
     var buf = array_list(u8).init(ctx.allocator);
     defer buf.deinit();
@@ -2940,7 +2940,7 @@ fn resolve_method_call(
     self_name: ?[]const u8,
     generics: *string_map(TypeId),
     locals: *string_map(TypeId),
-    call_id: ?ir_mod.ir_identifier,
+    call_id: ?uir_mod.uir_identifier,
 ) TypeId {
     const recv_resolved = ctx.types.resolve(recv_type);
     const recv_node = ctx.types.types.items[recv_resolved];

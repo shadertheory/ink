@@ -1,19 +1,19 @@
 pub const std = @import("std");
 pub const ink = @import("ink");
 
-pub const ir_identifier = struct { idx: u32 };
+pub const uir_identifier = struct { idx: u32 };
 pub const string_identifier = struct { idx: u32 };
 
-pub const intrinsic = struct { name: string_identifier, args: []const ir_identifier };
+pub const intrinsic = struct { name: string_identifier, args: []const uir_identifier };
 
 pub const record_literal = struct {
     type_name: string_identifier,
     fields: []const record_field,
 
-    pub const record_field = struct { name: string_identifier, value: ir_identifier };
+    pub const record_field = struct { name: string_identifier, value: uir_identifier };
 };
 
-pub const ir = union(enum) {
+pub const uir = union(enum) {
     integer: i64,
     float: f64,
     duration: i64,
@@ -21,36 +21,36 @@ pub const ir = union(enum) {
     boolean: bool,
     identifier: string_identifier,
 
-    unary: struct { op: ink.unary, right: ir_identifier },
-    binary: struct { left: ir_identifier, op: ink.binary, right: ir_identifier },
-    block: []const ir_identifier,
+    unary: struct { op: ink.unary, right: uir_identifier },
+    binary: struct { left: uir_identifier, op: ink.binary, right: uir_identifier },
+    block: []const uir_identifier,
     intrinsic: intrinsic,
 
-    if_expr: struct { condition: ir_identifier, then_branch: ir_identifier, else_branch: ?ir_identifier },
-    match_expr: struct { target: ir_identifier, arms: []const match_arm },
+    if_expr: struct { condition: uir_identifier, then_branch: uir_identifier, else_branch: ?uir_identifier },
+    match_expr: struct { target: uir_identifier, arms: []const match_arm },
     select_expr: struct { arms: []const select_arm },
-    label_expr: struct { name: string_identifier, body: ir_identifier },
-    loop_expr: struct { body: ir_identifier },
-    while_expr: struct { condition: ir_identifier, body: ir_identifier },
-    while_in_expr: struct { pattern: ir_identifier, iter: ir_identifier, body: ir_identifier },
-    until_expr: struct { condition: ir_identifier, body: ir_identifier },
-    repeat_expr: struct { count: ir_identifier, body: ir_identifier },
-    for_expr: struct { pattern: ir_identifier, iter: ir_identifier, body: ir_identifier },
-    each_expr: struct { pattern: ir_identifier, iter: ir_identifier, body: ir_identifier },
-    break_expr: struct { label: ?string_identifier, value: ?ir_identifier },
+    label_expr: struct { name: string_identifier, body: uir_identifier },
+    loop_expr: struct { body: uir_identifier },
+    while_expr: struct { condition: uir_identifier, body: uir_identifier },
+    while_in_expr: struct { pattern: uir_identifier, iter: uir_identifier, body: uir_identifier },
+    until_expr: struct { condition: uir_identifier, body: uir_identifier },
+    repeat_expr: struct { count: uir_identifier, body: uir_identifier },
+    for_expr: struct { pattern: uir_identifier, iter: uir_identifier, body: uir_identifier },
+    each_expr: struct { pattern: uir_identifier, iter: uir_identifier, body: uir_identifier },
+    break_expr: struct { label: ?string_identifier, value: ?uir_identifier },
     continue_expr: struct { label: ?string_identifier },
-    yield_expr: struct { value: ?ir_identifier },
-    atomic_expr: struct { value: ir_identifier, ordering: string_identifier },
+    yield_expr: struct { value: ?uir_identifier },
+    atomic_expr: struct { value: uir_identifier, ordering: string_identifier },
 
-    associate: struct { name: string_identifier, value: ?ir_identifier },
+    associate: struct { name: string_identifier, value: ?uir_identifier },
     record_literal: record_literal,
 
     type: union(enum) {
         self: void,
         name: string_identifier,
-        optional: ir_identifier,
-        dyn: ir_identifier,
-        applied: struct { base: string_identifier, args: []const ir_identifier },
+        optional: uir_identifier,
+        dyn: uir_identifier,
+        applied: struct { base: string_identifier, args: []const uir_identifier },
     },
 
     decl: union(enum) {
@@ -64,11 +64,11 @@ pub const ir = union(enum) {
         @"var": var_decl,
     },
 
-    pub const match_arm = struct { pattern: ir_identifier, body: ir_identifier };
+    pub const match_arm = struct { pattern: uir_identifier, body: uir_identifier };
     pub const select_arm = struct {
         name: ?string_identifier,
-        task: ir_identifier,
-        body: ir_identifier,
+        task: uir_identifier,
+        body: uir_identifier,
         detached: bool,
     };
 
@@ -76,20 +76,20 @@ pub const ir = union(enum) {
         name: string_identifier,
         generics: []const generic_param,
         params: []const param,
-        return_type: ?ir_identifier,
+        return_type: ?uir_identifier,
         where_clause: []const where_req,
-        body: ?ir_identifier,
+        body: ?uir_identifier,
         span: ?ink.source.span = null,
         source_id: ink.source.source_id = 0,
 
-        pub const param = struct { name: string_identifier, ty: ir_identifier, variadic: bool };
-        pub const where_req = struct { name: string_identifier, constraint: ir_identifier };
+        pub const param = struct { name: string_identifier, ty: uir_identifier, variadic: bool };
+        pub const where_req = struct { name: string_identifier, constraint: uir_identifier };
     };
 
     pub const type_decl = struct {
         name: string_identifier,
         generics: []const generic_param,
-        value: ir_identifier,
+        value: uir_identifier,
     };
 
     pub const struct_decl = struct {
@@ -98,7 +98,7 @@ pub const ir = union(enum) {
         fields: []const field,
         is_record: bool,
 
-        pub const field = struct { name: string_identifier, ty: ir_identifier };
+        pub const field = struct { name: string_identifier, ty: uir_identifier };
     };
 
     pub const impl_decl = struct {
@@ -110,14 +110,14 @@ pub const ir = union(enum) {
 
     pub const const_decl = struct {
         name: string_identifier,
-        ty: ?ir_identifier,
-        value: ir_identifier,
+        ty: ?uir_identifier,
+        value: uir_identifier,
     };
 
     pub const var_decl = struct {
         name: string_identifier,
-        ty: ?ir_identifier,
-        value: ir_identifier,
+        ty: ?uir_identifier,
+        value: uir_identifier,
     };
 
     pub const trait_decl = struct {
@@ -125,7 +125,7 @@ pub const ir = union(enum) {
         name: string_identifier,
         generics: []const generic_param,
         items: []const trait_item,
-        requires: []const ir_identifier,
+        requires: []const uir_identifier,
 
         pub const trait_item = union(enum) {
             function: function_decl,
@@ -135,12 +135,12 @@ pub const ir = union(enum) {
 
     pub const associated_type_decl = struct {
         name: string_identifier,
-        value: ?ir_identifier,
+        value: ?uir_identifier,
     };
 
     pub const enum_variant = struct {
         name: string_identifier,
-        payload: ?ir_identifier,
+        payload: ?uir_identifier,
     };
 
     pub const enum_decl = struct {
@@ -152,8 +152,8 @@ pub const ir = union(enum) {
     pub const generic_param = struct {
         name: string_identifier,
         kind: generic_kind,
-        constraint: ?ir_identifier,
-        default: ?ir_identifier,
+        constraint: ?uir_identifier,
+        default: ?uir_identifier,
         is_pack: bool,
 
         pub const generic_kind = enum { type, value };

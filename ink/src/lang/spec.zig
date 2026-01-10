@@ -95,7 +95,8 @@ pub const specification = [_]type_spec{
     } },
     .{ .@"struct" = .{ .name = "attribute", .fields = &.{
         .{ .name = "name", .ty = ref_identifier },
-        .{ .name = "args", .ty = ref_node_ptr_slice },
+        .{ .name = "args", .ty = ref_identifier_opt },
+        .{ .name = "where", .ty = ref_location },
     } } },
     .{ .@"struct" = .{ .name = "match_arm", .fields = &.{
         .{ .name = "pattern", .ty = ref_node_ptr },
@@ -118,12 +119,14 @@ pub const specification = [_]type_spec{
     } } },
     .{ .@"struct" = .{ .name = "function_decl", .fields = &.{
         .{ .name = "attributes", .ty = ref_attribute_slice },
+        .{ .name = "is_comptime", .ty = ref_bool },
         .{ .name = "name", .ty = ref_identifier },
         .{ .name = "generics", .ty = ref_generic_param_slice },
         .{ .name = "params", .ty = ref_param_slice },
         .{ .name = "return_type", .ty = ref_node_ptr_opt },
         .{ .name = "where_clause", .ty = ref_where_req_slice },
         .{ .name = "body", .ty = ref_node_ptr_opt },
+        .{ .name = "where", .ty = ref_location },
     } } },
 
     .{ .@"struct" = .{
@@ -141,6 +144,7 @@ pub const specification = [_]type_spec{
             .{ .name = "name", .ty = ref_identifier },
             .{ .name = "generics", .ty = ref_generic_param_slice },
             .{ .name = "fields", .ty = ref_struct_field_slice },
+            .{ .name = "where", .ty = ref_location },
         },
     } },
 
@@ -152,6 +156,7 @@ pub const specification = [_]type_spec{
             .{ .name = "by_trait", .ty = ref_identifier },
             .{ .name = "for_struct", .ty = ref_identifier },
             .{ .name = "functions", .ty = ref_function_decl_slice },
+            .{ .name = "where", .ty = ref_location },
         },
     } },
 
@@ -162,6 +167,7 @@ pub const specification = [_]type_spec{
             .{ .name = "module", .ty = ref_identifier },
             .{ .name = "item", .ty = ref_identifier_opt },
             .{ .name = "alias", .ty = ref_identifier_opt },
+            .{ .name = "where", .ty = ref_location },
         },
     } },
 
@@ -172,6 +178,7 @@ pub const specification = [_]type_spec{
             .{ .name = "name", .ty = ref_identifier },
             .{ .name = "generics", .ty = ref_generic_param_slice },
             .{ .name = "value", .ty = ref_node_ptr },
+            .{ .name = "where", .ty = ref_location },
         },
     } },
 
@@ -182,6 +189,7 @@ pub const specification = [_]type_spec{
             .{ .name = "name", .ty = ref_identifier },
             .{ .name = "ty", .ty = ref_node_ptr_opt },
             .{ .name = "value", .ty = ref_node_ptr },
+            .{ .name = "where", .ty = ref_location },
         },
     } },
 
@@ -192,6 +200,7 @@ pub const specification = [_]type_spec{
             .{ .name = "name", .ty = ref_identifier },
             .{ .name = "ty", .ty = ref_node_ptr_opt },
             .{ .name = "value", .ty = ref_node_ptr },
+            .{ .name = "where", .ty = ref_location },
         },
     } },
 
@@ -209,6 +218,7 @@ pub const specification = [_]type_spec{
             .{ .name = "attributes", .ty = ref_attribute_slice },
             .{ .name = "name", .ty = ref_identifier },
             .{ .name = "value", .ty = ref_node_ptr_opt },
+            .{ .name = "where", .ty = ref_location },
         },
     } },
 
@@ -221,6 +231,7 @@ pub const specification = [_]type_spec{
             .{ .name = "generics", .ty = ref_generic_param_slice },
             .{ .name = "items", .ty = ref_trait_item_slice },
             .{ .name = "requires", .ty = ref_node_ptr_slice },
+            .{ .name = "where", .ty = ref_location },
         },
     } },
 
@@ -239,6 +250,7 @@ pub const specification = [_]type_spec{
             .{ .name = "name", .ty = ref_identifier },
             .{ .name = "generics", .ty = ref_generic_param_slice },
             .{ .name = "variants", .ty = ref_sum_variant_slice },
+            .{ .name = "where", .ty = ref_location },
         },
     } },
 
@@ -420,6 +432,15 @@ pub const specification = [_]type_spec{
     } },
 
     .{ .@"struct" = .{
+        .name = "macro_call",
+        .fields = &.{
+            .{ .name = "target", .ty = ref_node_ptr },
+            .{ .name = "body", .ty = ref_location },
+            .{ .name = "where", .ty = ref_location },
+        },
+    } },
+
+    .{ .@"struct" = .{
         .name = "intrinsic_call",
         .fields = &.{
             .{ .name = "name", .ty = ref_identifier },
@@ -481,6 +502,7 @@ pub const node_union = union_spec{
         .{ .name = "decl", .ty = type_ref{ .named = "decl" } },
         .{ .name = "unary", .ty = type_ref{ .named = "unary_expr" } },
         .{ .name = "binary", .ty = type_ref{ .named = "binary_expr" } },
+        .{ .name = "macro_call", .ty = type_ref{ .named = "macro_call" } },
         .{ .name = "if_expr", .ty = type_ref{ .named = "if_expr" } },
         .{ .name = "match_expr", .ty = type_ref{ .named = "match_expr" } },
         .{ .name = "select_expr", .ty = type_ref{ .named = "select_expr" } },

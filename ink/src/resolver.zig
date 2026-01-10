@@ -3,6 +3,8 @@ const source = @import("source.zig");
 const diag = @import("diagnostic.zig");
 const ink = @import("root.zig");
 const intrinsic = @import("intrinsic.zig");
+const lang_spec = @import("lang/spec.zig");
+const token = ink.token;
 const mem_allocator = std.mem.Allocator;
 const alloc_error = mem_allocator.Error;
 const arena_allocator = std.heap.ArenaAllocator;
@@ -24,11 +26,16 @@ pub const resolver = struct {
         imports: []const module_import,
         values: string_map(void),
         types: string_map(u8),
+        allocated_names: std.ArrayListUnmanaged([]const u8) = .{},
         allocator: mem_allocator,
 
         fn deinit(self: *module_state) void {
             self.values.deinit();
             self.types.deinit();
+            for (self.allocated_names.items) |name| {
+                self.allocator.free(name);
+            }
+            self.allocated_names.deinit(self.allocator);
             self.allocator.free(self.imports);
         }
     };
@@ -220,6 +227,7 @@ pub const resolver = struct {
             .imports = try self.allocator.dupe(module_import, imports),
             .values = string_map(void).init(self.allocator),
             .types = string_map(u8).init(self.allocator),
+            .allocated_names = .{},
             .allocator = self.allocator,
         };
         try scan_exports(&state, items, diags);
@@ -257,6 +265,15 @@ pub const resolver = struct {
         try ctx.base_types.put("float", type_flag_other);
         try ctx.base_types.put("bool", type_flag_other);
         try ctx.base_types.put("string", type_flag_other);
+        try ctx.base_types.put("token_stream", type_flag_other);
+        try ctx.base_types.put("token_tree", type_flag_other);
+        try ctx.base_types.put("token", type_flag_other);
+        try ctx.base_types.put("token_group", type_flag_other);
+        try ctx.base_types.put("token_kind", type_flag_other);
+        try ctx.base_types.put("token_tree_kind", type_flag_other);
+        try ctx.base_types.put("delimiter", type_flag_other);
+        try ctx.base_types.put("span", type_flag_other);
+        try ctx.base_types.put("symbol", type_flag_other);
         try ctx.base_types.put("type", type_flag_other);
         try ctx.base_types.put("none", type_flag_other);
         try ctx.base_types.put("result", type_flag_other);
@@ -300,7 +317,9 @@ pub const resolver = struct {
             if (node.* != .decl) continue;
             switch (node.decl) {
                 .function => |f| try state.values.put(f.name.string, {}),
-                .@"const" => |c| try state.values.put(c.name.string, {}),
+                .@"const" => |c| {
+                    try state.values.put(c.name.string, {});
+                },
                 .@"var" => |v| try state.values.put(v.name.string, {}),
                 .type_alias => |t| try add_export_type(&state.types, t.name.string, type_flag_other),
                 .@"struct" => |s| {
@@ -308,12 +327,28 @@ pub const resolver = struct {
                     try add_export_type(&state.types, s.name.string, type_flag_other);
                 },
                 .trait => |t| try add_export_type(&state.types, t.name.string, type_flag_trait),
-                .@"enum" => |e| try add_export_type(&state.types, e.name.string, type_flag_other),
+                .@"enum" => |e| {
+                    try add_export_type(&state.types, e.name.string, type_flag_other);
+                    for (e.variants) |variant| {
+                        const qualified = try qualify_name_owned(state.allocator, e.name.string, variant.name.string);
+                        try state.values.put(qualified, {});
+                        try state.allocated_names.append(state.allocator, qualified);
+                    }
+                },
                 .import => |_| {},
                 .impl => |_| {},
             }
         }
         _ = diags;
+    }
+
+    fn qualify_name_owned(allocator: mem_allocator, left: []const u8, right: []const u8) alloc_error![]const u8 {
+        const sep = "::";
+        var buf = try allocator.alloc(u8, left.len + sep.len + right.len);
+        std.mem.copyForwards(u8, buf[0..left.len], left);
+        std.mem.copyForwards(u8, buf[left.len .. left.len + sep.len], sep);
+        std.mem.copyForwards(u8, buf[left.len + sep.len ..], right);
+        return buf;
     }
 
     fn add_export_type(types: *string_map(u8), name: []const u8, flag: u8) alloc_error!void {
@@ -404,7 +439,8 @@ pub const resolver = struct {
         switch (node.*) {
             .integer, .float, .duration, .string => {},
             .identifier => |id| {
-                if (!ctx.resolve_value(id.string)) {
+                const ok = ctx.resolve_value(id.string);
+                if (!ok) {
                     const hint = try suggest_value(ctx, id.string);
                     try report_unknown(
                         ctx,
@@ -424,6 +460,14 @@ pub const resolver = struct {
                 try resolve_node(ctx, ink.ast.deref(un.right), diags);
             },
             .binary => |bin| try resolve_binary(ctx, bin, diags),
+            .macro_call => |mc| {
+                try diags.append(.{
+                    .danger = .@"error",
+                    .message = "macro call was not expanded",
+                    .span = span{ .start = mc.where.start, .end = mc.where.end },
+                    .source_id = ctx.current_source_id,
+                });
+            },
             .label_expr => |le| try resolve_node(ctx, ink.ast.deref(le.body), diags),
             .loop_expr => |le| try resolve_node(ctx, ink.ast.deref(le.body), diags),
             .while_expr => |we| {
@@ -635,31 +679,51 @@ pub const resolver = struct {
     ) alloc_error!void {
         for (attrs) |attr| {
             if (std.mem.eql(u8, attr.name.string, "repr")) {
-                for (attr.args) |arg_ref| {
-                    const arg_node = ink.ast.deref(arg_ref);
-                    if (arg_node.* == .identifier) {
-                        if (!ctx.resolve_type(arg_node.identifier.string)) {
-                            const hint = try suggest_type(ctx, arg_node.identifier.string);
-                            try report_unknown(
-                                ctx,
-                                diags,
-                                "unknown type",
-                                arg_node.identifier.string,
-                                span{ .start = arg_node.identifier.where.start, .end = arg_node.identifier.where.end },
-                                "E2002",
-                                hint,
-                            );
-                        }
-                        continue;
-                    }
-                    try resolve_type_node(ctx, arg_node, diags);
+                if (attr.args) |arg_stream| {
+                    try resolve_repr_args(ctx, arg_stream, diags);
                 }
                 continue;
             }
-            for (attr.args) |arg_ref| {
-                try resolve_node(ctx, ink.ast.deref(arg_ref), diags);
+        }
+    }
+
+    fn resolve_repr_args(
+        ctx: *context,
+        args: ink.identifier,
+        diags: *array_list(diagnostic),
+    ) alloc_error!void {
+        var lexer = ink.lexer.init(args.string) catch return;
+        while (true) {
+            const maybe_tok = lexer.next() catch return;
+            if (maybe_tok == null) break;
+            const tok = maybe_tok.?;
+            switch (tok.which) {
+                .end_of_file => break,
+                .comma, .new_line, .indent, .dedent => continue,
+                else => {},
+            }
+            if (!is_name_token(tok.which)) continue;
+            if (!ctx.resolve_type(tok.what.string)) {
+                const hint = try suggest_type(ctx, tok.what.string);
+                try report_unknown(
+                    ctx,
+                    diags,
+                    "unknown type",
+                    tok.what.string,
+                    span{ .start = tok.what.where.start, .end = tok.what.where.end },
+                    "E2002",
+                    hint,
+                );
             }
         }
+    }
+
+    fn is_name_token(kind: token.kind) bool {
+        if (kind == .identifier) return true;
+        inline for (lang_spec.keyword_lexemes) |lex| {
+            if (kind == @field(token.kind, lex.kind)) return true;
+        }
+        return false;
     }
 
     fn has_attribute(attrs: []const ink.ast.attribute, name: []const u8) bool {
@@ -1310,6 +1374,7 @@ pub const resolver = struct {
             .unary => |un| span_of_node(ink.ast.deref(un.right)),
             .binary => |bin| span_of_node(ink.ast.deref(bin.left)) orelse span_of_node(ink.ast.deref(bin.right)),
             .intrinsic => |call| span{ .start = call.name.where.start, .end = call.name.where.end },
+            .macro_call => |mc| span{ .start = mc.where.start, .end = mc.where.end },
             .type => |_| null,
             .label_expr => |le| span{ .start = le.name.where.start, .end = le.name.where.end },
             .loop_expr => |le| span_of_node(ink.ast.deref(le.body)),

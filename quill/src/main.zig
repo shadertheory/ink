@@ -1,9 +1,11 @@
 const std = @import("std");
 const ink = @import("ink");
 const graph = @import("graph.zig");
+const target_mod = ink.target;
 
 const mem_allocator = std.mem.Allocator;
 const builtin = @import("builtin");
+const array_list = std.array_list.Managed;
 
 const Command = enum { build, run, env, install, help };
 
@@ -60,6 +62,7 @@ fn print_usage(writer: *std.Io.Writer, exe_name: []const u8) !void {
             "Options:\n" ++
             "  --manifest <path>  Path to package.ink or package dir (default: .)\n" ++
             "  --out <path>       Output .inkb path (build only)\n" ++
+            "  --target <target>  Target backend (build/run)\n" ++
             "  --prefix <path>    Install prefix (install only)\n",
     );
 }
@@ -88,6 +91,7 @@ fn resolve_manifest_root(allocator: mem_allocator, path: []const u8) ![]const u8
 fn handle_build(allocator: mem_allocator, args: []const []const u8, run_after: bool) !void {
     var manifest_path: []const u8 = ".";
     var out_path: ?[]const u8 = null;
+    var target_text: ?[]const u8 = null;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -104,6 +108,30 @@ fn handle_build(allocator: mem_allocator, args: []const []const u8, run_after: b
             i += 1;
             continue;
         }
+        if (std.mem.eql(u8, arg, "--target") or std.mem.eql(u8, arg, "-t")) {
+            if (i + 1 >= args.len) return error.InvalidArgs;
+            target_text = args[i + 1];
+            i += 1;
+            continue;
+        }
+        return error.InvalidArgs;
+    }
+
+    var target_spec: target_mod.target_spec = .{ .kind = .vm };
+    if (target_text) |text| {
+        target_spec = target_mod.parse_target(text) catch {
+            var err_buf: [256]u8 = undefined;
+            var err_writer = std.fs.File.stderr().writer(&err_buf);
+            err_writer.interface.print("error: invalid target: {s}\n", .{text}) catch {};
+            err_writer.interface.flush() catch {};
+            return error.InvalidArgs;
+        };
+    }
+    if (run_after and target_spec.kind != .vm) {
+        var err_buf: [256]u8 = undefined;
+        var err_writer = std.fs.File.stderr().writer(&err_buf);
+        err_writer.interface.writeAll("error: run is only supported for the vm target\n") catch {};
+        err_writer.interface.flush() catch {};
         return error.InvalidArgs;
     }
 
@@ -146,12 +174,17 @@ fn handle_build(allocator: mem_allocator, args: []const []const u8, run_after: b
 
     try std.fs.cwd().makePath(std.fs.path.dirname(final_out) orelse ".");
 
-    const inkc_args = try build_tool_args(allocator, inkc_path, &.{
-        "--manifest",
-        root_dir,
-        "--output",
-        final_out,
-    });
+    var extra_args = array_list([]const u8).init(allocator);
+    defer extra_args.deinit();
+    try extra_args.append("--manifest");
+    try extra_args.append(root_dir);
+    try extra_args.append("--output");
+    try extra_args.append(final_out);
+    if (target_text) |text| {
+        try extra_args.append("--target");
+        try extra_args.append(text);
+    }
+    const inkc_args = try build_tool_args(allocator, inkc_path, extra_args.items);
     defer allocator.free(inkc_args);
 
     const compile_term = try run_tool(allocator, inkc_args, root_dir);

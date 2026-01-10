@@ -35,14 +35,18 @@ pub const builder = struct {
     allocator: mem_allocator,
     tokens: []const token,
     tree: *const peg_parser.parse_tree,
+    source: []const u8,
     last_error: ?error_info = null,
+    allow_interpolation: bool = true,
 
-    pub fn init(allocator: mem_allocator, tokens: []const token, tree: *const peg_parser.parse_tree) builder {
+    pub fn init(allocator: mem_allocator, tokens: []const token, tree: *const peg_parser.parse_tree, source: []const u8) builder {
         return .{
             .allocator = allocator,
             .tokens = tokens,
             .tree = tree,
+            .source = source,
             .last_error = null,
+            .allow_interpolation = true,
         };
     }
 
@@ -58,6 +62,10 @@ pub const builder = struct {
             }
         }
         return items.toOwnedSlice() catch return error.out_of_memory;
+    }
+
+    pub fn build_expr_root(self: *builder, root: peg_parser.node_id) build_error!*ink.node {
+        return self.build_expr(root);
     }
 
     fn parse_attributes(
@@ -86,7 +94,7 @@ pub const builder = struct {
     fn build_attribute(self: *builder, id: peg_parser.node_id) build_error!ink.ast.attribute {
         const children = self.child_nodes(id);
         var name: ?ink.identifier = null;
-        var args: []const *ink.node = &[_]*ink.node{};
+        var args: ?ink.identifier = null;
 
         for (children) |child| {
             if (self.is_name_node(child)) {
@@ -104,17 +112,103 @@ pub const builder = struct {
 
         return .{
             .name = name.?,
-            .args = ink.ast.ref_slice(args),
+            .args = args,
+            .where = self.node_location(id),
         };
     }
 
-    fn collect_attribute_args(self: *builder, id: peg_parser.node_id) build_error![]const *ink.node {
-        for (self.child_nodes(id)) |child| {
-            if (self.is_nonterminal(child, .arg_list)) {
-                return self.collect_expr_args(child);
+    fn collect_attribute_args(self: *builder, id: peg_parser.node_id) build_error!?ink.identifier {
+        const children = self.child_nodes(id);
+        var left: ?token = null;
+        var right: ?token = null;
+        for (children) |child| {
+            if (self.is_terminal(child, .paren_left)) {
+                left = self.token_of(child);
+                continue;
+            }
+            if (self.is_terminal(child, .paren_right)) {
+                right = self.token_of(child);
+                continue;
             }
         }
-        return &[_]*ink.node{};
+        if (left == null or right == null) return null;
+        const start = left.?.where.end;
+        const end = right.?.where.start;
+        if (end > start and start < self.source.len) {
+            const slice_end = if (end > self.source.len) self.source.len else end;
+            if (slice_end > start) {
+                const raw = self.source[start..slice_end];
+                const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+                if (trimmed.len != 0) {
+                    return .{
+                        .string = raw,
+                        .owner = .ref,
+                        .where = .{ .start = start, .end = slice_end },
+                    };
+                }
+            }
+        }
+
+        return self.collect_attribute_args_from_tokens(left.?, right.?);
+    }
+
+    fn collect_attribute_args_from_tokens(
+        self: *builder,
+        left: token,
+        right: token,
+    ) build_error!?ink.identifier {
+        if (right.where.start <= left.where.end) return null;
+
+        var buf = std.ArrayList(u8).empty;
+        errdefer buf.deinit(self.allocator);
+        const writer = buf.writer(self.allocator);
+
+        var first = true;
+        for (self.tokens) |tok| {
+            if (tok.where.start < left.where.end or tok.where.end > right.where.start) continue;
+            switch (tok.which) {
+                .end_of_file, .illegal, .new_line, .indent, .dedent => continue,
+                else => {},
+            }
+            if (!first) {
+                writer.writeByte(' ') catch return error.out_of_memory;
+            }
+            first = false;
+            try write_attribute_arg_token(writer, tok);
+        }
+
+        if (first) return null;
+        const owned = buf.toOwnedSlice(self.allocator) catch return error.out_of_memory;
+        return .{
+            .string = owned,
+            .owner = .ref,
+            .where = .{ .start = left.where.end, .end = right.where.start },
+        };
+    }
+
+    fn write_attribute_arg_token(writer: anytype, tok: token) build_error!void {
+        switch (tok.which) {
+            .identifier, .label, .number => return writer.writeAll(tok.what.string) catch return error.out_of_memory,
+            .string => {
+                writer.writeByte('"') catch return error.out_of_memory;
+                writer.writeAll(tok.what.string) catch return error.out_of_memory;
+                return writer.writeByte('"') catch return error.out_of_memory;
+            },
+            else => {},
+        }
+        if (token_lexeme(tok.which)) |lex| {
+            return writer.writeAll(lex) catch return error.out_of_memory;
+        }
+    }
+
+    fn token_lexeme(kind: token.kind) ?[]const u8 {
+        inline for (spec.keyword_lexemes) |lex| {
+            if (kind == @field(token.kind, lex.kind)) return lex.text;
+        }
+        inline for (spec.symbol_lexemes) |lex| {
+            if (kind == @field(token.kind, lex.kind)) return lex.text;
+        }
+        return null;
     }
 
     fn build_stmt(self: *builder, id: peg_parser.node_id) build_error!*ink.node {
@@ -1343,9 +1437,51 @@ pub const builder = struct {
                 } });
                 continue;
             }
+            if (self.is_nonterminal(child, .macro_suffix)) {
+                const body = try self.macro_body_location(child);
+                const where = self.node_location(id);
+                expr = try self.new_node(.{ .macro_call = .{
+                    .target = ink.ast.ref(expr),
+                    .body = body,
+                    .where = where,
+                } });
+                continue;
+            }
         }
 
         return expr;
+    }
+
+    fn macro_body_location(self: *builder, id: peg_parser.node_id) build_error!ink.location {
+        var block_id = id;
+        if (self.is_nonterminal(id, .macro_suffix)) {
+            for (self.child_nodes(id)) |child| {
+                if (self.is_nonterminal(child, .macro_block)) {
+                    block_id = child;
+                    break;
+                }
+            }
+        }
+        const children = self.child_nodes(block_id);
+        var indent_tok: ?token = null;
+        var dedent_tok: ?token = null;
+        for (children) |child| {
+            if (self.is_terminal(child, .indent)) {
+                indent_tok = self.token_of(child);
+                continue;
+            }
+            if (self.is_terminal(child, .dedent)) {
+                dedent_tok = self.token_of(child);
+                continue;
+            }
+        }
+        if (indent_tok == null or dedent_tok == null) {
+            return self.fail(.unexpected_node, id);
+        }
+        return .{
+            .start = indent_tok.?.where.end,
+            .end = dedent_tok.?.where.start,
+        };
     }
 
     fn collect_call_args(self: *builder, id: peg_parser.node_id) build_error![]const *ink.node {
@@ -1379,6 +1515,7 @@ pub const builder = struct {
     }
 
     fn build_interpolated_arg(self: *builder, str: ink.identifier) build_error!?*ink.node {
+        if (!self.allow_interpolation) return null;
         if (!self.has_interpolation_marker(str.string)) return null;
 
         var parts = std.array_list.Managed(*ink.node).init(self.allocator);
@@ -1527,7 +1664,7 @@ pub const builder = struct {
         defer parsed.deinit();
         if (!parsed.ok or parsed.root == null) return self.fail_string_literal(err_loc);
 
-        var inline_builder = builder.init(self.allocator, tokens, &parsed.tree);
+        var inline_builder = builder.init(self.allocator, tokens, &parsed.tree, owned);
         const expr_node = inline_builder.build_expr(parsed.root.?) catch return self.fail_string_literal(err_loc);
         return expr_node;
     }
@@ -1785,6 +1922,11 @@ pub const builder = struct {
         const children = self.child_nodes(id);
         var idx: usize = 0;
         const attributes = try self.parse_attributes(children, &idx);
+        var is_comptime = false;
+        if (idx < children.len and self.is_terminal(children[idx], .@"comptime")) {
+            is_comptime = true;
+            idx += 1;
+        }
         if (idx >= children.len or !self.is_terminal(children[idx], .function)) {
             return self.fail(.unexpected_node, id);
         }
@@ -1838,12 +1980,14 @@ pub const builder = struct {
 
         return self.new_node(.{ .decl = .{ .function = .{
             .attributes = attributes,
+            .is_comptime = is_comptime,
             .name = name,
             .generics = generics,
             .params = params,
             .return_type = ink.ast.ref_opt(return_type),
             .where_clause = where_clause,
             .body = ink.ast.ref_opt(body),
+            .where = self.node_location(id),
         } } });
     }
 
@@ -1879,6 +2023,7 @@ pub const builder = struct {
             .name = name,
             .generics = generics,
             .fields = fields,
+            .where = self.node_location(id),
         } } });
     }
 
@@ -1924,6 +2069,7 @@ pub const builder = struct {
             .generics = generics,
             .items = items,
             .requires = requires,
+            .where = self.node_location(id),
         } } });
     }
 
@@ -1959,6 +2105,7 @@ pub const builder = struct {
             .name = name,
             .generics = generics,
             .variants = variants,
+            .where = self.node_location(id),
         } } });
     }
 
@@ -2007,6 +2154,7 @@ pub const builder = struct {
             .by_trait = by_trait,
             .for_struct = for_struct,
             .functions = functions,
+            .where = self.node_location(id),
         } } });
     }
 
@@ -2049,6 +2197,7 @@ pub const builder = struct {
             .module = module,
             .item = item,
             .alias = alias,
+            .where = self.node_location(id),
         } } });
     }
 
@@ -2093,6 +2242,7 @@ pub const builder = struct {
             .name = name,
             .ty = ink.ast.ref_opt(ty),
             .value = ink.ast.ref(value),
+            .where = self.node_location(id),
         } } });
     }
 
@@ -2137,6 +2287,7 @@ pub const builder = struct {
             .name = name,
             .ty = ink.ast.ref_opt(ty),
             .value = ink.ast.ref(value),
+            .where = self.node_location(id),
         } } });
     }
 
@@ -2177,6 +2328,7 @@ pub const builder = struct {
             .name = name,
             .generics = generics,
             .value = ink.ast.ref(value),
+            .where = self.node_location(id),
         } } });
     }
 
@@ -2282,7 +2434,12 @@ pub const builder = struct {
                 value = try self.build_type_expr(children[idx + 1]);
             }
         }
-        return .{ .attributes = attributes, .name = name, .value = ink.ast.ref_opt(value) };
+        return .{
+            .attributes = attributes,
+            .name = name,
+            .value = ink.ast.ref_opt(value),
+            .where = self.node_location(id),
+        };
     }
 
     fn build_requires_clause(self: *builder, id: peg_parser.node_id) build_error![]const ink.ast.node_ref {
@@ -2963,6 +3120,16 @@ pub const builder = struct {
             .less_than, .greater_than, .less_or_equal, .greater_or_equal, .equal, .not_equal => true,
             else => false,
         };
+    }
+
+    fn node_location(self: *builder, id: peg_parser.node_id) ink.location {
+        const parse_node = self.tree.nodes.items[id];
+        if (parse_node.start >= self.tokens.len or parse_node.end == 0) return .{ .start = 0, .end = 0 };
+        const start_tok = self.tokens[parse_node.start];
+        const end_index = if (parse_node.end > 0) parse_node.end - 1 else parse_node.start;
+        if (end_index >= self.tokens.len) return .{ .start = start_tok.where.start, .end = start_tok.where.end };
+        const end_tok = self.tokens[end_index];
+        return .{ .start = start_tok.where.start, .end = end_tok.where.end };
     }
 
     fn new_node(self: *builder, data: ink.node) build_error!*ink.node {

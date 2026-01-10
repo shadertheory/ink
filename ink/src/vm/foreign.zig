@@ -1,9 +1,15 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const inkb = @import("inkb.zig");
+const macro_context = @import("../macro_context.zig");
 const thread_mutex = std.Thread.Mutex;
 
 var atomic_mutex = thread_mutex{};
+var macro_ctx: ?*macro_context.macro_context = null;
+
+pub fn set_macro_context(ctx: ?*macro_context.macro_context) void {
+    macro_ctx = ctx;
+}
 
 pub const foreign_id = u32;
 
@@ -170,6 +176,16 @@ pub fn dispatch(machine: anytype, id: foreign_id) void {
     machine.current.sp = runtime.sp;
     machine.arg_base = runtime.arg_base;
     machine.arg_base_valid = runtime.arg_base_valid;
+}
+
+fn syntax_name_matches(name: []const u8, suffix: []const u8) bool {
+    if (std.mem.startsWith(u8, name, "std::syntax::")) {
+        return std.mem.eql(u8, name["std::syntax::".len..], suffix);
+    }
+    if (std.mem.startsWith(u8, name, "std::")) {
+        return std.mem.eql(u8, name["std::".len..], suffix);
+    }
+    return false;
 }
 
 fn dispatch_builtin(machine: anytype, name: []const u8, debug_checks: bool) bool {
@@ -347,6 +363,114 @@ fn dispatch_builtin(machine: anytype, name: []const u8, debug_checks: bool) bool
     }
     if (std.mem.eql(u8, name, "std::string_concat")) {
         builtin_string_concat(machine, debug_checks);
+        return true;
+    }
+    if (syntax_name_matches(name, "span_source")) {
+        builtin_syntax_span_source(machine);
+        return true;
+    }
+    if (syntax_name_matches(name, "span_start")) {
+        builtin_syntax_span_start(machine);
+        return true;
+    }
+    if (syntax_name_matches(name, "span_end")) {
+        builtin_syntax_span_end(machine);
+        return true;
+    }
+    if (syntax_name_matches(name, "span_join")) {
+        builtin_syntax_span_join(machine);
+        return true;
+    }
+    if (syntax_name_matches(name, "span_here")) {
+        builtin_syntax_span_here(machine);
+        return true;
+    }
+    if (syntax_name_matches(name, "token_kind")) {
+        builtin_syntax_token_kind(machine, debug_checks);
+        return true;
+    }
+    if (syntax_name_matches(name, "token_symbol")) {
+        builtin_syntax_token_symbol(machine, debug_checks);
+        return true;
+    }
+    if (syntax_name_matches(name, "token_span")) {
+        builtin_syntax_token_span(machine, debug_checks);
+        return true;
+    }
+    if (syntax_name_matches(name, "token_new")) {
+        builtin_syntax_token_new(machine, debug_checks);
+        return true;
+    }
+    if (syntax_name_matches(name, "token_group_delimiter")) {
+        builtin_syntax_token_group_delimiter(machine, debug_checks);
+        return true;
+    }
+    if (syntax_name_matches(name, "token_group_stream")) {
+        builtin_syntax_token_group_stream(machine, debug_checks);
+        return true;
+    }
+    if (syntax_name_matches(name, "token_group_span")) {
+        builtin_syntax_token_group_span(machine, debug_checks);
+        return true;
+    }
+    if (syntax_name_matches(name, "token_group_new")) {
+        builtin_syntax_token_group_new(machine, debug_checks);
+        return true;
+    }
+    if (syntax_name_matches(name, "token_tree_kind")) {
+        builtin_syntax_token_tree_kind(machine, debug_checks);
+        return true;
+    }
+    if (syntax_name_matches(name, "token_tree_token")) {
+        builtin_syntax_token_tree_token(machine, debug_checks);
+        return true;
+    }
+    if (syntax_name_matches(name, "token_tree_group")) {
+        builtin_syntax_token_tree_group(machine, debug_checks);
+        return true;
+    }
+    if (syntax_name_matches(name, "token_tree_span")) {
+        builtin_syntax_token_tree_span(machine, debug_checks);
+        return true;
+    }
+    if (syntax_name_matches(name, "token_tree_from_token")) {
+        builtin_syntax_token_tree_from_token(machine, debug_checks);
+        return true;
+    }
+    if (syntax_name_matches(name, "token_tree_from_group")) {
+        builtin_syntax_token_tree_from_group(machine, debug_checks);
+        return true;
+    }
+    if (syntax_name_matches(name, "token_stream_len")) {
+        builtin_syntax_token_stream_len(machine, debug_checks);
+        return true;
+    }
+    if (syntax_name_matches(name, "token_stream_get")) {
+        builtin_syntax_token_stream_get(machine, debug_checks);
+        return true;
+    }
+    if (syntax_name_matches(name, "token_stream_slice")) {
+        builtin_syntax_token_stream_slice(machine, debug_checks);
+        return true;
+    }
+    if (syntax_name_matches(name, "token_stream_concat")) {
+        builtin_syntax_token_stream_concat(machine, debug_checks);
+        return true;
+    }
+    if (syntax_name_matches(name, "token_stream_push")) {
+        builtin_syntax_token_stream_push(machine, debug_checks);
+        return true;
+    }
+    if (syntax_name_matches(name, "token_stream_empty")) {
+        builtin_syntax_token_stream_empty(machine, debug_checks);
+        return true;
+    }
+    if (syntax_name_matches(name, "error")) {
+        builtin_syntax_error(machine, debug_checks);
+        return true;
+    }
+    if (syntax_name_matches(name, "quote")) {
+        builtin_syntax_quote(machine, debug_checks);
         return true;
     }
     if (std.mem.eql(u8, name, "std::buf_new")) {
@@ -962,6 +1086,204 @@ fn builtin_string_concat(machine: anytype, debug_checks: bool) void {
     set_ret(machine, @intCast(ptr));
 }
 
+fn builtin_syntax_span_source(machine: anytype) void {
+    const ctx = macro_ctx orelse return;
+    const raw = read_arg(machine, 1);
+    const source_id = ctx.span_source(@intCast(raw)) orelse 0;
+    set_ret(machine, @intCast(source_id));
+}
+
+fn builtin_syntax_span_start(machine: anytype) void {
+    const ctx = macro_ctx orelse return;
+    const raw = read_arg(machine, 1);
+    const start = ctx.span_start(@intCast(raw)) orelse 0;
+    set_ret(machine, @intCast(start));
+}
+
+fn builtin_syntax_span_end(machine: anytype) void {
+    const ctx = macro_ctx orelse return;
+    const raw = read_arg(machine, 1);
+    const end = ctx.span_end(@intCast(raw)) orelse 0;
+    set_ret(machine, @intCast(end));
+}
+
+fn builtin_syntax_span_join(machine: anytype) void {
+    const ctx = macro_ctx orelse return;
+    const left = read_arg(machine, 1);
+    const right = read_arg(machine, 2);
+    const joined = ctx.span_join(@intCast(left), @intCast(right));
+    set_ret(machine, joined);
+}
+
+fn builtin_syntax_span_here(machine: anytype) void {
+    const ctx = macro_ctx orelse return;
+    set_ret(machine, ctx.span_here());
+}
+
+fn builtin_syntax_token_kind(machine: anytype, debug_checks: bool) void {
+    const ctx = macro_ctx_or_fail(machine, debug_checks) orelse return;
+    const raw = read_arg(machine, 1);
+    const kind = ctx.token_kind_of(@intCast(raw)) orelse @as(macro_context.token_kind, @enumFromInt(0));
+    set_ret(machine, @intFromEnum(kind));
+}
+
+fn builtin_syntax_token_symbol(machine: anytype, debug_checks: bool) void {
+    const ctx = macro_ctx_or_fail(machine, debug_checks) orelse return;
+    const raw = read_arg(machine, 1);
+    const sym = ctx.token_symbol(@intCast(raw));
+    set_ret(machine, sym);
+}
+
+fn builtin_syntax_token_span(machine: anytype, debug_checks: bool) void {
+    const ctx = macro_ctx_or_fail(machine, debug_checks) orelse return;
+    const raw = read_arg(machine, 1);
+    const span_id = ctx.token_span(@intCast(raw));
+    set_ret(machine, span_id);
+}
+
+fn builtin_syntax_token_new(machine: anytype, debug_checks: bool) void {
+    const ctx = macro_ctx_or_fail(machine, debug_checks) orelse return;
+    const kind_raw = read_arg(machine, 1);
+    const span_raw = read_arg(machine, 2);
+    const symbol_raw = read_arg(machine, 3);
+    const kind: macro_context.token_kind = @enumFromInt(@as(u8, @intCast(kind_raw)));
+    const token_id = ctx.token_new(kind, @intCast(span_raw), @intCast(symbol_raw));
+    set_ret(machine, token_id);
+}
+
+fn builtin_syntax_token_group_delimiter(machine: anytype, debug_checks: bool) void {
+    const ctx = macro_ctx_or_fail(machine, debug_checks) orelse return;
+    const raw = read_arg(machine, 1);
+    const delim = ctx.group_delimiter(@intCast(raw)) orelse @as(macro_context.delimiter, @enumFromInt(0));
+    set_ret(machine, @intFromEnum(delim));
+}
+
+fn builtin_syntax_token_group_stream(machine: anytype, debug_checks: bool) void {
+    const ctx = macro_ctx_or_fail(machine, debug_checks) orelse return;
+    const raw = read_arg(machine, 1);
+    const stream_id = ctx.group_stream(@intCast(raw));
+    set_ret(machine, stream_id);
+}
+
+fn builtin_syntax_token_group_span(machine: anytype, debug_checks: bool) void {
+    const ctx = macro_ctx_or_fail(machine, debug_checks) orelse return;
+    const raw = read_arg(machine, 1);
+    const span_id = ctx.group_span(@intCast(raw));
+    set_ret(machine, span_id);
+}
+
+fn builtin_syntax_token_group_new(machine: anytype, debug_checks: bool) void {
+    const ctx = macro_ctx_or_fail(machine, debug_checks) orelse return;
+    const delim_raw = read_arg(machine, 1);
+    const span_raw = read_arg(machine, 2);
+    const stream_raw = read_arg(machine, 3);
+    const delim: macro_context.delimiter = @enumFromInt(@as(u8, @intCast(delim_raw)));
+    const group_id = ctx.group_new(delim, @intCast(span_raw), @intCast(stream_raw));
+    set_ret(machine, group_id);
+}
+
+fn builtin_syntax_token_tree_kind(machine: anytype, debug_checks: bool) void {
+    const ctx = macro_ctx_or_fail(machine, debug_checks) orelse return;
+    const raw = read_arg(machine, 1);
+    const kind = ctx.tree_kind(@intCast(raw)) orelse @as(macro_context.token_tree_kind, @enumFromInt(0));
+    set_ret(machine, @intFromEnum(kind));
+}
+
+fn builtin_syntax_token_tree_token(machine: anytype, debug_checks: bool) void {
+    const ctx = macro_ctx_or_fail(machine, debug_checks) orelse return;
+    const raw = read_arg(machine, 1);
+    const tok_id = ctx.tree_token(@intCast(raw));
+    set_ret(machine, tok_id);
+}
+
+fn builtin_syntax_token_tree_group(machine: anytype, debug_checks: bool) void {
+    const ctx = macro_ctx_or_fail(machine, debug_checks) orelse return;
+    const raw = read_arg(machine, 1);
+    const group_id = ctx.tree_group(@intCast(raw));
+    set_ret(machine, group_id);
+}
+
+fn builtin_syntax_token_tree_span(machine: anytype, debug_checks: bool) void {
+    const ctx = macro_ctx_or_fail(machine, debug_checks) orelse return;
+    const raw = read_arg(machine, 1);
+    const span_id = ctx.tree_span(@intCast(raw));
+    set_ret(machine, span_id);
+}
+
+fn builtin_syntax_token_tree_from_token(machine: anytype, debug_checks: bool) void {
+    const ctx = macro_ctx_or_fail(machine, debug_checks) orelse return;
+    const raw = read_arg(machine, 1);
+    const tree_id = ctx.tree_from_token(@intCast(raw));
+    set_ret(machine, tree_id);
+}
+
+fn builtin_syntax_token_tree_from_group(machine: anytype, debug_checks: bool) void {
+    const ctx = macro_ctx_or_fail(machine, debug_checks) orelse return;
+    const raw = read_arg(machine, 1);
+    const tree_id = ctx.tree_from_group(@intCast(raw));
+    set_ret(machine, tree_id);
+}
+
+fn builtin_syntax_token_stream_len(machine: anytype, debug_checks: bool) void {
+    const ctx = macro_ctx_or_fail(machine, debug_checks) orelse return;
+    const raw = read_arg(machine, 1);
+    const len = ctx.token_stream_len(@intCast(raw));
+    set_ret(machine, @intCast(len));
+}
+
+fn builtin_syntax_token_stream_get(machine: anytype, debug_checks: bool) void {
+    const ctx = macro_ctx_or_fail(machine, debug_checks) orelse return;
+    const raw = read_arg(machine, 1);
+    const idx = to_usize(read_arg(machine, 2), debug_checks, machine) orelse return;
+    const tree_id = ctx.token_stream_get(@intCast(raw), idx);
+    set_ret(machine, tree_id);
+}
+
+fn builtin_syntax_token_stream_slice(machine: anytype, debug_checks: bool) void {
+    const ctx = macro_ctx_or_fail(machine, debug_checks) orelse return;
+    const raw = read_arg(machine, 1);
+    const start = to_usize(read_arg(machine, 2), debug_checks, machine) orelse return;
+    const end = to_usize(read_arg(machine, 3), debug_checks, machine) orelse return;
+    const stream_id = ctx.token_stream_slice(@intCast(raw), start, end);
+    set_ret(machine, stream_id);
+}
+
+fn builtin_syntax_token_stream_concat(machine: anytype, debug_checks: bool) void {
+    const ctx = macro_ctx_or_fail(machine, debug_checks) orelse return;
+    const left = read_arg(machine, 1);
+    const right = read_arg(machine, 2);
+    const stream_id = ctx.token_stream_concat(@intCast(left), @intCast(right));
+    set_ret(machine, stream_id);
+}
+
+fn builtin_syntax_token_stream_push(machine: anytype, debug_checks: bool) void {
+    const ctx = macro_ctx_or_fail(machine, debug_checks) orelse return;
+    const stream = read_arg(machine, 1);
+    const tree = read_arg(machine, 2);
+    const stream_id = ctx.token_stream_push(@intCast(stream), @intCast(tree));
+    set_ret(machine, stream_id);
+}
+
+fn builtin_syntax_token_stream_empty(machine: anytype, debug_checks: bool) void {
+    const ctx = macro_ctx_or_fail(machine, debug_checks) orelse return;
+    const stream_id = ctx.token_stream_empty();
+    set_ret(machine, stream_id);
+}
+
+fn builtin_syntax_error(machine: anytype, debug_checks: bool) void {
+    const ctx = macro_ctx_or_fail(machine, debug_checks) orelse return;
+    const span_raw = read_arg(machine, 1);
+    const msg_bytes = string_bytes(machine, read_arg(machine, 2), debug_checks) orelse return;
+    ctx.add_error(@intCast(span_raw), msg_bytes);
+}
+
+fn builtin_syntax_quote(machine: anytype, debug_checks: bool) void {
+    const ctx = macro_ctx_or_fail(machine, debug_checks) orelse return;
+    const text = string_bytes(machine, read_arg(machine, 1), debug_checks) orelse return;
+    const stream_id = ctx.token_stream_from_quote(text);
+    set_ret(machine, stream_id);
+}
+
 fn builtin_buf_new(machine: anytype, debug_checks: bool) void {
     const cap_val = read_arg(machine, 1);
     const cap = to_usize(cap_val, debug_checks, machine) orelse return;
@@ -1146,6 +1468,20 @@ fn read_arg(machine: anytype, index: usize) u64 {
         return machine.memory.read(machine.arg_base + 2 + index);
     }
     return machine.memory.read(machine.current.fp + index);
+}
+
+fn macro_ctx_or_fail(machine: anytype, debug_checks: bool) ?*macro_context.macro_context {
+    if (macro_ctx) |ctx| return ctx;
+    if (debug_checks) fail(machine, "macro context not set");
+    return null;
+}
+
+fn set_string_ret(machine: anytype, text: []const u8, debug_checks: bool) void {
+    const ptr = string_alloc(machine, text.len, debug_checks) orelse return;
+    const info = string_info(machine, @intCast(ptr), debug_checks) orelse return;
+    std.mem.copyForwards(u8, info.payload[0..text.len], text);
+    machine.memory.write(info.ptr, @intCast(text.len));
+    set_ret(machine, @intCast(ptr));
 }
 
 fn data_entry(machine: anytype, idx: u64, debug_checks: bool) ?inkb.data_entry {

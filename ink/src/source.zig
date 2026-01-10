@@ -1,4 +1,5 @@
 const std = @import("std");
+const target_mod = @import("target.zig");
 
 pub const source_id = u64;
 pub const module_id = u64;
@@ -21,4 +22,5 @@ pub const compile_request = struct {
     sources: []const source_file,
     modules: []const module_spec,
     root_module: []const u8,
+    target: target_mod.target_spec = .{ .kind = .vm },
 };

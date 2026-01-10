@@ -11,6 +11,8 @@ pub const nonterminal_kind = enum {
     attribute_list,
     attribute,
     attribute_args,
+    token_stream_paren,
+    token_stream_paren_item,
     stmt,
     decl,
     expr,
@@ -60,6 +62,10 @@ pub const nonterminal_kind = enum {
     product,
     unary,
     postfix,
+    macro_suffix,
+    macro_block,
+    token_stream_indent,
+    token_stream_indent_item,
     duration_literal,
     duration_item,
     intrinsic_call,
@@ -272,11 +278,36 @@ pub fn build(allocator: mem_allocator) !grammar {
 
     const name_token = try n(&b, .name);
 
+    const token_stream_paren_token = blk: {
+        var items = std.array_list.Managed(expr_id).init(allocator);
+        inline for (@typeInfo(token.kind).@"enum".fields) |field| {
+            const kind = @field(token.kind, field.name);
+            if (kind == .paren_left or kind == .paren_right or kind == .end_of_file or kind == .illegal) continue;
+            try items.append(try t(&b, kind));
+        }
+        const choice = try b.choice(items.items);
+        items.deinit();
+        break :blk choice;
+    };
+
+    const token_stream_paren_group = try b.sequence(&.{
+        try t(&b, .paren_left),
+        try n(&b, .token_stream_paren),
+        try t(&b, .paren_right),
+    });
+
+    const token_stream_paren_item = try b.choice(&.{
+        token_stream_paren_group,
+        token_stream_paren_token,
+    });
+    try b.rule(.token_stream_paren_item, token_stream_paren_item);
+
+    const token_stream_paren = try b.zero_or_more(try n(&b, .token_stream_paren_item));
+    try b.rule(.token_stream_paren, token_stream_paren);
+
     const attribute_args = try b.sequence(&.{
         try t(&b, .paren_left),
-        try n(&b, .layout),
-        try b.optional(try n(&b, .arg_list)),
-        try n(&b, .layout),
+        try n(&b, .token_stream_paren),
         try t(&b, .paren_right),
     });
     try b.rule(.attribute_args, attribute_args);
@@ -337,6 +368,42 @@ pub fn build(allocator: mem_allocator) !grammar {
         try t(&b, .dedent),
     });
     try b.rule(.record_block, record_block);
+
+    const token_stream_indent_token = blk: {
+        var items = std.array_list.Managed(expr_id).init(allocator);
+        inline for (@typeInfo(token.kind).@"enum".fields) |field| {
+            const kind = @field(token.kind, field.name);
+            if (kind == .indent or kind == .dedent or kind == .end_of_file or kind == .illegal) continue;
+            try items.append(try t(&b, kind));
+        }
+        const choice = try b.choice(items.items);
+        items.deinit();
+        break :blk choice;
+    };
+
+    const token_stream_indent_block = try b.sequence(&.{
+        try n(&b, .layout),
+        try t(&b, .indent),
+        try n(&b, .token_stream_indent),
+        try t(&b, .dedent),
+    });
+
+    const token_stream_indent_item = try b.choice(&.{
+        token_stream_indent_block,
+        token_stream_indent_token,
+    });
+    try b.rule(.token_stream_indent_item, token_stream_indent_item);
+
+    const token_stream_indent = try b.zero_or_more(try n(&b, .token_stream_indent_item));
+    try b.rule(.token_stream_indent, token_stream_indent);
+
+    const macro_block = try b.sequence(&.{
+        try n(&b, .layout),
+        try t(&b, .indent),
+        try n(&b, .token_stream_indent),
+        try t(&b, .dedent),
+    });
+    try b.rule(.macro_block, macro_block);
 
     const branch = try b.choice(&.{
         try n(&b, .block),
@@ -847,6 +914,12 @@ pub fn build(allocator: mem_allocator) !grammar {
     });
     try b.rule(.index_suffix, index_suffix);
 
+    const macro_suffix = try b.sequence(&.{
+        try t(&b, .bang),
+        try n(&b, .macro_block),
+    });
+    try b.rule(.macro_suffix, macro_suffix);
+
     const postfix = try b.sequence(&.{
         try n(&b, .primary),
         try b.zero_or_more(try b.choice(&.{
@@ -858,6 +931,7 @@ pub fn build(allocator: mem_allocator) !grammar {
             try n(&b, .record_block),
             try t(&b, .question),
         })),
+        try b.optional(try n(&b, .macro_suffix)),
     });
     try b.rule(.postfix, postfix);
 
@@ -1119,6 +1193,7 @@ pub fn build(allocator: mem_allocator) !grammar {
 
     const function_decl = try b.sequence(&.{
         try b.optional(try n(&b, .attribute_list)),
+        try b.optional(try t(&b, .@"comptime")),
         try t(&b, .function),
         access_name,
         try b.optional(try n(&b, .generic_params)),

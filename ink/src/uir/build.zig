@@ -2,9 +2,10 @@ const std = @import("std");
 const ink = @import("ink");
 const core = @import("core.zig");
 const source = @import("../source.zig");
+const array_list = std.array_list.Managed;
 
-pub const ir = core.ir;
-pub const ir_identifier = core.ir_identifier;
+pub const uir = core.uir;
+pub const uir_identifier = core.uir_identifier;
 pub const string_identifier = core.string_identifier;
 pub const mem_allocator = std.mem.Allocator;
 
@@ -37,6 +38,7 @@ fn span_for_node(node: *const ink.node) ?source.span {
         .duration => |value| span_from_location(value.where),
         .unary => |un| span_for_node(ink.ast.deref(un.right)),
         .binary => |bin| merge_span(span_for_node(ink.ast.deref(bin.left)), span_for_node(ink.ast.deref(bin.right))),
+        .macro_call => |mc| span_from_location(mc.where),
         .block => |blk| if (blk.items.len == 0) null else merge_span(
             span_for_node(ink.ast.deref(blk.items[0])),
             span_for_node(ink.ast.deref(blk.items[blk.items.len - 1])),
@@ -118,34 +120,36 @@ pub const error_kind = enum {
 };
 
 pub const build_result = struct {
-    nodes: []const ir,
+    nodes: []const uir,
     strings: []const []const u8,
-    roots: []const ir_identifier,
+    roots: []const uir_identifier,
     spans: []const ?source.span,
     sources: []const source.source_id,
 };
 
 pub const builder = struct {
     allocator: mem_allocator,
-    nodes: std.array_list.Managed(ir),
-    spans: std.array_list.Managed(?source.span),
-    span_stack: std.array_list.Managed(?source.span),
-    sources: std.array_list.Managed(source.source_id),
-    strings: std.array_list.Managed([]const u8),
-    roots: std.array_list.Managed(ir_identifier),
+    nodes: array_list(uir),
+    spans: array_list(?source.span),
+    span_stack: array_list(?source.span),
+    sources: array_list(source.source_id),
+    strings: array_list([]const u8),
+    roots: array_list(uir_identifier),
     string_map: std.StringHashMapUnmanaged(string_identifier) = .{},
     last_error: ?error_kind = null,
+    last_error_node: ?[]const u8 = null,
+    last_error_span: ?source.span = null,
     current_source_id: source.source_id = 0,
 
     pub fn init(allocator: mem_allocator) builder {
         return .{
             .allocator = allocator,
-            .nodes = std.array_list.Managed(ir).init(allocator),
-            .spans = std.array_list.Managed(?source.span).init(allocator),
-            .span_stack = std.array_list.Managed(?source.span).init(allocator),
-            .sources = std.array_list.Managed(source.source_id).init(allocator),
-            .strings = std.array_list.Managed([]const u8).init(allocator),
-            .roots = std.array_list.Managed(ir_identifier).init(allocator),
+            .nodes = array_list(uir).init(allocator),
+            .spans = array_list(?source.span).init(allocator),
+            .span_stack = array_list(?source.span).init(allocator),
+            .sources = array_list(source.source_id).init(allocator),
+            .strings = array_list([]const u8).init(allocator),
+            .roots = array_list(uir_identifier).init(allocator),
             .string_map = .{},
             .last_error = null,
             .current_source_id = 0,
@@ -175,6 +179,19 @@ pub const builder = struct {
         }
     }
 
+    pub fn build_nodes_with_sources(
+        self: *builder,
+        ast_nodes: []const *ink.node,
+        sources: []const source.source_id,
+    ) build_error!void {
+        if (ast_nodes.len != sources.len) return error.build_failed;
+        for (ast_nodes, sources) |node, source_id| {
+            self.current_source_id = source_id;
+            const id = try self.build_node(node);
+            self.roots.append(id) catch return error.out_of_memory;
+        }
+    }
+
     pub fn finish(self: *builder) build_error!build_result {
         return .{
             .nodes = self.nodes.toOwnedSlice() catch return error.out_of_memory,
@@ -185,7 +202,7 @@ pub const builder = struct {
         };
     }
 
-    fn build_node(self: *builder, node: *const ink.node) build_error!ir_identifier {
+    fn build_node(self: *builder, node: *const ink.node) build_error!uir_identifier {
         self.span_stack.append(span_for_node(node)) catch return error.out_of_memory;
         defer _ = self.span_stack.pop();
         return switch (node.*) {
@@ -196,6 +213,7 @@ pub const builder = struct {
             .identifier => |id| self.build_identifier(id),
             .unary => |un| self.build_unary(un),
             .binary => |bin| self.build_binary(bin),
+            .macro_call => |_| self.fail_node("macro_call"),
             .block => |blk| self.build_block(blk),
             .intrinsic => |call| self.build_intrinsic(call),
             .if_expr => |ife| self.build_if_expr(ife),
@@ -213,15 +231,15 @@ pub const builder = struct {
             .continue_expr => |ce| self.build_continue_expr(ce),
             .yield_expr => |ye| self.build_yield_expr(ye),
             .atomic_expr => |ae| self.build_atomic_expr(ae),
-            .with_expr => |_| self.fail(.unsupported_node),
-            .record => |_| self.fail(.unsupported_node),
+            .with_expr => |_| self.fail_node("with_expr"),
+            .record => |_| self.fail_node("record"),
             .associate => |assoc| self.build_associate(assoc),
             .type => |ty| self.build_type_expr(ty),
             .decl => |decl| self.build_decl(decl),
         };
     }
 
-    fn build_identifier(self: *builder, id: ink.identifier) build_error!ir_identifier {
+    fn build_identifier(self: *builder, id: ink.identifier) build_error!uir_identifier {
         if (std.mem.eql(u8, id.string, "true")) return self.emit(.{ .boolean = true });
         if (std.mem.eql(u8, id.string, "false")) return self.emit(.{ .boolean = false });
         if (std.mem.eql(u8, id.string, "none")) return self.emit(.{ .integer = 0 });
@@ -231,12 +249,12 @@ pub const builder = struct {
         return self.emit(.{ .identifier = sid });
     }
 
-    fn build_unary(self: *builder, un: ink.ast.unary_expr) build_error!ir_identifier {
+    fn build_unary(self: *builder, un: ink.ast.unary_expr) build_error!uir_identifier {
         const right = try self.build_node(ink.ast.deref(un.right));
         return self.emit(.{ .unary = .{ .op = un.op, .right = right } });
     }
 
-    fn build_binary(self: *builder, bin: ink.ast.binary_expr) build_error!ir_identifier {
+    fn build_binary(self: *builder, bin: ink.ast.binary_expr) build_error!uir_identifier {
         if (bin.op == .call) {
             if (try self.try_build_record_literal(bin)) |literal| return literal;
             if (self.is_record_call(ink.ast.deref(bin.left))) return self.fail(.unsupported_node);
@@ -251,7 +269,7 @@ pub const builder = struct {
         value: *const ink.node,
     };
 
-    fn try_build_record_literal(self: *builder, bin: ink.ast.binary_expr) build_error!?ir_identifier {
+    fn try_build_record_literal(self: *builder, bin: ink.ast.binary_expr) build_error!?uir_identifier {
         const ctor_name = self.constructor_name(ink.ast.deref(bin.left)) orelse return null;
         if (is_record_name(ctor_name)) return null;
         const fields = try self.collect_record_fields(ink.ast.deref(bin.right)) orelse return null;
@@ -266,7 +284,7 @@ pub const builder = struct {
         }
 
         const id = try self.emit(.{ .record_literal = .{ .type_name = type_name, .fields = out_fields } });
-        return @as(?ir_identifier, id);
+        return @as(?uir_identifier, id);
     }
 
     fn constructor_name(self: *builder, node: *const ink.node) ?[]const u8 {
@@ -285,7 +303,7 @@ pub const builder = struct {
     }
 
     fn collect_record_fields_from_record(self: *builder, rec: ink.ast.record_expr) build_error!?[]const record_field_source {
-        var fields = std.array_list.Managed(record_field_source).init(self.allocator);
+        var fields = array_list(record_field_source).init(self.allocator);
         for (rec.items) |assoc| {
             const value = if (assoc.value) |ref| ink.ast.deref(ref) else return self.fail(.unsupported_node);
             fields.append(.{ .name = assoc.name.string, .value = value }) catch return error.out_of_memory;
@@ -294,7 +312,7 @@ pub const builder = struct {
     }
 
     fn collect_record_fields_from_call(self: *builder, node: *const ink.node) build_error!?[]const record_field_source {
-        var args = std.array_list.Managed(*const ink.node).init(self.allocator);
+        var args = array_list(*const ink.node).init(self.allocator);
         defer args.deinit();
 
         const base = try self.collect_call_chain(node, &args) orelse return null;
@@ -307,7 +325,7 @@ pub const builder = struct {
             return @as(?[]const record_field_source, empty);
         }
 
-        var fields = std.array_list.Managed(record_field_source).init(self.allocator);
+        var fields = array_list(record_field_source).init(self.allocator);
         for (args.items) |arg| {
             const field = try self.parse_record_field_call(arg) orelse return self.fail(.unsupported_node);
             fields.append(field) catch return error.out_of_memory;
@@ -316,7 +334,7 @@ pub const builder = struct {
     }
 
     fn parse_record_field_call(self: *builder, node: *const ink.node) build_error!?record_field_source {
-        var args = std.array_list.Managed(*const ink.node).init(self.allocator);
+        var args = array_list(*const ink.node).init(self.allocator);
         defer args.deinit();
 
         const base = try self.collect_call_chain(node, &args) orelse return null;
@@ -332,7 +350,7 @@ pub const builder = struct {
     fn collect_call_chain(
         self: *builder,
         node: *const ink.node,
-        args: *std.array_list.Managed(*const ink.node),
+        args: *array_list(*const ink.node),
     ) build_error!?*const ink.node {
         _ = self;
         var current = node;
@@ -366,18 +384,18 @@ pub const builder = struct {
         return node.* == .identifier and std.mem.eql(u8, node.identifier.string, "unit");
     }
 
-    fn build_block(self: *builder, blk: ink.ast.block_expr) build_error!ir_identifier {
+    fn build_block(self: *builder, blk: ink.ast.block_expr) build_error!uir_identifier {
         const items = try self.build_node_refs(blk.items);
         return self.emit(.{ .block = items });
     }
 
-    fn build_intrinsic(self: *builder, call: ink.ast.intrinsic_call) build_error!ir_identifier {
+    fn build_intrinsic(self: *builder, call: ink.ast.intrinsic_call) build_error!uir_identifier {
         const name = try self.intern_string(call.name.string);
         const args = try self.build_node_refs(call.args);
         return self.emit(.{ .intrinsic = .{ .name = name, .args = args } });
     }
 
-    fn build_if_expr(self: *builder, ife: ink.ast.if_expr) build_error!ir_identifier {
+    fn build_if_expr(self: *builder, ife: ink.ast.if_expr) build_error!uir_identifier {
         const condition = try self.build_node(ink.ast.deref(ife.condition));
         const then_branch = try self.build_node(ink.ast.deref(ife.then_branch));
         const else_branch = if (ife.else_branch) |ref| try self.build_node(ink.ast.deref(ref)) else null;
@@ -388,27 +406,27 @@ pub const builder = struct {
         } });
     }
 
-    fn build_label_expr(self: *builder, le: ink.ast.label_expr) build_error!ir_identifier {
+    fn build_label_expr(self: *builder, le: ink.ast.label_expr) build_error!uir_identifier {
         return self.emit(.{ .label_expr = .{
             .name = try self.intern_string(le.name.string),
             .body = try self.build_node(ink.ast.deref(le.body)),
         } });
     }
 
-    fn build_loop_expr(self: *builder, le: ink.ast.loop_expr) build_error!ir_identifier {
+    fn build_loop_expr(self: *builder, le: ink.ast.loop_expr) build_error!uir_identifier {
         return self.emit(.{ .loop_expr = .{
             .body = try self.build_node(ink.ast.deref(le.body)),
         } });
     }
 
-    fn build_while_expr(self: *builder, we: ink.ast.while_expr) build_error!ir_identifier {
+    fn build_while_expr(self: *builder, we: ink.ast.while_expr) build_error!uir_identifier {
         return self.emit(.{ .while_expr = .{
             .condition = try self.build_node(ink.ast.deref(we.condition)),
             .body = try self.build_node(ink.ast.deref(we.body)),
         } });
     }
 
-    fn build_while_in_expr(self: *builder, we: ink.ast.while_in_expr) build_error!ir_identifier {
+    fn build_while_in_expr(self: *builder, we: ink.ast.while_in_expr) build_error!uir_identifier {
         return self.emit(.{ .while_in_expr = .{
             .pattern = try self.build_node(ink.ast.deref(we.pattern)),
             .iter = try self.build_node(ink.ast.deref(we.iter)),
@@ -416,21 +434,21 @@ pub const builder = struct {
         } });
     }
 
-    fn build_until_expr(self: *builder, ue: ink.ast.until_expr) build_error!ir_identifier {
+    fn build_until_expr(self: *builder, ue: ink.ast.until_expr) build_error!uir_identifier {
         return self.emit(.{ .until_expr = .{
             .condition = try self.build_node(ink.ast.deref(ue.condition)),
             .body = try self.build_node(ink.ast.deref(ue.body)),
         } });
     }
 
-    fn build_repeat_expr(self: *builder, re: ink.ast.repeat_expr) build_error!ir_identifier {
+    fn build_repeat_expr(self: *builder, re: ink.ast.repeat_expr) build_error!uir_identifier {
         return self.emit(.{ .repeat_expr = .{
             .count = try self.build_node(ink.ast.deref(re.count)),
             .body = try self.build_node(ink.ast.deref(re.body)),
         } });
     }
 
-    fn build_for_expr(self: *builder, fe: ink.ast.for_expr) build_error!ir_identifier {
+    fn build_for_expr(self: *builder, fe: ink.ast.for_expr) build_error!uir_identifier {
         return self.emit(.{ .for_expr = .{
             .pattern = try self.build_node(ink.ast.deref(fe.pattern)),
             .iter = try self.build_node(ink.ast.deref(fe.iter)),
@@ -438,7 +456,7 @@ pub const builder = struct {
         } });
     }
 
-    fn build_each_expr(self: *builder, ee: ink.ast.each_expr) build_error!ir_identifier {
+    fn build_each_expr(self: *builder, ee: ink.ast.each_expr) build_error!uir_identifier {
         return self.emit(.{ .each_expr = .{
             .pattern = try self.build_node(ink.ast.deref(ee.pattern)),
             .iter = try self.build_node(ink.ast.deref(ee.iter)),
@@ -446,43 +464,43 @@ pub const builder = struct {
         } });
     }
 
-    fn build_break_expr(self: *builder, be: ink.ast.break_expr) build_error!ir_identifier {
+    fn build_break_expr(self: *builder, be: ink.ast.break_expr) build_error!uir_identifier {
         const label = if (be.label) |lab| try self.intern_string(lab.string) else null;
         const value = if (be.value) |ref| try self.build_node(ink.ast.deref(ref)) else null;
         return self.emit(.{ .break_expr = .{ .label = label, .value = value } });
     }
 
-    fn build_continue_expr(self: *builder, ce: ink.ast.continue_expr) build_error!ir_identifier {
+    fn build_continue_expr(self: *builder, ce: ink.ast.continue_expr) build_error!uir_identifier {
         const label = if (ce.label) |lab| try self.intern_string(lab.string) else null;
         return self.emit(.{ .continue_expr = .{ .label = label } });
     }
 
-    fn build_yield_expr(self: *builder, ye: ink.ast.yield_expr) build_error!ir_identifier {
+    fn build_yield_expr(self: *builder, ye: ink.ast.yield_expr) build_error!uir_identifier {
         const value = if (ye.value) |ref| try self.build_node(ink.ast.deref(ref)) else null;
         return self.emit(.{ .yield_expr = .{ .value = value } });
     }
 
-    fn build_atomic_expr(self: *builder, ae: ink.ast.atomic_expr) build_error!ir_identifier {
+    fn build_atomic_expr(self: *builder, ae: ink.ast.atomic_expr) build_error!uir_identifier {
         return self.emit(.{ .atomic_expr = .{
             .value = try self.build_node(ink.ast.deref(ae.value)),
             .ordering = try self.intern_string(ae.ordering.string),
         } });
     }
 
-    fn build_match_expr(self: *builder, me: ink.ast.match_expr) build_error!ir_identifier {
+    fn build_match_expr(self: *builder, me: ink.ast.match_expr) build_error!uir_identifier {
         const target = try self.build_node(ink.ast.deref(me.target));
         const arms = try self.build_match_arms(me.arms);
         return self.emit(.{ .match_expr = .{ .target = target, .arms = arms } });
     }
 
-    fn build_select_expr(self: *builder, se: ink.ast.select_expr) build_error!ir_identifier {
+    fn build_select_expr(self: *builder, se: ink.ast.select_expr) build_error!uir_identifier {
         const arms = try self.build_select_arms(se.arms);
         return self.emit(.{ .select_expr = .{ .arms = arms } });
     }
 
-    fn build_match_arms(self: *builder, arms: []const ink.ast.match_arm) build_error![]const ir.match_arm {
-        if (arms.len == 0) return &[_]ir.match_arm{};
-        var out = try self.alloc(ir.match_arm, arms.len);
+    fn build_match_arms(self: *builder, arms: []const ink.ast.match_arm) build_error![]const uir.match_arm {
+        if (arms.len == 0) return &[_]uir.match_arm{};
+        var out = try self.alloc(uir.match_arm, arms.len);
         for (arms, 0..) |arm, i| {
             out[i] = .{
                 .pattern = try self.build_node(ink.ast.deref(arm.pattern)),
@@ -492,9 +510,9 @@ pub const builder = struct {
         return out;
     }
 
-    fn build_select_arms(self: *builder, arms: []const ink.ast.select_arm) build_error![]const ir.select_arm {
-        if (arms.len == 0) return &[_]ir.select_arm{};
-        var out = try self.alloc(ir.select_arm, arms.len);
+    fn build_select_arms(self: *builder, arms: []const ink.ast.select_arm) build_error![]const uir.select_arm {
+        if (arms.len == 0) return &[_]uir.select_arm{};
+        var out = try self.alloc(uir.select_arm, arms.len);
         for (arms, 0..) |arm, i| {
             const name = if (arm.name) |ident| try self.intern_string(ident.string) else null;
             out[i] = .{
@@ -507,13 +525,13 @@ pub const builder = struct {
         return out;
     }
 
-    fn build_associate(self: *builder, assoc: ink.ast.associate) build_error!ir_identifier {
+    fn build_associate(self: *builder, assoc: ink.ast.associate) build_error!uir_identifier {
         const name = try self.intern_string(assoc.name.string);
         const value = if (assoc.value) |ref| try self.build_node(ink.ast.deref(ref)) else null;
         return self.emit(.{ .associate = .{ .name = name, .value = value } });
     }
 
-    fn build_type_expr(self: *builder, ty: ink.ast.type_expr) build_error!ir_identifier {
+    fn build_type_expr(self: *builder, ty: ink.ast.type_expr) build_error!uir_identifier {
         return switch (ty) {
             .self => self.emit(.{ .type = .self }),
             .name => |id| self.emit(.{ .type = .{ .name = try self.intern_string(id.string) } }),
@@ -533,7 +551,7 @@ pub const builder = struct {
         };
     }
 
-    fn build_node_with_self(self: *builder, node: *const ink.node, self_name: []const u8) build_error!ir_identifier {
+    fn build_node_with_self(self: *builder, node: *const ink.node, self_name: []const u8) build_error!uir_identifier {
         return switch (node.*) {
             .type => |ty| self.build_type_expr_with_self(ty, self_name),
             else => self.build_node(node),
@@ -544,16 +562,16 @@ pub const builder = struct {
         self: *builder,
         refs: []const ink.ast.node_ref,
         self_name: []const u8,
-    ) build_error![]const ir_identifier {
-        if (refs.len == 0) return &[_]ir_identifier{};
-        var out = try self.alloc(ir_identifier, refs.len);
+    ) build_error![]const uir_identifier {
+        if (refs.len == 0) return &[_]uir_identifier{};
+        var out = try self.alloc(uir_identifier, refs.len);
         for (refs, 0..) |ref, i| {
             out[i] = try self.build_node_with_self(ink.ast.deref(ref), self_name);
         }
         return out;
     }
 
-    fn build_type_expr_with_self(self: *builder, ty: ink.ast.type_expr, self_name: []const u8) build_error!ir_identifier {
+    fn build_type_expr_with_self(self: *builder, ty: ink.ast.type_expr, self_name: []const u8) build_error!uir_identifier {
         return switch (ty) {
             .self => self.emit(.{ .type = .{ .name = try self.intern_string(self_name) } }),
             .name => |id| self.emit(.{ .type = .{ .name = try self.intern_string(id.string) } }),
@@ -573,21 +591,21 @@ pub const builder = struct {
         };
     }
 
-    fn build_decl(self: *builder, decl: ink.ast.decl) build_error!ir_identifier {
+    fn build_decl(self: *builder, decl: ink.ast.decl) build_error!uir_identifier {
         return self.emit(.{ .decl = switch (decl) {
             .function => |func| .{ .function = try self.build_function_decl(func) },
             .@"struct" => |s| .{ .@"struct" = try self.build_struct_decl(s) },
             .trait => |t| .{ .trait = try self.build_trait_decl(t) },
             .@"enum" => |e| .{ .@"enum" = try self.build_enum_decl(e) },
             .@"impl" => |i| .{ .@"impl" = try self.build_impl_decl(i) },
-            .import => return self.fail(.unsupported_node),
+            .import => return self.fail_node("import"),
             .type_alias => |t| .{ .type_alias = try self.build_type_decl(t) },
             .@"const" => |c| .{ .@"const" = try self.build_const_decl(c) },
             .@"var" => |v| .{ .@"var" = try self.build_var_decl(v) },
         } });
     }
 
-    fn build_function_decl(self: *builder, func: ink.ast.function_decl) build_error!ir.function_decl {
+    fn build_function_decl(self: *builder, func: ink.ast.function_decl) build_error!uir.function_decl {
         return .{
             .name = try self.intern_string(func.name.string),
             .generics = try self.build_generic_params(func.generics),
@@ -604,7 +622,7 @@ pub const builder = struct {
         self: *builder,
         func: ink.ast.function_decl,
         self_name: []const u8,
-    ) build_error!ir.function_decl {
+    ) build_error!uir.function_decl {
         return .{
             .name = try self.intern_string(func.name.string),
             .generics = try self.build_generic_params(func.generics),
@@ -617,7 +635,7 @@ pub const builder = struct {
         };
     }
 
-    fn build_type_decl(self: *builder, decl: ink.ast.type_decl) build_error!ir.type_decl {
+    fn build_type_decl(self: *builder, decl: ink.ast.type_decl) build_error!uir.type_decl {
         return .{
             .name = try self.intern_string(decl.name.string),
             .generics = try self.build_generic_params(decl.generics),
@@ -633,7 +651,7 @@ pub const builder = struct {
         return false;
     }
 
-    fn build_struct_decl(self: *builder, s: ink.ast.struct_decl) build_error!ir.struct_decl {
+    fn build_struct_decl(self: *builder, s: ink.ast.struct_decl) build_error!uir.struct_decl {
         return .{
             .name = try self.intern_string(s.name.string),
             .generics = try self.build_generic_params(s.generics),
@@ -642,7 +660,7 @@ pub const builder = struct {
         };
     }
 
-    fn build_trait_decl(self: *builder, t: ink.ast.trait_decl) build_error!ir.trait_decl {
+    fn build_trait_decl(self: *builder, t: ink.ast.trait_decl) build_error!uir.trait_decl {
         return .{
             .is_auto = t.is_auto,
             .name = try self.intern_string(t.name.string),
@@ -652,7 +670,7 @@ pub const builder = struct {
         };
     }
 
-    fn build_enum_decl(self: *builder, e: ink.ast.enum_decl) build_error!ir.enum_decl {
+    fn build_enum_decl(self: *builder, e: ink.ast.enum_decl) build_error!uir.enum_decl {
         return .{
             .name = try self.intern_string(e.name.string),
             .generics = try self.build_generic_params(e.generics),
@@ -660,7 +678,7 @@ pub const builder = struct {
         };
     }
 
-    fn build_impl_decl(self: *builder, i: ink.ast.impl_decl) build_error!ir.impl_decl {
+    fn build_impl_decl(self: *builder, i: ink.ast.impl_decl) build_error!uir.impl_decl {
         return .{
             .negative = i.negative,
             .for_struct = try self.intern_string(i.for_struct.string),
@@ -669,7 +687,7 @@ pub const builder = struct {
         };
     }
 
-    fn build_const_decl(self: *builder, c: ink.ast.const_decl) build_error!ir.const_decl {
+    fn build_const_decl(self: *builder, c: ink.ast.const_decl) build_error!uir.const_decl {
         return .{
             .name = try self.intern_string(c.name.string),
             .ty = if (c.ty) |ref| try self.build_node(ink.ast.deref(ref)) else null,
@@ -677,7 +695,7 @@ pub const builder = struct {
         };
     }
 
-    fn build_var_decl(self: *builder, v: ink.ast.var_decl) build_error!ir.var_decl {
+    fn build_var_decl(self: *builder, v: ink.ast.var_decl) build_error!uir.var_decl {
         return .{
             .name = try self.intern_string(v.name.string),
             .ty = if (v.ty) |ref| try self.build_node(ink.ast.deref(ref)) else null,
@@ -685,9 +703,9 @@ pub const builder = struct {
         };
     }
 
-    fn build_trait_items(self: *builder, items: []const ink.ast.trait_item) build_error![]const ir.trait_decl.trait_item {
-        if (items.len == 0) return &[_]ir.trait_decl.trait_item{};
-        var out = try self.alloc(ir.trait_decl.trait_item, items.len);
+    fn build_trait_items(self: *builder, items: []const ink.ast.trait_item) build_error![]const uir.trait_decl.trait_item {
+        if (items.len == 0) return &[_]uir.trait_decl.trait_item{};
+        var out = try self.alloc(uir.trait_decl.trait_item, items.len);
         for (items, 0..) |item, i| {
             out[i] = switch (item) {
                 .function => |func| .{ .function = try self.build_function_decl(func) },
@@ -697,16 +715,16 @@ pub const builder = struct {
         return out;
     }
 
-    fn build_assoc_type_decl(self: *builder, assoc: ink.ast.associated_type_decl) build_error!ir.associated_type_decl {
+    fn build_assoc_type_decl(self: *builder, assoc: ink.ast.associated_type_decl) build_error!uir.associated_type_decl {
         return .{
             .name = try self.intern_string(assoc.name.string),
             .value = if (assoc.value) |ref| try self.build_node(ink.ast.deref(ref)) else null,
         };
     }
 
-    fn build_enum_variants(self: *builder, variants: []const ink.ast.sum_variant) build_error![]const ir.enum_variant {
-        if (variants.len == 0) return &[_]ir.enum_variant{};
-        var out = try self.alloc(ir.enum_variant, variants.len);
+    fn build_enum_variants(self: *builder, variants: []const ink.ast.sum_variant) build_error![]const uir.enum_variant {
+        if (variants.len == 0) return &[_]uir.enum_variant{};
+        var out = try self.alloc(uir.enum_variant, variants.len);
         for (variants, 0..) |variant, i| {
             out[i] = .{
                 .name = try self.intern_string(variant.name.string),
@@ -716,9 +734,9 @@ pub const builder = struct {
         return out;
     }
 
-    fn build_struct_fields(self: *builder, fields: []const ink.ast.struct_field) build_error![]const ir.struct_decl.field {
-        if (fields.len == 0) return &[_]ir.struct_decl.field{};
-        var out = try self.alloc(ir.struct_decl.field, fields.len);
+    fn build_struct_fields(self: *builder, fields: []const ink.ast.struct_field) build_error![]const uir.struct_decl.field {
+        if (fields.len == 0) return &[_]uir.struct_decl.field{};
+        var out = try self.alloc(uir.struct_decl.field, fields.len);
         for (fields, 0..) |field, i| {
             out[i] = .{
                 .name = try self.intern_string(field.name.string),
@@ -728,9 +746,9 @@ pub const builder = struct {
         return out;
     }
 
-    fn build_generic_params(self: *builder, params: []const ink.ast.generic_param) build_error![]const ir.generic_param {
-        if (params.len == 0) return &[_]ir.generic_param{};
-        var out = try self.alloc(ir.generic_param, params.len);
+    fn build_generic_params(self: *builder, params: []const ink.ast.generic_param) build_error![]const uir.generic_param {
+        if (params.len == 0) return &[_]uir.generic_param{};
+        var out = try self.alloc(uir.generic_param, params.len);
         for (params, 0..) |param, i| {
             out[i] = .{
                 .name = try self.intern_string(param.name.string),
@@ -743,9 +761,9 @@ pub const builder = struct {
         return out;
     }
 
-    fn build_params(self: *builder, params: []const ink.ast.param) build_error![]const ir.function_decl.param {
-        if (params.len == 0) return &[_]ir.function_decl.param{};
-        var out = try self.alloc(ir.function_decl.param, params.len);
+    fn build_params(self: *builder, params: []const ink.ast.param) build_error![]const uir.function_decl.param {
+        if (params.len == 0) return &[_]uir.function_decl.param{};
+        var out = try self.alloc(uir.function_decl.param, params.len);
         for (params, 0..) |param, i| {
             out[i] = .{
                 .name = try self.intern_string(param.name.string),
@@ -760,9 +778,9 @@ pub const builder = struct {
         self: *builder,
         params: []const ink.ast.param,
         self_name: []const u8,
-    ) build_error![]const ir.function_decl.param {
-        if (params.len == 0) return &[_]ir.function_decl.param{};
-        var out = try self.alloc(ir.function_decl.param, params.len);
+    ) build_error![]const uir.function_decl.param {
+        if (params.len == 0) return &[_]uir.function_decl.param{};
+        var out = try self.alloc(uir.function_decl.param, params.len);
         for (params, 0..) |param, i| {
             out[i] = .{
                 .name = try self.intern_string(param.name.string),
@@ -773,9 +791,9 @@ pub const builder = struct {
         return out;
     }
 
-    fn build_where_clause(self: *builder, clauses: []const ink.ast.where_req) build_error![]const ir.function_decl.where_req {
-        if (clauses.len == 0) return &[_]ir.function_decl.where_req{};
-        var out = try self.alloc(ir.function_decl.where_req, clauses.len);
+    fn build_where_clause(self: *builder, clauses: []const ink.ast.where_req) build_error![]const uir.function_decl.where_req {
+        if (clauses.len == 0) return &[_]uir.function_decl.where_req{};
+        var out = try self.alloc(uir.function_decl.where_req, clauses.len);
         for (clauses, 0..) |req, i| {
             out[i] = .{
                 .name = try self.intern_string(req.name.string),
@@ -789,9 +807,9 @@ pub const builder = struct {
         self: *builder,
         clauses: []const ink.ast.where_req,
         self_name: []const u8,
-    ) build_error![]const ir.function_decl.where_req {
-        if (clauses.len == 0) return &[_]ir.function_decl.where_req{};
-        var out = try self.alloc(ir.function_decl.where_req, clauses.len);
+    ) build_error![]const uir.function_decl.where_req {
+        if (clauses.len == 0) return &[_]uir.function_decl.where_req{};
+        var out = try self.alloc(uir.function_decl.where_req, clauses.len);
         for (clauses, 0..) |req, i| {
             out[i] = .{
                 .name = try self.intern_string(req.name.string),
@@ -801,9 +819,9 @@ pub const builder = struct {
         return out;
     }
 
-    fn build_function_list(self: *builder, funcs: []const ink.ast.function_decl) build_error![]const ir.function_decl {
-        if (funcs.len == 0) return &[_]ir.function_decl{};
-        var out = try self.alloc(ir.function_decl, funcs.len);
+    fn build_function_list(self: *builder, funcs: []const ink.ast.function_decl) build_error![]const uir.function_decl {
+        if (funcs.len == 0) return &[_]uir.function_decl{};
+        var out = try self.alloc(uir.function_decl, funcs.len);
         for (funcs, 0..) |func, i| {
             out[i] = try self.build_function_decl(func);
         }
@@ -814,9 +832,9 @@ pub const builder = struct {
         self: *builder,
         funcs: []const ink.ast.function_decl,
         self_name: []const u8,
-    ) build_error![]const ir.function_decl {
-        if (funcs.len == 0) return &[_]ir.function_decl{};
-        var out = try self.alloc(ir.function_decl, funcs.len);
+    ) build_error![]const uir.function_decl {
+        if (funcs.len == 0) return &[_]uir.function_decl{};
+        var out = try self.alloc(uir.function_decl, funcs.len);
         for (funcs, 0..) |func, i| {
             out[i] = try self.build_function_decl_with_self(func, self_name);
         }
@@ -832,16 +850,16 @@ pub const builder = struct {
         return out;
     }
 
-    fn build_node_refs(self: *builder, refs: []const ink.ast.node_ref) build_error![]const ir_identifier {
-        if (refs.len == 0) return &[_]ir_identifier{};
-        var out = try self.alloc(ir_identifier, refs.len);
+    fn build_node_refs(self: *builder, refs: []const ink.ast.node_ref) build_error![]const uir_identifier {
+        if (refs.len == 0) return &[_]uir_identifier{};
+        var out = try self.alloc(uir_identifier, refs.len);
         for (refs, 0..) |ref, i| {
             out[i] = try self.build_node(ink.ast.deref(ref));
         }
         return out;
     }
 
-    fn emit(self: *builder, value: ir) build_error!ir_identifier {
+    fn emit(self: *builder, value: uir) build_error!uir_identifier {
         const idx = self.nodes.items.len;
         self.nodes.append(value) catch return error.out_of_memory;
         const current_span = if (self.span_stack.items.len == 0)
@@ -866,12 +884,21 @@ pub const builder = struct {
         return self.allocator.alloc(T, len) catch return error.out_of_memory;
     }
 
-    fn map_generic_kind(kind: ink.ast.generic_kind) ir.generic_param.generic_kind {
+    fn map_generic_kind(kind: ink.ast.generic_kind) uir.generic_param.generic_kind {
         return @enumFromInt(@intFromEnum(kind));
     }
 
     fn fail(self: *builder, kind: error_kind) build_error {
         self.last_error = kind;
+        return error.build_failed;
+    }
+
+    fn fail_node(self: *builder, name: []const u8) build_error {
+        self.last_error = .unsupported_node;
+        self.last_error_node = name;
+        if (self.span_stack.items.len > 0) {
+            self.last_error_span = self.span_stack.items[self.span_stack.items.len - 1];
+        }
         return error.build_failed;
     }
 };

@@ -45,6 +45,7 @@ const desugarer = struct {
     import_map: string_map([]const u8),
     module_map: string_map([]const u8),
     symbol_imports: string_map(symbol_import),
+    scope_map: string_map(void),
     origin: origin_map,
     operator_unary: std.AutoHashMap(ink.unary, operator_target),
     operator_binary: std.AutoHashMap(ink.binary, operator_target),
@@ -59,6 +60,7 @@ const desugarer = struct {
             .import_map = string_map([]const u8).init(allocator),
             .module_map = string_map([]const u8).init(allocator),
             .symbol_imports = string_map(symbol_import).init(allocator),
+            .scope_map = string_map(void).init(allocator),
             .origin = origin_map.init(allocator),
             .operator_unary = std.AutoHashMap(ink.unary, operator_target).init(allocator),
             .operator_binary = std.AutoHashMap(ink.binary, operator_target).init(allocator),
@@ -71,6 +73,7 @@ const desugarer = struct {
         self.import_map.deinit();
         self.module_map.deinit();
         self.symbol_imports.deinit();
+        self.scope_map.deinit();
         self.operator_unary.deinit();
         self.operator_binary.deinit();
     }
@@ -112,6 +115,19 @@ const desugarer = struct {
         }
     }
 
+    fn collect_scope_names(self: *desugarer, nodes: []const *ink.node) desugar_error!void {
+        for (nodes) |node| {
+            if (node.* != .decl) continue;
+            switch (node.decl) {
+                .@"struct" => |s| try self.scope_map.put(s.name.string, {}),
+                .@"enum" => |e| try self.scope_map.put(e.name.string, {}),
+                .trait => |t| try self.scope_map.put(t.name.string, {}),
+                .type_alias => |t| try self.scope_map.put(t.name.string, {}),
+                else => {},
+            }
+        }
+    }
+
     fn collect_operator_overloads(self: *desugarer, nodes: []const *ink.node) desugar_error!void {
         for (nodes) |node| {
             if (node.* != .decl) continue;
@@ -134,12 +150,12 @@ const desugarer = struct {
         attr: ink.ast.attribute,
         func: ink.ast.function_decl,
     ) desugar_error!void {
-        if (attr.args.len == 0) {
+        if (attr.args == null) {
             try self.add_error("operator attribute requires a symbol", attr.name.where);
             return;
         }
 
-        const symbol = self.operator_symbol(attr.args[0]) orelse {
+        const symbol = self.operator_symbol(attr.args) orelse {
             try self.add_error("operator attribute expects a string or identifier", attr.name.where);
             return;
         };
@@ -173,14 +189,22 @@ const desugarer = struct {
         try self.add_error("operator overload functions must take 1 or 2 params", func.name.where);
     }
 
-    fn operator_symbol(self: *desugarer, ref: ink.ast.node_ref) ?[]const u8 {
+    fn operator_symbol(self: *desugarer, args: ?ink.identifier) ?[]const u8 {
         _ = self;
-        const node = ink.ast.deref(ref);
-        return switch (node.*) {
-            .identifier => |id| id.string,
-            .string => |id| id.string,
-            else => null,
-        };
+        if (args == null) return null;
+        var lexer = ink.lexer.init(args.?.string) catch return null;
+        while (true) {
+            const maybe_tok = lexer.next() catch return null;
+            if (maybe_tok == null) break;
+            const tok = maybe_tok.?;
+            switch (tok.which) {
+                .end_of_file => break,
+                .comma, .new_line, .indent, .dedent => continue,
+                .identifier, .string => return tok.what.string,
+                else => return tok.what.string,
+            }
+        }
+        return null;
     }
 
     fn unary_from_symbol(symbol: []const u8) ?ink.unary {
@@ -273,6 +297,15 @@ const desugarer = struct {
                     .left = ink.ast.ref(left),
                     .op = bin.op,
                     .right = ink.ast.ref(right),
+                } };
+                return node;
+            },
+            .macro_call => |mc| {
+                const target = try self.desugar_node(ink.ast.deref(mc.target));
+                node.* = .{ .macro_call = .{
+                    .target = ink.ast.ref(target),
+                    .body = mc.body,
+                    .where = mc.where,
                 } };
                 return node;
             },
@@ -471,8 +504,7 @@ const desugarer = struct {
         if (attrs.len == 0) return &[_]ink.ast.attribute{};
         var out = array_list(ink.ast.attribute).init(self.node_allocator);
         for (attrs) |attr| {
-            const args = try self.desugar_node_refs(attr.args);
-            try out.append(.{ .name = attr.name, .args = args });
+            try out.append(.{ .name = attr.name, .args = attr.args, .where = attr.where });
         }
         return out.toOwnedSlice();
     }
@@ -659,12 +691,14 @@ const desugarer = struct {
 
         return .{
             .attributes = attributes,
+            .is_comptime = func.is_comptime,
             .name = func.name,
             .generics = generics,
             .params = params,
             .return_type = ink.ast.ref_opt(return_type),
             .where_clause = where_clause,
             .body = ink.ast.ref_opt(body),
+            .where = func.where,
         };
     }
 
@@ -693,6 +727,7 @@ const desugarer = struct {
             .name = st.name,
             .generics = generics,
             .fields = fields,
+            .where = st.where,
         };
     }
 
@@ -716,6 +751,7 @@ const desugarer = struct {
             .name = t.name,
             .generics = generics,
             .value = ink.ast.ref(value),
+            .where = t.where,
         };
     }
 
@@ -726,6 +762,7 @@ const desugarer = struct {
             .module = imp.module,
             .item = imp.item,
             .alias = imp.alias,
+            .where = imp.where,
         };
     }
 
@@ -768,6 +805,7 @@ const desugarer = struct {
             .generics = generics,
             .items = items,
             .requires = requires,
+            .where = tr.where,
         };
     }
 
@@ -781,6 +819,7 @@ const desugarer = struct {
             .attributes = attributes,
             .name = assoc.name,
             .value = ink.ast.ref_opt(value),
+            .where = assoc.where,
         };
     }
 
@@ -810,6 +849,7 @@ const desugarer = struct {
             .name = e.name,
             .generics = generics,
             .variants = variants,
+            .where = e.where,
         };
     }
 
@@ -826,6 +866,7 @@ const desugarer = struct {
             .by_trait = im.by_trait,
             .for_struct = im.for_struct,
             .functions = functions,
+            .where = im.where,
         };
     }
 
@@ -838,6 +879,7 @@ const desugarer = struct {
             .name = c.name,
             .ty = ink.ast.ref_opt(ty),
             .value = ink.ast.ref(value),
+            .where = c.where,
         };
     }
 
@@ -850,6 +892,7 @@ const desugarer = struct {
             .name = v.name,
             .ty = ink.ast.ref_opt(ty),
             .value = ink.ast.ref(value),
+            .where = v.where,
         };
     }
 
@@ -873,7 +916,11 @@ const desugarer = struct {
         const left_id = left.identifier;
         const right_id = right.identifier;
         const is_builtin_scope = std.mem.eql(u8, left_id.string, "error");
-        if (std.mem.indexOf(u8, left_id.string, "::") == null and !self.import_map.contains(left_id.string) and !is_builtin_scope) {
+        const has_scope = std.mem.indexOf(u8, left_id.string, "::") != null or
+            self.import_map.contains(left_id.string) or
+            self.scope_map.contains(left_id.string) or
+            is_builtin_scope;
+        if (!has_scope) {
             try self.add_error("unknown import", left_id.where);
         }
 
@@ -945,6 +992,7 @@ const desugarer = struct {
             .name = name,
             .ty = ink.ast.ref_opt(null),
             .value = ink.ast.ref(value),
+            .where = name.where,
         } } };
         try self.origin.put(node, origin_node);
         return node;
@@ -1012,6 +1060,7 @@ pub fn desugar(
     defer d.deinit();
 
     try d.collect_imports(nodes);
+    try d.collect_scope_names(nodes);
     try d.collect_operator_overloads(nodes);
     const out_nodes = try d.desugar_nodes(nodes);
     return .{

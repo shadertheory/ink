@@ -63,6 +63,7 @@ const semantic_mode = enum { full, augment };
 
 const server_state = struct {
     semantic_mode: semantic_mode = .full,
+    target: ink.target.target_spec = .{ .kind = .vm },
 };
 
 const ast_cache = struct {
@@ -155,7 +156,8 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
-    const log_path = parse_log_path(args) orelse "/tmp/inkd.lsp.log";
+    const cli_opts = parse_cli_options(args);
+    const log_path = cli_opts.log_path orelse "/tmp/inkd.lsp.log";
 
     var log_file = try std.fs.cwd().createFile(log_path, .{ .truncate = false, .read = true });
     defer log_file.close();
@@ -174,7 +176,7 @@ pub fn main() !void {
     const io_writer = &stdout_writer.interface;
     const io_log_writer = &log_writer.interface;
 
-    var state = server_state{};
+    var state = server_state{ .target = cli_opts.target };
 
     while (true) {
         const body_opt = try read_message(allocator, io_reader);
@@ -223,12 +225,12 @@ fn handle_message(
             return false;
         } else if (std.mem.eql(u8, name, "textDocument/didOpen")) {
             if (get_field(root, "params")) |params| {
-                try handle_did_open(allocator, docs, log_file, log_writer, writer, params);
+                try handle_did_open(allocator, docs, state, log_file, log_writer, writer, params);
             }
             return true;
         } else if (std.mem.eql(u8, name, "textDocument/didChange")) {
             if (get_field(root, "params")) |params| {
-                try handle_did_change(allocator, docs, log_file, log_writer, writer, params);
+                try handle_did_change(allocator, docs, state, log_file, log_writer, writer, params);
             }
             return true;
         } else if (std.mem.eql(u8, name, "textDocument/didClose")) {
@@ -374,6 +376,7 @@ fn detect_semantic_mode(params: std.json.Value) semantic_mode {
 fn handle_did_open(
     allocator: mem_allocator,
     docs: *document_store,
+    state: *server_state,
     log_file: *std.fs.File,
     log_writer: *std.Io.Writer,
     writer: *std.Io.Writer,
@@ -384,12 +387,13 @@ fn handle_did_open(
     const text = get_string_field(text_doc, "text") orelse return;
 
     try docs.put(uri, text);
-    try compile_and_publish(allocator, docs, log_file, log_writer, writer, uri);
+    try compile_and_publish(allocator, docs, state, log_file, log_writer, writer, uri);
 }
 
 fn handle_did_change(
     allocator: mem_allocator,
     docs: *document_store,
+    state: *server_state,
     log_file: *std.fs.File,
     log_writer: *std.Io.Writer,
     writer: *std.Io.Writer,
@@ -409,7 +413,7 @@ fn handle_did_change(
     const text = get_string_field(change, "text") orelse return;
 
     try docs.put(uri, text);
-    try compile_and_publish(allocator, docs, log_file, log_writer, writer, uri);
+    try compile_and_publish(allocator, docs, state, log_file, log_writer, writer, uri);
 }
 
 fn handle_did_close(
@@ -437,6 +441,7 @@ fn handle_did_close(
 fn compile_and_publish(
     allocator: mem_allocator,
     docs: *document_store,
+    state: *server_state,
     log_file: *std.fs.File,
     log_writer: *std.Io.Writer,
     writer: *std.Io.Writer,
@@ -556,6 +561,7 @@ fn compile_and_publish(
         .sources = sources.items,
         .modules = modules.items,
         .root_module = "main",
+        .target = state.target,
     };
 
     var result = ink.compiler.compile(allocator, req) catch |err| {
@@ -4225,10 +4231,31 @@ fn write_message(writer: *std.Io.Writer, body: []const u8) !void {
     try writer.writeAll(body);
 }
 
-fn parse_log_path(args: []const []const u8) ?[]const u8 {
+const cli_options = struct {
+    log_path: ?[]const u8 = null,
+    target: ink.target.target_spec = .{ .kind = .vm },
+};
+
+fn parse_cli_options(args: []const []const u8) cli_options {
+    var opts: cli_options = .{};
     var i: usize = 0;
     while (i + 1 < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--log")) return args[i + 1];
+        if (std.mem.eql(u8, args[i], "--log")) {
+            opts.log_path = args[i + 1];
+            i += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, args[i], "--target") or std.mem.eql(u8, args[i], "-t")) {
+            opts.target = ink.target.parse_target(args[i + 1]) catch {
+                var err_buf: [256]u8 = undefined;
+                var err_writer = std.fs.File.stderr().writer(&err_buf);
+                err_writer.interface.print("error: invalid target: {s}\n", .{args[i + 1]}) catch {};
+                err_writer.interface.flush() catch {};
+                std.process.exit(1);
+            };
+            i += 1;
+            continue;
+        }
     }
-    return null;
+    return opts;
 }

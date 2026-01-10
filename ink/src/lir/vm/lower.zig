@@ -1,13 +1,121 @@
 const std = @import("std");
 const ink = @import("ink");
-const ir_mod = ink.ir;
-const intrinsic = @import("../intrinsic.zig");
-const encode = @import("../vm/encode.zig");
-const type_key_mod = @import("../type_key.zig");
+const mir_mod = ink.mir;
+const core = @import("core.zig");
+const intrinsic = @import("../../intrinsic.zig");
+const encode = @import("../../vm/encode.zig");
+const type_key_mod = @import("../../type_key.zig");
 
 const max_register: u8 = 63;
 
-pub const codegen_error = error{
+const macro_token_kind = enum(u8) {
+    new_line,
+    identifier,
+    label,
+    string,
+    number,
+    comma,
+    colon,
+    dot,
+    ellipsis,
+    hash,
+    at_sign,
+    function,
+    constant,
+    variable,
+    expr_if,
+    expr_else,
+    expr_match,
+    expr_select,
+    case,
+    detached,
+    stmt_return,
+    stmt_break,
+    stmt_continue,
+    yield,
+    loop,
+    @"while",
+    until,
+    repeat,
+    @"for",
+    each,
+    sleep,
+    timeout,
+    deadline,
+    spawn,
+    await,
+    @"try",
+    atomic,
+    auto,
+    box,
+    logical_or,
+    logical_and,
+    logical_xor,
+    logical_not,
+    logical_false,
+    logical_true,
+    assign,
+    plus_assign,
+    minus_assign,
+    asterisk_assign,
+    slash_assign,
+    percent_assign,
+    ampersand_assign,
+    bar_assign,
+    caret_assign,
+    shift_left_assign,
+    shift_right_assign,
+    plus,
+    minus,
+    asterisk,
+    slash,
+    percent,
+    ampersand,
+    bar,
+    caret,
+    shift_left,
+    shift_right,
+    bang,
+    tilde,
+    less_than,
+    greater_than,
+    less_or_equal,
+    greater_or_equal,
+    equal,
+    not_equal,
+    @"enum",
+    type,
+    arrow,
+    question,
+    question_dot,
+    coalesce,
+    range,
+    range_inclusive,
+    double_colon,
+    pipe,
+    in,
+    trait,
+    impl,
+    as,
+    import,
+    from,
+    with,
+    dynamic,
+    @"comptime",
+    @"struct",
+    where,
+    self,
+    this,
+    mut,
+    ref,
+    requires,
+    dyn,
+};
+
+const macro_token_tree_kind = enum(u8) { token, group };
+const macro_delimiter = enum(u8) { paren, bracket, block };
+
+pub const lower_error = error{
     out_of_memory,
     unsupported_node,
     ambiguous_overload,
@@ -21,7 +129,7 @@ pub const codegen_error = error{
 
 pub const error_info = struct {
     message: ?[]const u8 = null,
-    node: ?ir_mod.ir_identifier = null,
+    node: ?mir_mod.mir_identifier = null,
     owns_message: bool = false,
 
     pub fn deinit(self: *error_info, allocator: std.mem.Allocator) void {
@@ -32,14 +140,28 @@ pub const error_info = struct {
     }
 };
 
-pub const program = struct {
-    instructions: []const ink.exe.instruction,
-    constants: []const u64,
-};
-
 const type_key = type_key_mod.type_key;
 const type_key_eq = type_key_mod.type_key_eq;
 const type_key_base_name = type_key_mod.type_key_base_name;
+
+fn macro_enum_value(full_name: []const u8) ?u64 {
+    const split = std.mem.lastIndexOf(u8, full_name, "::") orelse return null;
+    const base = full_name[0..split];
+    const variant = full_name[split + 2 ..];
+    if (std.mem.endsWith(u8, base, "token_kind")) {
+        const value = std.meta.stringToEnum(macro_token_kind, variant) orelse return null;
+        return @intFromEnum(value);
+    }
+    if (std.mem.endsWith(u8, base, "token_tree_kind")) {
+        const value = std.meta.stringToEnum(macro_token_tree_kind, variant) orelse return null;
+        return @intFromEnum(value);
+    }
+    if (std.mem.endsWith(u8, base, "delimiter")) {
+        const value = std.meta.stringToEnum(macro_delimiter, variant) orelse return null;
+        return @intFromEnum(value);
+    }
+    return null;
+}
 
 fn type_key_name(key: type_key) []const u8 {
     return switch (key) {
@@ -219,7 +341,7 @@ fn assignment_base_op(op: ink.binary) ?ink.binary {
 
 const function_info = struct {
     label: ink.exe.label_id,
-    decl: ir_mod.ir.function_decl,
+    decl: mir_mod.mir.function_decl,
     impl_for: ?[]const u8,
 };
 
@@ -233,15 +355,27 @@ const foreign_signature = struct {
     signature: []const u8,
 };
 
+pub const function_signature = struct {
+    name: []const u8,
+    label: ink.exe.label_id,
+    param_count: usize,
+    is_method: bool,
+};
+
+pub const lower_options = struct {
+    require_main: bool = true,
+    signatures: ?*std.array_list.Managed(function_signature) = null,
+};
+
 const struct_info = struct {
-    fields: []const ir_mod.ir.struct_decl.field,
+    fields: []const mir_mod.mir.struct_decl.field,
     is_record: bool,
-    generics: []const ir_mod.ir.generic_param,
+    generics: []const mir_mod.mir.generic_param,
 };
 
 const trait_method = struct {
     name: []const u8,
-    return_type: ?ir_mod.ir_identifier,
+    return_type: ?mir_mod.mir_identifier,
 };
 
 const trait_constraint = struct {
@@ -265,11 +399,16 @@ const overload_result = struct {
     bindings: []const generic_binding,
 };
 
+const global_const = struct {
+    value: mir_mod.mir_identifier,
+    ty: ?mir_mod.mir_identifier,
+};
+
 const builder = struct {
     allocator: std.mem.Allocator,
-    nodes: []const ir_mod.ir,
+    nodes: []const mir_mod.mir,
     strings: []const []const u8,
-    roots: []const ir_mod.ir_identifier,
+    roots: []const mir_mod.mir_identifier,
     node_types: ?[]const type_key,
     error_info: ?*error_info,
     instructions: std.array_list.Managed(ink.exe.instruction),
@@ -281,6 +420,7 @@ const builder = struct {
     instance_map: std.StringHashMap(ink.exe.label_id),
     foreign_overloads: std.StringHashMap(std.array_list.Managed(foreign_signature)),
     foreigns: std.StringHashMap(u32),
+    global_consts: std.StringHashMap(global_const),
     structs: std.StringHashMap(struct_info),
     traits: std.StringHashMap(trait_info),
     trait_impls: std.StringHashMap(std.array_list.Managed([]const u8)),
@@ -293,9 +433,9 @@ const builder = struct {
 
     pub fn init(
         allocator: std.mem.Allocator,
-        nodes: []const ir_mod.ir,
+        nodes: []const mir_mod.mir,
         strings: []const []const u8,
-        roots: []const ir_mod.ir_identifier,
+        roots: []const mir_mod.mir_identifier,
         node_types: ?[]const type_key,
         error_state: ?*error_info,
     ) builder {
@@ -315,6 +455,7 @@ const builder = struct {
             .instance_map = std.StringHashMap(ink.exe.label_id).init(allocator),
             .foreign_overloads = std.StringHashMap(std.array_list.Managed(foreign_signature)).init(allocator),
             .foreigns = std.StringHashMap(u32).init(allocator),
+            .global_consts = std.StringHashMap(global_const).init(allocator),
             .structs = std.StringHashMap(struct_info).init(allocator),
             .traits = std.StringHashMap(trait_info).init(allocator),
             .trait_impls = std.StringHashMap(std.array_list.Managed([]const u8)).init(allocator),
@@ -350,6 +491,7 @@ const builder = struct {
         }
         self.foreign_overloads.deinit();
         self.foreigns.deinit();
+        self.global_consts.deinit();
         var struct_it = self.structs.iterator();
         while (struct_it.next()) |entry| {
             self.allocator.free(entry.value_ptr.*.fields);
@@ -391,7 +533,7 @@ const builder = struct {
         self.owned_type_slices.deinit(self.allocator);
     }
 
-    pub fn emit(self: *builder, inst: ink.exe.instruction) codegen_error!void {
+    pub fn emit(self: *builder, inst: ink.exe.instruction) lower_error!void {
         self.instructions.append(inst) catch return error.out_of_memory;
     }
 
@@ -401,7 +543,7 @@ const builder = struct {
         return id;
     }
 
-    pub fn intern_const(self: *builder, value: u64) codegen_error!u32 {
+    pub fn intern_const(self: *builder, value: u64) lower_error!u32 {
         if (self.const_map.get(value)) |idx| return idx;
         if (self.constants.items.len >= 8192) return error.constant_index_overflow;
         const idx: u32 = @intCast(self.constants.items.len);
@@ -410,16 +552,16 @@ const builder = struct {
         return idx;
     }
 
-    fn node(self: *builder, id: ir_mod.ir_identifier) ir_mod.ir {
+    fn node(self: *builder, id: mir_mod.mir_identifier) mir_mod.mir {
         return self.nodes[@intCast(id.idx)];
     }
 
-    fn string_value(self: *builder, id: ir_mod.string_identifier) []const u8 {
+    fn string_value(self: *builder, id: mir_mod.string_identifier) []const u8 {
         if (id.idx < self.strings.len) return self.strings[id.idx];
         return "<missing>";
     }
 
-    fn set_error_message(self: *builder, node_id: ?ir_mod.ir_identifier, msg: []const u8) void {
+    fn set_error_message(self: *builder, node_id: ?mir_mod.mir_identifier, msg: []const u8) void {
         if (self.error_info == null) return;
         const info = self.error_info.?;
         if (info.message != null) return;
@@ -429,7 +571,7 @@ const builder = struct {
         info.owns_message = true;
     }
 
-    fn set_error_fmt(self: *builder, node_id: ?ir_mod.ir_identifier, comptime fmt: []const u8, args: anytype) void {
+    fn set_error_fmt(self: *builder, node_id: ?mir_mod.mir_identifier, comptime fmt: []const u8, args: anytype) void {
         if (self.error_info == null) return;
         const info = self.error_info.?;
         if (info.message != null) return;
@@ -442,7 +584,7 @@ const builder = struct {
         info.owns_message = true;
     }
 
-    fn instance_key(self: *builder, info: function_info, bindings: []const generic_binding) codegen_error![]const u8 {
+    fn instance_key(self: *builder, info: function_info, bindings: []const generic_binding) lower_error![]const u8 {
         const name = self.string_value(info.decl.name);
         var buf = std.array_list.Managed(u8).init(self.allocator);
         defer buf.deinit();
@@ -462,7 +604,7 @@ const builder = struct {
         return owned;
     }
 
-    fn ensure_instance(self: *builder, info: function_info, bindings: []const generic_binding) codegen_error!ink.exe.label_id {
+    fn ensure_instance(self: *builder, info: function_info, bindings: []const generic_binding) lower_error!ink.exe.label_id {
         if (info.decl.generics.len == 0) return info.label;
         const key = try self.instance_key(info, bindings);
         if (self.instance_map.get(key)) |label| return label;
@@ -481,7 +623,7 @@ const builder = struct {
         return label;
     }
 
-    fn const_index_for_label(self: *builder, label: ink.exe.label_id) codegen_error!u32 {
+    fn const_index_for_label(self: *builder, label: ink.exe.label_id) lower_error!u32 {
         if (self.label_constants.get(label)) |idx| return idx;
         if (self.constants.items.len >= 8192) return error.constant_index_overflow;
         const idx: u32 = @intCast(self.constants.items.len);
@@ -491,7 +633,7 @@ const builder = struct {
     }
 };
 
-fn type_key_from_type_node_with_self(b: *builder, id: ir_mod.ir_identifier, self_name: ?[]const u8) type_key {
+fn type_key_from_type_node_with_self(b: *builder, id: mir_mod.mir_identifier, self_name: ?[]const u8) type_key {
     const node = b.node(id);
     return switch (node) {
         .identifier => |ident| .{ .name = b.string_value(ident) },
@@ -571,11 +713,11 @@ fn type_key_from_type_node_with_self(b: *builder, id: ir_mod.ir_identifier, self
     };
 }
 
-fn type_key_from_type_node(b: *builder, id: ir_mod.ir_identifier) type_key {
+fn type_key_from_type_node(b: *builder, id: mir_mod.mir_identifier) type_key {
     return type_key_from_type_node_with_self(b, id, null);
 }
 
-fn type_name_from_type_node(b: *builder, id: ir_mod.ir_identifier) ?[]const u8 {
+fn type_name_from_type_node(b: *builder, id: mir_mod.mir_identifier) ?[]const u8 {
     const node = b.node(id);
     if (node == .identifier) return b.string_value(node.identifier);
     if (node != .type) return null;
@@ -596,7 +738,7 @@ fn type_name_from_type_node(b: *builder, id: ir_mod.ir_identifier) ?[]const u8 {
     };
 }
 
-fn constraint_from_type_node(b: *builder, id: ir_mod.ir_identifier) ?trait_constraint {
+fn constraint_from_type_node(b: *builder, id: mir_mod.mir_identifier) ?trait_constraint {
     const node = b.node(id);
     if (node == .type and node.type == .applied) {
         const ap = node.type.applied;
@@ -623,7 +765,7 @@ fn add_builtin_traits(b: *builder) void {
     }
 }
 
-fn is_unsized_marker(b: *builder, id: ir_mod.ir_identifier) bool {
+fn is_unsized_marker(b: *builder, id: mir_mod.mir_identifier) bool {
     const node = b.node(id);
     if (node != .type) return false;
     if (node.type != .optional) return false;
@@ -644,7 +786,7 @@ fn append_dyn_trait_name(base: *?[]const u8, list: *std.array_list.Managed([]con
 
 fn collect_dyn_trait_names(
     b: *builder,
-    id: ir_mod.ir_identifier,
+    id: mir_mod.mir_identifier,
     base: *?[]const u8,
     pos: *std.array_list.Managed([]const u8),
     neg: *std.array_list.Managed([]const u8),
@@ -771,7 +913,7 @@ fn element_type_from_container(key: type_key) ?type_key {
     };
 }
 
-fn decl_generic_param(b: *builder, decl: ir_mod.ir.function_decl, name: []const u8) ?ir_mod.ir.generic_param {
+fn decl_generic_param(b: *builder, decl: mir_mod.mir.function_decl, name: []const u8) ?mir_mod.mir.generic_param {
     for (decl.generics) |param| {
         if (param.kind != .type) continue;
         const param_name = b.string_value(param.name);
@@ -780,11 +922,11 @@ fn decl_generic_param(b: *builder, decl: ir_mod.ir.function_decl, name: []const 
     return null;
 }
 
-fn is_decl_generic(b: *builder, decl: ir_mod.ir.function_decl, name: []const u8) bool {
+fn is_decl_generic(b: *builder, decl: mir_mod.mir.function_decl, name: []const u8) bool {
     return decl_generic_param(b, decl, name) != null;
 }
 
-fn type_key_has_generic(b: *builder, decl: ir_mod.ir.function_decl, key: type_key) bool {
+fn type_key_has_generic(b: *builder, decl: mir_mod.mir.function_decl, key: type_key) bool {
     return switch (key) {
         .unknown => false,
         .name => |name| is_decl_generic(b, decl, name),
@@ -800,8 +942,8 @@ fn type_key_has_generic(b: *builder, decl: ir_mod.ir.function_decl, key: type_ke
 
 fn signature_type_match(
     b: *builder,
-    left_decl: ir_mod.ir.function_decl,
-    right_decl: ir_mod.ir.function_decl,
+    left_decl: mir_mod.mir.function_decl,
+    right_decl: mir_mod.mir.function_decl,
     left_type: type_key,
     right_type: type_key,
 ) bool {
@@ -841,7 +983,7 @@ fn signature_type_match(
 
 fn match_param_type(
     b: *builder,
-    decl: ir_mod.ir.function_decl,
+    decl: mir_mod.mir.function_decl,
     param_type: type_key,
     arg_type: type_key,
     bindings: *std.ArrayListUnmanaged(generic_binding),
@@ -1300,6 +1442,7 @@ const function_ctx = struct {
     locals: std.StringHashMap(u8),
     local_types: std.StringHashMap(type_key),
     local_dyn_types: std.StringHashMap(type_key),
+    global_const_stack: std.StringHashMap(u8),
     temp_base: u8,
     next_temp: u8,
     returned: bool,
@@ -1335,17 +1478,19 @@ const function_ctx = struct {
 
     pub fn init(
         b: *builder,
-        params: []const ir_mod.ir.function_decl.param,
+        params: []const mir_mod.mir.function_decl.param,
         self_type: ?[]const u8,
         bindings: []const generic_binding,
-        return_type: ?ir_mod.ir_identifier,
-    ) codegen_error!function_ctx {
+        return_type: ?mir_mod.mir_identifier,
+    ) lower_error!function_ctx {
         var locals = std.StringHashMap(u8).init(b.allocator);
         errdefer locals.deinit();
         var local_types = std.StringHashMap(type_key).init(b.allocator);
         errdefer local_types.deinit();
         var local_dyn_types = std.StringHashMap(type_key).init(b.allocator);
         errdefer local_dyn_types.deinit();
+        var global_const_stack = std.StringHashMap(u8).init(b.allocator);
+        errdefer global_const_stack.deinit();
 
         var resolved_return = if (return_type) |ret_id|
             type_key_from_type_node_with_self(b, ret_id, self_type)
@@ -1375,6 +1520,7 @@ const function_ctx = struct {
             .locals = locals,
             .local_types = local_types,
             .local_dyn_types = local_dyn_types,
+            .global_const_stack = global_const_stack,
             .temp_base = reg_index,
             .next_temp = reg_index,
             .returned = false,
@@ -1392,17 +1538,18 @@ const function_ctx = struct {
         self.locals.deinit();
         self.local_types.deinit();
         self.local_dyn_types.deinit();
+        self.global_const_stack.deinit();
         self.loop_stack.deinit(self.b.allocator);
     }
 
-    fn alloc_temp(self: *function_ctx) codegen_error!u8 {
+    fn alloc_temp(self: *function_ctx) lower_error!u8 {
         if (self.next_temp > max_register) return error.register_overflow;
         const reg = self.next_temp;
         self.next_temp += 1;
         return reg;
     }
 
-    fn alloc_temp_words(self: *function_ctx, count: u8) codegen_error!u8 {
+    fn alloc_temp_words(self: *function_ctx, count: u8) lower_error!u8 {
         if (count == 0) return self.alloc_temp();
         const end = @as(u16, self.next_temp) + count;
         if (end > max_register + 1) return error.register_overflow;
@@ -1411,7 +1558,7 @@ const function_ctx = struct {
         return reg;
     }
 
-    fn alloc_local(self: *function_ctx) codegen_error!u8 {
+    fn alloc_local(self: *function_ctx) lower_error!u8 {
         if (self.next_temp > max_register) return error.register_overflow;
         const reg = self.next_temp;
         self.next_temp += 1;
@@ -1419,7 +1566,7 @@ const function_ctx = struct {
         return reg;
     }
 
-    fn alloc_local_words(self: *function_ctx, count: u8) codegen_error!u8 {
+    fn alloc_local_words(self: *function_ctx, count: u8) lower_error!u8 {
         if (count == 0) return self.alloc_local();
         const end = @as(u16, self.next_temp) + count;
         if (end > max_register + 1) return error.register_overflow;
@@ -1474,7 +1621,7 @@ const function_ctx = struct {
         continue_label: ?ink.exe.label_id,
         result_reg: u8,
         result_words: u8,
-    ) codegen_error!void {
+    ) lower_error!void {
         self.loop_stack.append(self.b.allocator, .{
             .label = label,
             .break_label = break_label,
@@ -1525,7 +1672,7 @@ const function_ctx = struct {
         return true;
     }
 
-    fn dyn_concrete_type(self: *function_ctx, id: ir_mod.ir_identifier) ?type_key {
+    fn dyn_concrete_type(self: *function_ctx, id: mir_mod.mir_identifier) ?type_key {
         const node = self.b.node(id);
         switch (node) {
             .binary => |bin| {
@@ -1569,7 +1716,7 @@ const function_ctx = struct {
         return word_count_for_type(self.b, ty);
     }
 
-    fn expr_word_count(self: *function_ctx, id: ir_mod.ir_identifier) u8 {
+    fn expr_word_count(self: *function_ctx, id: mir_mod.mir_identifier) u8 {
         return self.type_word_count(self.infer_expr_type(id));
     }
 
@@ -1582,7 +1729,7 @@ const function_ctx = struct {
     fn struct_field_layout(
         self: *function_ctx,
         struct_name: []const u8,
-        field_id: ir_mod.string_identifier,
+        field_id: mir_mod.string_identifier,
     ) ?field_layout {
         const info = self.b.structs.get(struct_name) orelse return null;
         var offset: u8 = 0;
@@ -1601,7 +1748,7 @@ const function_ctx = struct {
         return null;
     }
 
-    fn copy_words(self: *function_ctx, dst_base: u8, src_base: u8, count: u8) codegen_error!void {
+    fn copy_words(self: *function_ctx, dst_base: u8, src_base: u8, count: u8) lower_error!void {
         var idx: u8 = 0;
         while (idx < count) : (idx += 1) {
             const dst = dst_base + idx;
@@ -1610,7 +1757,7 @@ const function_ctx = struct {
         }
     }
 
-    fn zero_words(self: *function_ctx, base: u8, count: u8) codegen_error!void {
+    fn zero_words(self: *function_ctx, base: u8, count: u8) lower_error!void {
         if (count == 0) return;
         const zero_idx = try self.b.intern_const(0);
         const zero_reg = try self.alloc_temp();
@@ -1622,7 +1769,7 @@ const function_ctx = struct {
         self.free_temp(zero_reg);
     }
 
-    fn load_words_from_ptr(self: *function_ctx, ptr_reg: u8, dst_base: u8, count: u8) codegen_error!void {
+    fn load_words_from_ptr(self: *function_ctx, ptr_reg: u8, dst_base: u8, count: u8) lower_error!void {
         if (count == 0) return;
         var idx: u8 = 0;
         while (idx < count) : (idx += 1) {
@@ -1639,7 +1786,7 @@ const function_ctx = struct {
         }
     }
 
-    fn ptr_of_reg(self: *function_ctx, reg: u8) codegen_error!u8 {
+    fn ptr_of_reg(self: *function_ctx, reg: u8) lower_error!u8 {
         const reg_idx = try self.b.intern_const(@intCast(reg));
         const reg_val = try self.alloc_temp();
         try self.emit(.{ .load_const = .{ .dst = reg_val, .const_index = reg_idx } });
@@ -1650,7 +1797,7 @@ const function_ctx = struct {
         return self.save_result_reg(0);
     }
 
-    fn store_words_to_ptr(self: *function_ctx, ptr_reg: u8, src_base: u8, count: u8) codegen_error!void {
+    fn store_words_to_ptr(self: *function_ctx, ptr_reg: u8, src_base: u8, count: u8) lower_error!void {
         if (count == 0) return;
         var idx: u8 = 0;
         while (idx < count) : (idx += 1) {
@@ -1671,7 +1818,7 @@ const function_ctx = struct {
         self: *function_ctx,
         ptr_reg: u8,
         inner_type: type_key,
-    ) codegen_error!u8 {
+    ) lower_error!u8 {
         const words = self.type_word_count(inner_type);
         try self.emit_atomic_lock();
         const dst_reg = try self.alloc_temp_words(words);
@@ -1690,7 +1837,7 @@ const function_ctx = struct {
         }
     }
 
-    fn emit_return_value(self: *function_ctx, value_reg: u8, value_type: type_key) codegen_error!void {
+    fn emit_return_value(self: *function_ctx, value_reg: u8, value_type: type_key) lower_error!void {
         _ = value_type;
         if (self.return_words > 1) {
             const sret = self.sret_reg orelse return error.unsupported_node;
@@ -1702,7 +1849,7 @@ const function_ctx = struct {
         self.returned = true;
     }
 
-    fn infer_expr_type(self: *function_ctx, id: ir_mod.ir_identifier) type_key {
+    fn infer_expr_type(self: *function_ctx, id: mir_mod.mir_identifier) type_key {
         if (self.b.node_types) |types| {
             const idx: usize = @intCast(id.idx);
             if (idx < types.len) {
@@ -1725,6 +1872,9 @@ const function_ctx = struct {
             .identifier => |ident| blk: {
                 const name = self.b.string_value(ident);
                 if (self.local_types.get(name)) |ty| break :blk ty;
+                if (self.b.global_consts.get(name)) |info| {
+                    break :blk self.infer_global_const_type(name, info);
+                }
                 break :blk .unknown;
             },
         .unary => |un| switch (un.op) {
@@ -1865,9 +2015,9 @@ const function_ctx = struct {
     fn try_compile_method_call(
         self: *function_ctx,
         name: []const u8,
-        recv: ir_mod.ir_identifier,
-        args: []const ir_mod.ir_identifier,
-    ) codegen_error!?u8 {
+        recv: mir_mod.mir_identifier,
+        args: []const mir_mod.mir_identifier,
+    ) lower_error!?u8 {
         const recv_type = self.infer_expr_type(recv);
         if (self.trait_name_from_type(recv_type)) |trait_name| {
             if (self.trait_method_index(trait_name, name) == null) {
@@ -2008,9 +2158,9 @@ const function_ctx = struct {
 
         const group = self.b.functions.get(name) orelse return null;
 
-        var arg_ids_buf: [8]ir_mod.ir_identifier = undefined;
+        var arg_ids_buf: [8]mir_mod.mir_identifier = undefined;
         arg_ids_buf[0] = recv;
-        std.mem.copyForwards(ir_mod.ir_identifier, arg_ids_buf[1 .. args.len + 1], args);
+        std.mem.copyForwards(mir_mod.mir_identifier, arg_ids_buf[1 .. args.len + 1], args);
         const arg_ids = arg_ids_buf[0 .. args.len + 1];
 
         var arg_types: [8]type_key = undefined;
@@ -2075,7 +2225,7 @@ const function_ctx = struct {
         recv_concrete: ?type_key,
         arg_regs: []const u8,
         arg_types: []const type_key,
-    ) codegen_error!?u8 {
+    ) lower_error!?u8 {
         if (self.trait_name_from_type(recv_type)) |trait_name| {
             if (self.trait_method_index(trait_name, name) == null) {
                 return error.unknown_function;
@@ -2139,7 +2289,7 @@ const function_ctx = struct {
         args: []const u8,
         arg_types: []const type_key,
         recv_concrete: ?type_key,
-    ) codegen_error!u8 {
+    ) lower_error!u8 {
         const method_idx = self.trait_method_index(trait_name, method_name) orelse return error.unknown_function;
         var return_type = self.trait_method_return_type(trait_name, method_name);
         if (return_type == .name and self.is_unbound_type_name(return_type.name)) {
@@ -2217,9 +2367,9 @@ const function_ctx = struct {
     fn compile_overloadable_unary(
         self: *function_ctx,
         op: ink.unary,
-        right_id: ir_mod.ir_identifier,
-        node_id: ir_mod.ir_identifier,
-    ) codegen_error!u8 {
+        right_id: mir_mod.mir_identifier,
+        node_id: mir_mod.mir_identifier,
+    ) lower_error!u8 {
         const method = unary_operator_method_name(op) orelse return error.unsupported_node;
         const right_type = self.infer_expr_type(right_id);
         if (self.trait_name_from_type(right_type) != null or self.is_known_non_builtin(right_type)) {
@@ -2271,10 +2421,10 @@ const function_ctx = struct {
     fn compile_overloadable_binary(
         self: *function_ctx,
         op: ink.binary,
-        left_id: ir_mod.ir_identifier,
-        right_id: ir_mod.ir_identifier,
-        node_id: ir_mod.ir_identifier,
-    ) codegen_error!u8 {
+        left_id: mir_mod.mir_identifier,
+        right_id: mir_mod.mir_identifier,
+        node_id: mir_mod.mir_identifier,
+    ) lower_error!u8 {
         const method = binary_operator_method_name(op) orelse return error.unsupported_node;
         const left_type = self.infer_expr_type(left_id);
         const right_type = self.infer_expr_type(right_id);
@@ -2306,11 +2456,11 @@ const function_ctx = struct {
     fn compile_builtin_binary(
         self: *function_ctx,
         op: ink.binary,
-        left_id: ir_mod.ir_identifier,
-        right_id: ir_mod.ir_identifier,
+        left_id: mir_mod.mir_identifier,
+        right_id: mir_mod.mir_identifier,
         left_type: type_key,
         right_type: type_key,
-    ) codegen_error!u8 {
+    ) lower_error!u8 {
         const same_int = self.is_int_type_key(left_type) and self.is_int_type_key(right_type);
         const same_float = self.is_float_type_key(left_type) and self.is_float_type_key(right_type);
         const same_bool = self.is_bool_type_key(left_type) and self.is_bool_type_key(right_type);
@@ -2381,7 +2531,7 @@ const function_ctx = struct {
         return error.unsupported_node;
     }
 
-    fn emit_bool_not(self: *function_ctx, value_id: ir_mod.ir_identifier) codegen_error!u8 {
+    fn emit_bool_not(self: *function_ctx, value_id: mir_mod.mir_identifier) lower_error!u8 {
         const prep = try self.prep_unary(value_id);
         const zero_idx = try self.b.intern_const(0);
         const zero_reg = try self.alloc_temp();
@@ -2394,9 +2544,9 @@ const function_ctx = struct {
 
     fn compile_logical_and(
         self: *function_ctx,
-        left_id: ir_mod.ir_identifier,
-        right_id: ir_mod.ir_identifier,
-    ) codegen_error!u8 {
+        left_id: mir_mod.mir_identifier,
+        right_id: mir_mod.mir_identifier,
+    ) lower_error!u8 {
         const left_reg = try self.compile_expr(left_id);
         const dst = if (self.is_temp(left_reg)) left_reg else try self.alloc_temp();
         if (dst != left_reg) {
@@ -2419,9 +2569,9 @@ const function_ctx = struct {
 
     fn compile_logical_or(
         self: *function_ctx,
-        left_id: ir_mod.ir_identifier,
-        right_id: ir_mod.ir_identifier,
-    ) codegen_error!u8 {
+        left_id: mir_mod.mir_identifier,
+        right_id: mir_mod.mir_identifier,
+    ) lower_error!u8 {
         const left_reg = try self.compile_expr(left_id);
         const dst = if (self.is_temp(left_reg)) left_reg else try self.alloc_temp();
         if (dst != left_reg) {
@@ -2447,19 +2597,19 @@ const function_ctx = struct {
 
     fn compile_logical_xor(
         self: *function_ctx,
-        left_id: ir_mod.ir_identifier,
-        right_id: ir_mod.ir_identifier,
-    ) codegen_error!u8 {
+        left_id: mir_mod.mir_identifier,
+        right_id: mir_mod.mir_identifier,
+    ) lower_error!u8 {
         return self.emit_int_binary(left_id, right_id, .bit_xor);
     }
 
     fn compile_assign_expr(
         self: *function_ctx,
         op: ink.binary,
-        left_id: ir_mod.ir_identifier,
-        right_id: ir_mod.ir_identifier,
-        node_id: ir_mod.ir_identifier,
-    ) codegen_error!u8 {
+        left_id: mir_mod.mir_identifier,
+        right_id: mir_mod.mir_identifier,
+        node_id: mir_mod.mir_identifier,
+    ) lower_error!u8 {
         if (op == .assign) {
             return self.compile_simple_assign(left_id, right_id);
         }
@@ -2471,9 +2621,9 @@ const function_ctx = struct {
 
     fn compile_simple_assign(
         self: *function_ctx,
-        left_id: ir_mod.ir_identifier,
-        right_id: ir_mod.ir_identifier,
-    ) codegen_error!u8 {
+        left_id: mir_mod.mir_identifier,
+        right_id: mir_mod.mir_identifier,
+    ) lower_error!u8 {
         const value_reg = try self.compile_expr(right_id);
         const value_type = self.infer_expr_type(right_id);
         return self.store_assignment_value(left_id, value_reg, value_type);
@@ -2481,10 +2631,10 @@ const function_ctx = struct {
 
     fn store_assignment_value(
         self: *function_ctx,
-        left_id: ir_mod.ir_identifier,
+        left_id: mir_mod.mir_identifier,
         value_reg: u8,
         value_type: type_key,
-    ) codegen_error!u8 {
+    ) lower_error!u8 {
         const left_type = self.infer_expr_type(left_id);
         if (atomic_inner_type_key(left_type)) |inner_type| {
             return self.store_atomic_assignment(left_id, left_type, inner_type, value_reg, value_type);
@@ -2562,12 +2712,12 @@ const function_ctx = struct {
 
     fn store_atomic_assignment(
         self: *function_ctx,
-        left_id: ir_mod.ir_identifier,
+        left_id: mir_mod.mir_identifier,
         left_type: type_key,
         inner_type: type_key,
         value_reg: u8,
         value_type: type_key,
-    ) codegen_error!u8 {
+    ) lower_error!u8 {
         _ = left_type;
         const left_node = self.b.node(left_id);
         var atomic_reg: u8 = 0;
@@ -2634,13 +2784,13 @@ const function_ctx = struct {
 
     fn store_index_set_value(
         self: *function_ctx,
-        base_id: ir_mod.ir_identifier,
-        index_id: ir_mod.ir_identifier,
+        base_id: mir_mod.mir_identifier,
+        index_id: mir_mod.mir_identifier,
         value_reg: u8,
         base_type: type_key,
         value_type: type_key,
-        call_id: ir_mod.ir_identifier,
-    ) codegen_error!?u8 {
+        call_id: mir_mod.mir_identifier,
+    ) lower_error!?u8 {
         var base_reg = try self.compile_expr(base_id);
         if (base_reg == 0) base_reg = try self.save_result_reg(base_reg);
         var index_reg = try self.compile_expr(index_id);
@@ -2689,10 +2839,10 @@ const function_ctx = struct {
 
     fn compile_local_decl(
         self: *function_ctx,
-        name_id: ir_mod.string_identifier,
-        ty: ?ir_mod.ir_identifier,
-        value_id: ir_mod.ir_identifier,
-    ) codegen_error!u8 {
+        name_id: mir_mod.string_identifier,
+        ty: ?mir_mod.mir_identifier,
+        value_id: mir_mod.mir_identifier,
+    ) lower_error!u8 {
         const name = self.b.string_value(name_id);
         const value_type = if (ty) |ty_id| type_key_from_type_node(self.b, ty_id) else self.infer_expr_type(value_id);
         const value_words = self.type_word_count(value_type);
@@ -2732,9 +2882,9 @@ const function_ctx = struct {
         return local_reg;
     }
 
-    fn infer_call_type(self: *function_ctx, id: ir_mod.ir_identifier) type_key {
+    fn infer_call_type(self: *function_ctx, id: mir_mod.mir_identifier) type_key {
         var base_id = id;
-        var args_buf: [7]ir_mod.ir_identifier = undefined;
+        var args_buf: [7]mir_mod.mir_identifier = undefined;
         var arg_count: usize = 0;
 
         while (true) {
@@ -2772,11 +2922,11 @@ const function_ctx = struct {
         const base = self.resolve_call_base(base_id) catch return .unknown;
 
         var arg_ids = args_buf[0..arg_count];
-        var arg_ids_buf: [8]ir_mod.ir_identifier = undefined;
+        var arg_ids_buf: [8]mir_mod.mir_identifier = undefined;
         if (base.receiver) |recv| {
             if (arg_count + 1 > arg_ids_buf.len) return .unknown;
             arg_ids_buf[0] = recv;
-            std.mem.copyForwards(ir_mod.ir_identifier, arg_ids_buf[1 .. arg_count + 1], arg_ids);
+            std.mem.copyForwards(mir_mod.mir_identifier, arg_ids_buf[1 .. arg_count + 1], arg_ids);
             arg_ids = arg_ids_buf[0 .. arg_count + 1];
             arg_count += 1;
         }
@@ -2892,7 +3042,7 @@ const function_ctx = struct {
         self: *function_ctx,
         overloads: []const function_info,
         arg_types: []const type_key,
-    ) codegen_error!overload_result {
+    ) lower_error!overload_result {
         var best_idx: ?usize = null;
         var best_score: usize = 0;
         var ambiguous = false;
@@ -2925,7 +3075,7 @@ const function_ctx = struct {
         return .{ .info = info, .bindings = owned };
     }
 
-    fn is_pack_generic(self: *function_ctx, decl: ir_mod.ir.function_decl, name: []const u8) bool {
+    fn is_pack_generic(self: *function_ctx, decl: mir_mod.mir.function_decl, name: []const u8) bool {
         for (decl.generics) |param| {
             if (!param.is_pack) continue;
             if (std.mem.eql(u8, self.b.string_value(param.name), name)) return true;
@@ -2933,7 +3083,7 @@ const function_ctx = struct {
         return false;
     }
 
-    fn constraint_satisfied(self: *function_ctx, ty: type_key, constraint_id: ir_mod.ir_identifier) bool {
+    fn constraint_satisfied(self: *function_ctx, ty: type_key, constraint_id: mir_mod.mir_identifier) bool {
         if (ty == .unknown) return true;
         const constraint = constraint_from_type_node(self.b, constraint_id) orelse return true;
         if (!self.b.traits.contains(constraint.name)) return true;
@@ -3033,7 +3183,7 @@ const function_ctx = struct {
         self: *function_ctx,
         overloads: []const function_info,
         arg_types: []const type_key,
-    ) codegen_error!usize {
+    ) lower_error!usize {
         var best_idx: ?usize = null;
         var best_score: usize = 0;
         var ambiguous = false;
@@ -3056,7 +3206,7 @@ const function_ctx = struct {
         self: *function_ctx,
         overloads: []const foreign_signature,
         arg_types: []const type_key,
-    ) codegen_error!usize {
+    ) lower_error!usize {
         _ = self;
         var best_idx: ?usize = null;
         var best_score: usize = 0;
@@ -3076,11 +3226,11 @@ const function_ctx = struct {
         return best_idx.?;
     }
 
-    fn emit(self: *function_ctx, inst: ink.exe.instruction) codegen_error!void {
+    fn emit(self: *function_ctx, inst: ink.exe.instruction) lower_error!void {
         try self.b.emit(inst);
     }
 
-    fn prep_binary(self: *function_ctx, left_id: ir_mod.ir_identifier, right_id: ir_mod.ir_identifier) codegen_error!binary_prep {
+    fn prep_binary(self: *function_ctx, left_id: mir_mod.mir_identifier, right_id: mir_mod.mir_identifier) lower_error!binary_prep {
         var left_reg = try self.compile_expr(left_id);
         if (left_reg == 0) {
             const tmp = try self.alloc_temp();
@@ -3110,7 +3260,7 @@ const function_ctx = struct {
         if (prep.left_temp and prep.dst != prep.left) self.free_temp(prep.left);
     }
 
-    fn prep_unary(self: *function_ctx, arg_id: ir_mod.ir_identifier) codegen_error!unary_prep {
+    fn prep_unary(self: *function_ctx, arg_id: mir_mod.mir_identifier) lower_error!unary_prep {
         const src = try self.compile_expr(arg_id);
         const dst = if (self.is_temp(src)) src else try self.alloc_temp();
         return .{ .src = src, .dst = dst, .src_temp = self.is_temp(src) };
@@ -3122,10 +3272,10 @@ const function_ctx = struct {
 
     const call_base = struct {
         name: []const u8,
-        receiver: ?ir_mod.ir_identifier,
+        receiver: ?mir_mod.mir_identifier,
     };
 
-    fn resolve_call_base(self: *function_ctx, base_id: ir_mod.ir_identifier) codegen_error!call_base {
+    fn resolve_call_base(self: *function_ctx, base_id: mir_mod.mir_identifier) lower_error!call_base {
         const base_node = self.b.node(base_id);
         return switch (base_node) {
             .identifier => |ident| .{ .name = self.b.string_value(ident), .receiver = null },
@@ -3141,7 +3291,7 @@ const function_ctx = struct {
 
     fn record_call_error(
         self: *function_ctx,
-        node: ir_mod.ir_identifier,
+        node: mir_mod.mir_identifier,
         prefix: []const u8,
         name: []const u8,
         arg_types: []const type_key,
@@ -3156,7 +3306,7 @@ const function_ctx = struct {
 
     fn record_binary_operator_error(
         self: *function_ctx,
-        node: ir_mod.ir_identifier,
+        node: mir_mod.mir_identifier,
         op: ink.binary,
         left_type: type_key,
         right_type: type_key,
@@ -3174,7 +3324,7 @@ const function_ctx = struct {
 
     fn record_unary_operator_error(
         self: *function_ctx,
-        node: ir_mod.ir_identifier,
+        node: mir_mod.mir_identifier,
         op: ink.unary,
         arg_type: type_key,
     ) void {
@@ -3189,7 +3339,7 @@ const function_ctx = struct {
 
     fn record_binary_operator_ambiguous(
         self: *function_ctx,
-        node: ir_mod.ir_identifier,
+        node: mir_mod.mir_identifier,
         op: ink.binary,
         left_type: type_key,
         right_type: type_key,
@@ -3207,7 +3357,7 @@ const function_ctx = struct {
 
     fn record_unary_operator_ambiguous(
         self: *function_ctx,
-        node: ir_mod.ir_identifier,
+        node: mir_mod.mir_identifier,
         op: ink.unary,
         arg_type: type_key,
     ) void {
@@ -3220,11 +3370,11 @@ const function_ctx = struct {
         self.b.set_error_message(node, buf.items);
     }
 
-    fn foreign_index(self: *function_ctx, name: []const u8) codegen_error!u32 {
+    fn foreign_index(self: *function_ctx, name: []const u8) lower_error!u32 {
         return self.b.foreigns.get(name) orelse error.unknown_foreign;
     }
 
-    fn emit_foreign_call(self: *function_ctx, foreign_idx: u32, args: []const u8) codegen_error!void {
+    fn emit_foreign_call(self: *function_ctx, foreign_idx: u32, args: []const u8) lower_error!void {
         if (args.len > max_register) return error.register_overflow;
         for (args, 0..) |arg_reg, idx| {
             const dst: u8 = @intCast(idx + 1);
@@ -3233,7 +3383,7 @@ const function_ctx = struct {
         try self.emit(.{ .call_foreign = .{ .index = foreign_idx } });
     }
 
-    fn emit_argument_words(self: *function_ctx, src_base: u8, words: u8, dst_start: u8) codegen_error!void {
+    fn emit_argument_words(self: *function_ctx, src_base: u8, words: u8, dst_start: u8) lower_error!void {
         var idx: u8 = 0;
         while (idx < words) : (idx += 1) {
             const dst: u8 = dst_start + idx;
@@ -3247,7 +3397,7 @@ const function_ctx = struct {
         arg_regs: []const u8,
         arg_types: []const type_key,
         dst_start: u8,
-    ) codegen_error!u8 {
+    ) lower_error!u8 {
         var dst = dst_start;
         for (arg_regs, 0..) |arg_reg, idx| {
             const words = self.type_word_count(arg_types[idx]);
@@ -3257,12 +3407,37 @@ const function_ctx = struct {
         return dst;
     }
 
-    fn is_unit(self: *function_ctx, id: ir_mod.ir_identifier) bool {
+    fn is_unit(self: *function_ctx, id: mir_mod.mir_identifier) bool {
         const node = self.b.node(id);
         return switch (node) {
             .identifier => |ident| std.mem.eql(u8, self.b.string_value(ident), "unit"),
             else => false,
         };
+    }
+
+    fn compile_global_const(
+        self: *function_ctx,
+        name: []const u8,
+        info: global_const,
+        node_id: mir_mod.mir_identifier,
+    ) lower_error!u8 {
+        if (self.global_const_stack.contains(name)) {
+            self.b.set_error_fmt(node_id, "recursive const reference {s}", .{name});
+            return error.unsupported_node;
+        }
+        self.global_const_stack.put(name, 1) catch return error.out_of_memory;
+        defer _ = self.global_const_stack.remove(name);
+        return self.compile_expr(info.value);
+    }
+
+    fn infer_global_const_type(self: *function_ctx, name: []const u8, info: global_const) type_key {
+        if (self.global_const_stack.contains(name)) return .unknown;
+        self.global_const_stack.put(name, 1) catch return .unknown;
+        defer _ = self.global_const_stack.remove(name);
+        if (info.ty) |ty_id| {
+            return type_key_from_type_node(self.b, ty_id);
+        }
+        return self.infer_expr_type(info.value);
     }
 
     fn trait_name_from_type(self: *function_ctx, ty: type_key) ?[]const u8 {
@@ -3312,7 +3487,7 @@ const function_ctx = struct {
         return true;
     }
 
-    fn compile_expr(self: *function_ctx, id: ir_mod.ir_identifier) codegen_error!u8 {
+    fn compile_expr(self: *function_ctx, id: mir_mod.mir_identifier) lower_error!u8 {
         const node = self.b.node(id);
         return switch (node) {
             .integer => |value| blk: {
@@ -3348,6 +3523,16 @@ const function_ctx = struct {
             .identifier => |ident| blk: {
                 const name = self.b.string_value(ident);
                 if (self.locals.get(name)) |reg| break :blk reg;
+                if (macro_enum_value(name)) |value| {
+                    const idx = try self.b.intern_const(value);
+                    const reg = try self.alloc_temp();
+                    try self.emit(.{ .load_const = .{ .dst = reg, .const_index = idx } });
+                    break :blk reg;
+                }
+                if (self.b.global_consts.get(name)) |info| {
+                    break :blk try self.compile_global_const(name, info, id);
+                }
+                self.b.set_error_fmt(id, "unknown identifier {s}", .{name});
                 return error.unknown_identifier;
             },
         .unary => |un| switch (un.op) {
@@ -3491,6 +3676,7 @@ const function_ctx = struct {
                 const result_type = self.infer_expr_type(id);
                 const result_words = self.type_word_count(result_type);
                 const dst = try self.alloc_temp_words(result_words);
+                try self.zero_words(dst, result_words);
                 const then_reg = try self.compile_expr(ife.then_branch);
                 if (result_words <= 1) {
                     if (then_reg != dst) {
@@ -3515,8 +3701,6 @@ const function_ctx = struct {
                         try self.copy_words(dst, else_reg, result_words);
                         self.free_temp_value(else_reg, self.infer_expr_type(else_ref));
                     }
-                } else {
-                    return error.unsupported_node;
                 }
 
                 try self.emit(.{ .label = .{ .id = end_label } });
@@ -3527,43 +3711,43 @@ const function_ctx = struct {
         };
     }
 
-    fn compile_sleep_expr(self: *function_ctx, arg_id: ir_mod.ir_identifier) codegen_error!u8 {
+    fn compile_sleep_expr(self: *function_ctx, arg_id: mir_mod.mir_identifier) lower_error!u8 {
         const arg_type = self.infer_expr_type(arg_id);
         if (type_key_base_name(arg_type)) |name| {
             if (std.mem.eql(u8, name, "deadline") or std.mem.eql(u8, name, "instant")) {
-                _ = try self.emit_foreign_call_named("std::sleep_until", &[_]ir_mod.ir_identifier{arg_id});
+                _ = try self.emit_foreign_call_named("std::sleep_until", &[_]mir_mod.mir_identifier{arg_id});
                 return self.save_result_reg(0);
             }
         }
-        _ = try self.emit_foreign_call_named("std::sleep", &[_]ir_mod.ir_identifier{arg_id});
+        _ = try self.emit_foreign_call_named("std::sleep", &[_]mir_mod.mir_identifier{arg_id});
         return self.save_result_reg(0);
     }
 
-    fn compile_timeout_expr(self: *function_ctx, arg_id: ir_mod.ir_identifier) codegen_error!u8 {
-        _ = try self.emit_foreign_call_named("std::timeout", &[_]ir_mod.ir_identifier{arg_id});
+    fn compile_timeout_expr(self: *function_ctx, arg_id: mir_mod.mir_identifier) lower_error!u8 {
+        _ = try self.emit_foreign_call_named("std::timeout", &[_]mir_mod.mir_identifier{arg_id});
         return self.save_result_reg(0);
     }
 
-    fn compile_deadline_expr(self: *function_ctx, arg_id: ir_mod.ir_identifier) codegen_error!u8 {
+    fn compile_deadline_expr(self: *function_ctx, arg_id: mir_mod.mir_identifier) lower_error!u8 {
         const arg_type = self.infer_expr_type(arg_id);
         if (type_key_base_name(arg_type)) |name| {
             if (std.mem.eql(u8, name, "deadline")) {
                 return self.compile_expr(arg_id);
             }
             if (std.mem.eql(u8, name, "duration")) {
-                _ = try self.emit_foreign_call_named("std::timeout", &[_]ir_mod.ir_identifier{arg_id});
+                _ = try self.emit_foreign_call_named("std::timeout", &[_]mir_mod.mir_identifier{arg_id});
                 return self.save_result_reg(0);
             }
             if (std.mem.eql(u8, name, "instant")) {
-                _ = try self.emit_foreign_call_named("std::deadline", &[_]ir_mod.ir_identifier{arg_id});
+                _ = try self.emit_foreign_call_named("std::deadline", &[_]mir_mod.mir_identifier{arg_id});
                 return self.save_result_reg(0);
             }
         }
-        _ = try self.emit_foreign_call_named("std::deadline", &[_]ir_mod.ir_identifier{arg_id});
+        _ = try self.emit_foreign_call_named("std::deadline", &[_]mir_mod.mir_identifier{arg_id});
         return self.save_result_reg(0);
     }
 
-    fn compile_yield_expr(self: *function_ctx, value: ?ir_mod.ir_identifier) codegen_error!u8 {
+    fn compile_yield_expr(self: *function_ctx, value: ?mir_mod.mir_identifier) lower_error!u8 {
         if (value) |ref| {
             const reg = try self.compile_expr(ref);
             self.free_temp_value(reg, self.infer_expr_type(ref));
@@ -3572,7 +3756,7 @@ const function_ctx = struct {
         return try self.load_const_reg(0);
     }
 
-    fn compile_label_expr(self: *function_ctx, name_id: ir_mod.string_identifier, body_id: ir_mod.ir_identifier) codegen_error!u8 {
+    fn compile_label_expr(self: *function_ctx, name_id: mir_mod.string_identifier, body_id: mir_mod.mir_identifier) lower_error!u8 {
         const label_name = self.b.string_value(name_id);
         const body_node = self.b.node(body_id);
         return switch (body_node) {
@@ -3587,7 +3771,7 @@ const function_ctx = struct {
         };
     }
 
-    fn compile_label_block(self: *function_ctx, label_name: []const u8, body_id: ir_mod.ir_identifier) codegen_error!u8 {
+    fn compile_label_block(self: *function_ctx, label_name: []const u8, body_id: mir_mod.mir_identifier) lower_error!u8 {
         const result_type = self.infer_expr_type(body_id);
         const result_words = self.type_word_count(result_type);
         const result_reg = try self.alloc_temp_words(result_words);
@@ -3617,10 +3801,10 @@ const function_ctx = struct {
 
     fn compile_loop_expr(
         self: *function_ctx,
-        body_id: ir_mod.ir_identifier,
-        loop_id: ir_mod.ir_identifier,
+        body_id: mir_mod.mir_identifier,
+        loop_id: mir_mod.mir_identifier,
         label_name: ?[]const u8,
-    ) codegen_error!u8 {
+    ) lower_error!u8 {
         const result_type = self.infer_expr_type(loop_id);
         const result_words = self.type_word_count(result_type);
         const result_reg = try self.alloc_temp_words(result_words);
@@ -3647,11 +3831,11 @@ const function_ctx = struct {
 
     fn compile_while_expr(
         self: *function_ctx,
-        condition_id: ir_mod.ir_identifier,
-        body_id: ir_mod.ir_identifier,
-        loop_id: ir_mod.ir_identifier,
+        condition_id: mir_mod.mir_identifier,
+        body_id: mir_mod.mir_identifier,
+        loop_id: mir_mod.mir_identifier,
         label_name: ?[]const u8,
-    ) codegen_error!u8 {
+    ) lower_error!u8 {
         const result_type = self.infer_expr_type(loop_id);
         const result_words = self.type_word_count(result_type);
         const result_reg = try self.alloc_temp_words(result_words);
@@ -3682,11 +3866,11 @@ const function_ctx = struct {
 
     fn compile_until_expr(
         self: *function_ctx,
-        condition_id: ir_mod.ir_identifier,
-        body_id: ir_mod.ir_identifier,
-        loop_id: ir_mod.ir_identifier,
+        condition_id: mir_mod.mir_identifier,
+        body_id: mir_mod.mir_identifier,
+        loop_id: mir_mod.mir_identifier,
         label_name: ?[]const u8,
-    ) codegen_error!u8 {
+    ) lower_error!u8 {
         const result_type = self.infer_expr_type(loop_id);
         const result_words = self.type_word_count(result_type);
         const result_reg = try self.alloc_temp_words(result_words);
@@ -3717,11 +3901,11 @@ const function_ctx = struct {
 
     fn compile_repeat_expr(
         self: *function_ctx,
-        count_id: ir_mod.ir_identifier,
-        body_id: ir_mod.ir_identifier,
-        loop_id: ir_mod.ir_identifier,
+        count_id: mir_mod.mir_identifier,
+        body_id: mir_mod.mir_identifier,
+        loop_id: mir_mod.mir_identifier,
         label_name: ?[]const u8,
-    ) codegen_error!u8 {
+    ) lower_error!u8 {
         const result_type = self.infer_expr_type(loop_id);
         const result_words = self.type_word_count(result_type);
         const result_reg = try self.alloc_temp_words(result_words);
@@ -3775,12 +3959,12 @@ const function_ctx = struct {
 
     fn compile_for_in_expr(
         self: *function_ctx,
-        pattern_id: ir_mod.ir_identifier,
-        iter_id: ir_mod.ir_identifier,
-        body_id: ir_mod.ir_identifier,
-        loop_id: ir_mod.ir_identifier,
+        pattern_id: mir_mod.mir_identifier,
+        iter_id: mir_mod.mir_identifier,
+        body_id: mir_mod.mir_identifier,
+        loop_id: mir_mod.mir_identifier,
         label_name: ?[]const u8,
-    ) codegen_error!u8 {
+    ) lower_error!u8 {
         const iter_type = self.infer_expr_type(iter_id);
         const result_type = self.infer_expr_type(loop_id);
         const result_words = self.type_word_count(result_type);
@@ -3910,10 +4094,10 @@ const function_ctx = struct {
 
     fn bind_pattern_value(
         self: *function_ctx,
-        pattern_id: ir_mod.ir_identifier,
+        pattern_id: mir_mod.mir_identifier,
         value_reg: u8,
         value_type: type_key,
-    ) codegen_error!void {
+    ) lower_error!void {
         const node = self.b.node(pattern_id);
         if (node != .identifier) return error.unsupported_node;
         const name = self.b.string_value(node.identifier);
@@ -3941,9 +4125,9 @@ const function_ctx = struct {
 
     fn compile_break_expr(
         self: *function_ctx,
-        label: ?ir_mod.string_identifier,
-        value: ?ir_mod.ir_identifier,
-    ) codegen_error!u8 {
+        label: ?mir_mod.string_identifier,
+        value: ?mir_mod.mir_identifier,
+    ) lower_error!u8 {
         const label_name = if (label) |lab| self.b.string_value(lab) else null;
         const frame = self.find_break_frame(label_name) orelse return error.unsupported_node;
         if (value) |ref| {
@@ -3964,7 +4148,7 @@ const function_ctx = struct {
         return frame.result_reg;
     }
 
-    fn compile_continue_expr(self: *function_ctx, label: ?ir_mod.string_identifier) codegen_error!u8 {
+    fn compile_continue_expr(self: *function_ctx, label: ?mir_mod.string_identifier) lower_error!u8 {
         const label_name = if (label) |lab| self.b.string_value(lab) else null;
         const frame = self.find_continue_frame(label_name) orelse return error.unsupported_node;
         const target = frame.continue_label orelse return error.unsupported_node;
@@ -3984,9 +4168,9 @@ const function_ctx = struct {
 
     fn compile_atomic_expr(
         self: *function_ctx,
-        value_id: ir_mod.ir_identifier,
-        ordering: ir_mod.string_identifier,
-    ) codegen_error!u8 {
+        value_id: mir_mod.mir_identifier,
+        ordering: mir_mod.string_identifier,
+    ) lower_error!u8 {
         var value_reg = try self.compile_expr(value_id);
         if (value_reg == 0) value_reg = try self.save_result_reg(value_reg);
         const value_type = self.infer_expr_type(value_id);
@@ -4008,9 +4192,9 @@ const function_ctx = struct {
 
     fn compile_atomic_deref(
         self: *function_ctx,
-        target_id: ir_mod.ir_identifier,
+        target_id: mir_mod.mir_identifier,
         inner_type: type_key,
-    ) codegen_error!u8 {
+    ) lower_error!u8 {
         var atomic_reg = try self.compile_expr(target_id);
         if (atomic_reg == 0) atomic_reg = try self.save_result_reg(atomic_reg);
         const value_reg = try self.compile_atomic_load_reg(atomic_reg, inner_type);
@@ -4021,8 +4205,8 @@ const function_ctx = struct {
     fn compile_atomic_unary(
         self: *function_ctx,
         op: ink.unary,
-        target_id: ir_mod.ir_identifier,
-    ) codegen_error!u8 {
+        target_id: mir_mod.mir_identifier,
+    ) lower_error!u8 {
         const atomic_type = self.infer_expr_type(target_id);
         const inner_type = atomic_inner_type_key(atomic_type) orelse return error.unsupported_node;
         var atomic_reg = try self.compile_expr(target_id);
@@ -4048,10 +4232,10 @@ const function_ctx = struct {
     fn compile_atomic_binary(
         self: *function_ctx,
         op: ink.binary,
-        left_id: ir_mod.ir_identifier,
-        right_id: ir_mod.ir_identifier,
-        node_id: ir_mod.ir_identifier,
-    ) codegen_error!u8 {
+        left_id: mir_mod.mir_identifier,
+        right_id: mir_mod.mir_identifier,
+        node_id: mir_mod.mir_identifier,
+    ) lower_error!u8 {
         const left_type = self.infer_expr_type(left_id);
         const right_type = self.infer_expr_type(right_id);
         const left_inner = atomic_inner_type_key(left_type) orelse left_type;
@@ -4142,7 +4326,7 @@ const function_ctx = struct {
         return atomic_result;
     }
 
-    fn emit_unary_reg(self: *function_ctx, op: ink.unary, src: u8, ty: type_key) codegen_error!u8 {
+    fn emit_unary_reg(self: *function_ctx, op: ink.unary, src: u8, ty: type_key) lower_error!u8 {
         const dst = try self.alloc_temp();
         if (self.is_float_type_key(ty)) {
             if (op == .neg) {
@@ -4172,7 +4356,7 @@ const function_ctx = struct {
         right: u8,
         left_type: type_key,
         right_type: type_key,
-    ) codegen_error!u8 {
+    ) lower_error!u8 {
         const same_int = self.is_int_type_key(left_type) and self.is_int_type_key(right_type);
         const same_float = self.is_float_type_key(left_type) and self.is_float_type_key(right_type);
         const same_bool = self.is_bool_type_key(left_type) and self.is_bool_type_key(right_type);
@@ -4301,7 +4485,7 @@ const function_ctx = struct {
         value_reg: u8,
         value_type: type_key,
         order_reg: u8,
-    ) codegen_error!u8 {
+    ) lower_error!u8 {
         const words = self.type_word_count(value_type);
         const ptr_reg = try self.alloc_words(words);
         try self.store_words_to_ptr(ptr_reg, value_reg, words);
@@ -4314,7 +4498,7 @@ const function_ctx = struct {
         return atomic_reg;
     }
 
-    fn compile_spawn_expr(self: *function_ctx, id: ir_mod.ir_identifier) codegen_error!u8 {
+    fn compile_spawn_expr(self: *function_ctx, id: mir_mod.mir_identifier) lower_error!u8 {
         const node = self.b.node(id);
         return switch (node) {
             .binary => |bin| if (bin.op == .call) try self.compile_spawn_call(id) else error.unsupported_node,
@@ -4322,9 +4506,9 @@ const function_ctx = struct {
         };
     }
 
-    fn compile_spawn_call(self: *function_ctx, id: ir_mod.ir_identifier) codegen_error!u8 {
+    fn compile_spawn_call(self: *function_ctx, id: mir_mod.mir_identifier) lower_error!u8 {
         var base_id = id;
-        var args = std.array_list.Managed(ir_mod.ir_identifier).init(self.b.allocator);
+        var args = std.array_list.Managed(mir_mod.mir_identifier).init(self.b.allocator);
         defer args.deinit();
 
         while (true) {
@@ -4342,7 +4526,7 @@ const function_ctx = struct {
             break;
         }
 
-        std.mem.reverse(ir_mod.ir_identifier, args.items);
+        std.mem.reverse(mir_mod.mir_identifier, args.items);
 
         const base_node = self.b.node(base_id);
         const name = switch (base_node) {
@@ -4406,7 +4590,7 @@ const function_ctx = struct {
         return dst_reg;
     }
 
-    fn compile_await_expr(self: *function_ctx, id: ir_mod.ir_identifier) codegen_error!u8 {
+    fn compile_await_expr(self: *function_ctx, id: mir_mod.mir_identifier) lower_error!u8 {
         const src_reg = try self.compile_expr(id);
         const dst_reg = if (self.is_temp(src_reg)) src_reg else try self.alloc_temp();
         try self.emit(.{ .task_await = .{ .dst = dst_reg, .src = src_reg } });
@@ -4414,7 +4598,7 @@ const function_ctx = struct {
         return dst_reg;
     }
 
-    fn compile_try_expr(self: *function_ctx, arg_id: ir_mod.ir_identifier) codegen_error!u8 {
+    fn compile_try_expr(self: *function_ctx, arg_id: mir_mod.mir_identifier) lower_error!u8 {
         var result_reg = try self.compile_expr(arg_id);
         if (result_reg == 0) {
             const tmp = try self.alloc_temp();
@@ -4453,7 +4637,7 @@ const function_ctx = struct {
         return dst;
     }
 
-    fn compile_optional_unwrap(self: *function_ctx, arg_id: ir_mod.ir_identifier) codegen_error!u8 {
+    fn compile_optional_unwrap(self: *function_ctx, arg_id: mir_mod.mir_identifier) lower_error!u8 {
         const value_reg = try self.compile_expr(arg_id);
         const zero_idx = try self.b.intern_const(0);
         const zero_reg = try self.alloc_temp();
@@ -4473,14 +4657,14 @@ const function_ctx = struct {
         return value_reg;
     }
 
-    fn load_const_reg(self: *function_ctx, value: u64) codegen_error!u8 {
+    fn load_const_reg(self: *function_ctx, value: u64) lower_error!u8 {
         const idx = try self.b.intern_const(value);
         const reg = try self.alloc_temp();
         try self.emit(.{ .load_const = .{ .dst = reg, .const_index = idx } });
         return reg;
     }
 
-    fn alloc_words(self: *function_ctx, count: u64) codegen_error!u8 {
+    fn alloc_words(self: *function_ctx, count: u64) lower_error!u8 {
         const size_reg = try self.load_const_reg(count);
         const alloc_idx = try self.foreign_index("std::alloc");
         try self.emit_foreign_call(alloc_idx, &[_]u8{size_reg});
@@ -4491,7 +4675,7 @@ const function_ctx = struct {
         return ptr_reg;
     }
 
-    fn deref_to_temp(self: *function_ctx, ptr_reg: u8) codegen_error!u8 {
+    fn deref_to_temp(self: *function_ctx, ptr_reg: u8) lower_error!u8 {
         const deref_idx = try self.foreign_index("std::deref");
         try self.emit_foreign_call(deref_idx, &[_]u8{ptr_reg});
         const dst = try self.alloc_temp();
@@ -4499,30 +4683,30 @@ const function_ctx = struct {
         return dst;
     }
 
-    fn deref_into(self: *function_ctx, ptr_reg: u8, dst_reg: u8) codegen_error!void {
+    fn deref_into(self: *function_ctx, ptr_reg: u8, dst_reg: u8) lower_error!void {
         const deref_idx = try self.foreign_index("std::deref");
         try self.emit_foreign_call(deref_idx, &[_]u8{ptr_reg});
         try self.emit(.{ .move = .{ .dst = dst_reg, .src = 0 } });
     }
 
-    fn store_value(self: *function_ctx, ptr_reg: u8, value_reg: u8) codegen_error!void {
+    fn store_value(self: *function_ctx, ptr_reg: u8, value_reg: u8) lower_error!void {
         const store_idx = try self.foreign_index("std::store");
         try self.emit_foreign_call(store_idx, &[_]u8{ptr_reg, value_reg});
     }
 
-    fn load_label_const_reg(self: *function_ctx, label: ink.exe.label_id) codegen_error!u8 {
+    fn load_label_const_reg(self: *function_ctx, label: ink.exe.label_id) lower_error!u8 {
         const idx = try self.b.const_index_for_label(label);
         const reg = try self.alloc_temp();
         try self.emit(.{ .load_const = .{ .dst = reg, .const_index = idx } });
         return reg;
     }
 
-    fn dyn_data_reg(self: *function_ctx, obj_reg: u8) codegen_error!u8 {
+    fn dyn_data_reg(self: *function_ctx, obj_reg: u8) lower_error!u8 {
         _ = self;
         return obj_reg + 1;
     }
 
-    fn type_name_from_value(self: *function_ctx, value_id: ir_mod.ir_identifier) ?[]const u8 {
+    fn type_name_from_value(self: *function_ctx, value_id: mir_mod.mir_identifier) ?[]const u8 {
         const node = self.b.node(value_id);
         return switch (node) {
             .record_literal => |rec| self.b.string_value(rec.type_name),
@@ -4549,7 +4733,7 @@ const function_ctx = struct {
         };
     }
 
-    fn compile_as_expr(self: *function_ctx, value_id: ir_mod.ir_identifier, trait_id: ir_mod.ir_identifier) codegen_error!u8 {
+    fn compile_as_expr(self: *function_ctx, value_id: mir_mod.mir_identifier, trait_id: mir_mod.mir_identifier) lower_error!u8 {
         const type_node = self.b.node(trait_id);
         if (type_node == .type and type_node.type == .dyn) {
             const trait_name = type_name_from_type_node(self.b, trait_id) orelse return error.unsupported_node;
@@ -4638,9 +4822,9 @@ const function_ctx = struct {
 
     fn compile_select_expr(
         self: *function_ctx,
-        id: ir_mod.ir_identifier,
-        arms: []const ir_mod.ir.select_arm,
-    ) codegen_error!u8 {
+        id: mir_mod.mir_identifier,
+        arms: []const mir_mod.mir.select_arm,
+    ) lower_error!u8 {
         if (arms.len == 0) return error.unsupported_node;
         if (arms.len > 7) return error.register_overflow;
 
@@ -4751,7 +4935,7 @@ const function_ctx = struct {
         owned: bool,
     };
 
-    fn foreign_name_from_expr(self: *function_ctx, id: ir_mod.ir_identifier) codegen_error!foreign_name {
+    fn foreign_name_from_expr(self: *function_ctx, id: mir_mod.mir_identifier) lower_error!foreign_name {
         const node = self.b.node(id);
         switch (node) {
             .unary => |un| {
@@ -4782,9 +4966,9 @@ const function_ctx = struct {
         return error.unsupported_node;
     }
 
-    fn compile_foreign_call(self: *function_ctx, id: ir_mod.ir_identifier) codegen_error!u8 {
+    fn compile_foreign_call(self: *function_ctx, id: mir_mod.mir_identifier) lower_error!u8 {
         var base_id = id;
-        var args = std.array_list.Managed(ir_mod.ir_identifier).init(self.b.allocator);
+        var args = std.array_list.Managed(mir_mod.mir_identifier).init(self.b.allocator);
         defer args.deinit();
 
         while (true) {
@@ -4808,7 +4992,7 @@ const function_ctx = struct {
             break;
         }
 
-        std.mem.reverse(ir_mod.ir_identifier, args.items);
+        std.mem.reverse(mir_mod.mir_identifier, args.items);
 
         const name_info = try self.foreign_name_from_expr(base_id);
         defer if (name_info.owned) self.b.allocator.free(name_info.name);
@@ -4835,7 +5019,7 @@ const function_ctx = struct {
         return 0;
     }
 
-    fn emit_foreign_call_named(self: *function_ctx, name: []const u8, args: []const ir_mod.ir_identifier) codegen_error!u8 {
+    fn emit_foreign_call_named(self: *function_ctx, name: []const u8, args: []const mir_mod.mir_identifier) lower_error!u8 {
         const arg_count = args.len;
         var arg_types = self.b.allocator.alloc(type_key, arg_count) catch return error.out_of_memory;
         defer self.b.allocator.free(arg_types);
@@ -4854,34 +5038,34 @@ const function_ctx = struct {
         return 0;
     }
 
-    fn emit_foreign_call_reg(self: *function_ctx, name: []const u8, arg_reg: u8) codegen_error!u8 {
+    fn emit_foreign_call_reg(self: *function_ctx, name: []const u8, arg_reg: u8) lower_error!u8 {
         try self.emit(.{ .argument_set = .{ .dst = 1, .src = arg_reg } });
         const foreign_idx = try self.foreign_index(name);
         try self.emit(.{ .call_foreign = .{ .index = foreign_idx } });
         return 0;
     }
 
-    fn emit_foreign_call_void(self: *function_ctx, name: []const u8) codegen_error!void {
+    fn emit_foreign_call_void(self: *function_ctx, name: []const u8) lower_error!void {
         const foreign_idx = try self.foreign_index(name);
         try self.emit(.{ .call_foreign = .{ .index = foreign_idx } });
     }
 
-    fn emit_atomic_lock(self: *function_ctx) codegen_error!void {
+    fn emit_atomic_lock(self: *function_ctx) lower_error!void {
         try self.emit_foreign_call_void("std::atomic_lock");
     }
 
-    fn emit_atomic_unlock(self: *function_ctx) codegen_error!void {
+    fn emit_atomic_unlock(self: *function_ctx) lower_error!void {
         try self.emit_foreign_call_void("std::atomic_unlock");
     }
 
-    fn save_result_reg(self: *function_ctx, reg: u8) codegen_error!u8 {
+    fn save_result_reg(self: *function_ctx, reg: u8) lower_error!u8 {
         if (reg != 0) return reg;
         const tmp = try self.alloc_temp();
         try self.emit(.{ .move = .{ .dst = tmp, .src = reg } });
         return tmp;
     }
 
-    fn coerce_string(self: *function_ctx, arg_reg: u8, arg_type: type_key) codegen_error!u8 {
+    fn coerce_string(self: *function_ctx, arg_reg: u8, arg_type: type_key) lower_error!u8 {
         const name = type_key_base_name(arg_type) orelse return error.unsupported_node;
         if (std.mem.eql(u8, name, "string")) return arg_reg;
 
@@ -4899,7 +5083,7 @@ const function_ctx = struct {
         return 0;
     }
 
-    fn compile_interpolate(self: *function_ctx, args: []const ir_mod.ir_identifier) codegen_error!u8 {
+    fn compile_interpolate(self: *function_ctx, args: []const mir_mod.mir_identifier) lower_error!u8 {
         if (args.len == 0) {
             const zero_idx = try self.b.intern_const(0);
             const zero_reg = try self.alloc_temp();
@@ -4937,7 +5121,7 @@ const function_ctx = struct {
         return current_reg.?;
     }
 
-    fn compile_intrinsic(self: *function_ctx, call: ir_mod.intrinsic) codegen_error!u8 {
+    fn compile_intrinsic(self: *function_ctx, call: mir_mod.intrinsic) lower_error!u8 {
         const name = self.b.string_value(call.name);
         const def = intrinsic.lookup(name) orelse return error.unsupported_node;
         const args = call.args;
@@ -5007,7 +5191,7 @@ const function_ctx = struct {
         }
     }
 
-    fn emit_int_unary(self: *function_ctx, arg_id: ir_mod.ir_identifier, op: enum { bit_not, int_neg, int_abs }) codegen_error!u8 {
+    fn emit_int_unary(self: *function_ctx, arg_id: mir_mod.mir_identifier, op: enum { bit_not, int_neg, int_abs }) lower_error!u8 {
         const prep = try self.prep_unary(arg_id);
         switch (op) {
             .bit_not => try self.emit(.{ .bit_not = .{ .dst = prep.dst, .src_a = prep.src, .src_b = 0 } }),
@@ -5018,7 +5202,7 @@ const function_ctx = struct {
         return prep.dst;
     }
 
-    fn emit_float_unary(self: *function_ctx, arg_id: ir_mod.ir_identifier, op: enum {
+    fn emit_float_unary(self: *function_ctx, arg_id: mir_mod.mir_identifier, op: enum {
         fneg,
         fabs,
         fsqrt,
@@ -5032,7 +5216,7 @@ const function_ctx = struct {
         fceil,
         fround,
         ftrunc,
-    }) codegen_error!u8 {
+    }) lower_error!u8 {
         const prep = try self.prep_unary(arg_id);
         switch (op) {
             .fneg => try self.emit(.{ .fneg = .{ .dst = prep.dst, .src_a = prep.src, .src_b = 0 } }),
@@ -5055,8 +5239,8 @@ const function_ctx = struct {
 
     fn emit_int_binary(
         self: *function_ctx,
-        left_id: ir_mod.ir_identifier,
-        right_id: ir_mod.ir_identifier,
+        left_id: mir_mod.mir_identifier,
+        right_id: mir_mod.mir_identifier,
         op: enum {
             add,
             sub,
@@ -5079,7 +5263,7 @@ const function_ctx = struct {
             compare_gt,
             compare_ge,
         },
-    ) codegen_error!u8 {
+    ) lower_error!u8 {
         const prep = try self.prep_binary(left_id, right_id);
         switch (op) {
             .add => try self.emit(.{ .add = .{ .dst = prep.dst, .src_a = prep.left, .src_b = prep.right } }),
@@ -5109,10 +5293,10 @@ const function_ctx = struct {
 
     fn emit_float_binary(
         self: *function_ctx,
-        left_id: ir_mod.ir_identifier,
-        right_id: ir_mod.ir_identifier,
+        left_id: mir_mod.mir_identifier,
+        right_id: mir_mod.mir_identifier,
         op: enum { fadd, fsub, fmul, fdiv, frem, fmin, fmax, fcompare_eq, fcompare_lt, fcompare_gt },
-    ) codegen_error!u8 {
+    ) lower_error!u8 {
         const prep = try self.prep_binary(left_id, right_id);
         switch (op) {
             .fadd => try self.emit(.{ .fadd = .{ .dst = prep.dst, .src_a = prep.left, .src_b = prep.right } }),
@@ -5130,7 +5314,7 @@ const function_ctx = struct {
         return prep.dst;
     }
 
-    fn emit_int_not_equal(self: *function_ctx, left_id: ir_mod.ir_identifier, right_id: ir_mod.ir_identifier) codegen_error!u8 {
+    fn emit_int_not_equal(self: *function_ctx, left_id: mir_mod.mir_identifier, right_id: mir_mod.mir_identifier) lower_error!u8 {
         const prep = try self.prep_binary(left_id, right_id);
         const dst = prep.dst;
         try self.emit(.{ .compare_eq = .{ .dst = dst, .src_a = prep.left, .src_b = prep.right } });
@@ -5143,7 +5327,7 @@ const function_ctx = struct {
         return dst;
     }
 
-    fn emit_float_not_equal(self: *function_ctx, left_id: ir_mod.ir_identifier, right_id: ir_mod.ir_identifier) codegen_error!u8 {
+    fn emit_float_not_equal(self: *function_ctx, left_id: mir_mod.mir_identifier, right_id: mir_mod.mir_identifier) lower_error!u8 {
         const prep = try self.prep_binary(left_id, right_id);
         const dst = prep.dst;
         try self.emit(.{ .fcompare_eq = .{ .dst = dst, .src_a = prep.left, .src_b = prep.right } });
@@ -5158,10 +5342,10 @@ const function_ctx = struct {
 
     fn emit_float_invert_compare(
         self: *function_ctx,
-        left_id: ir_mod.ir_identifier,
-        right_id: ir_mod.ir_identifier,
+        left_id: mir_mod.mir_identifier,
+        right_id: mir_mod.mir_identifier,
         op: enum { fcompare_lt, fcompare_gt },
-    ) codegen_error!u8 {
+    ) lower_error!u8 {
         const prep = try self.prep_binary(left_id, right_id);
         const dst = prep.dst;
         switch (op) {
@@ -5189,7 +5373,7 @@ const function_ctx = struct {
         return "";
     }
 
-    fn print_foreign(self: *function_ctx, prefix: []const u8, suffix: []const u8) codegen_error!print_foreign_name {
+    fn print_foreign(self: *function_ctx, prefix: []const u8, suffix: []const u8) lower_error!print_foreign_name {
         if (prefix.len == 0) return .{ .name = suffix, .owned = false };
         const sep = "::";
         const buf = self.b.allocator.alloc(u8, prefix.len + sep.len + suffix.len) catch return error.out_of_memory;
@@ -5204,7 +5388,7 @@ const function_ctx = struct {
         prefix: []const u8,
         suffix: []const u8,
         arg_reg: ?u8,
-    ) codegen_error!void {
+    ) lower_error!void {
         const full = try self.print_foreign(prefix, suffix);
         defer if (full.owned) self.b.allocator.free(full.name);
         if (arg_reg) |reg| {
@@ -5214,7 +5398,7 @@ const function_ctx = struct {
         try self.emit(.{ .call_foreign = .{ .index = foreign_idx } });
     }
 
-    fn resolve_print_to(self: *function_ctx, arg_type: type_key) codegen_error!?function_info {
+    fn resolve_print_to(self: *function_ctx, arg_type: type_key) lower_error!?function_info {
         const group = self.b.functions.get("print_to") orelse return null;
         var call_types = [_]type_key{ .{ .name = "int" }, arg_type };
         const selected_idx = self.resolve_function_overload_index(group.items, call_types[0..]) catch |err| switch (err) {
@@ -5229,7 +5413,7 @@ const function_ctx = struct {
         info: function_info,
         arg_reg: u8,
         arg_type: type_key,
-    ) codegen_error!void {
+    ) lower_error!void {
         if (info.decl.return_type) |ret_id| {
             const ret_type = type_key_from_type_node_with_self(self.b, ret_id, info.impl_for);
             if (self.type_word_count(ret_type) > 1) return error.unsupported_node;
@@ -5253,10 +5437,10 @@ const function_ctx = struct {
     fn compile_print_call(
         self: *function_ctx,
         name: []const u8,
-        args: []const ir_mod.ir_identifier,
+        args: []const mir_mod.mir_identifier,
         suffix: []const u8,
         separator: print_separator,
-    ) codegen_error!u8 {
+    ) lower_error!u8 {
         const prefix = print_prefix(name, suffix);
         const separator_suffix = switch (separator) {
             .space => "print_sep",
@@ -5293,7 +5477,7 @@ const function_ctx = struct {
         return 0;
     }
 
-    fn emit_print_value(self: *function_ctx, prefix: []const u8, arg_id: ir_mod.ir_identifier) codegen_error!void {
+    fn emit_print_value(self: *function_ctx, prefix: []const u8, arg_id: mir_mod.mir_identifier) lower_error!void {
         var arg_type = self.infer_expr_type(arg_id);
         if (arg_type == .unknown) {
             if (self.type_name_from_value(arg_id)) |name| {
@@ -5334,7 +5518,7 @@ const function_ctx = struct {
         self.free_temp_value(arg_reg, arg_type);
     }
 
-    fn interpolation_args(self: *function_ctx, arg_id: ir_mod.ir_identifier) ?[]const ir_mod.ir_identifier {
+    fn interpolation_args(self: *function_ctx, arg_id: mir_mod.mir_identifier) ?[]const mir_mod.mir_identifier {
         const node = self.b.node(arg_id);
         return switch (node) {
             .intrinsic => |call| blk: {
@@ -5395,9 +5579,9 @@ const function_ctx = struct {
         self: *function_ctx,
         trait_name: []const u8,
         method_name: []const u8,
-        receiver_id: ir_mod.ir_identifier,
-        args: []const ir_mod.ir_identifier,
-    ) codegen_error!u8 {
+        receiver_id: mir_mod.mir_identifier,
+        args: []const mir_mod.mir_identifier,
+    ) lower_error!u8 {
         const recv_type = type_key{ .dyn_trait = trait_name };
         const recv_concrete = self.dyn_concrete_type(receiver_id);
         const recv_reg = try self.compile_expr(receiver_id);
@@ -5471,9 +5655,9 @@ const function_ctx = struct {
         return reg;
     }
 
-    fn compile_call(self: *function_ctx, id: ir_mod.ir_identifier) codegen_error!u8 {
+    fn compile_call(self: *function_ctx, id: mir_mod.mir_identifier) lower_error!u8 {
         var base_id = id;
-        var args = std.array_list.Managed(ir_mod.ir_identifier).init(self.b.allocator);
+        var args = std.array_list.Managed(mir_mod.mir_identifier).init(self.b.allocator);
         defer args.deinit();
 
         while (true) {
@@ -5491,7 +5675,7 @@ const function_ctx = struct {
             break;
         }
 
-        std.mem.reverse(ir_mod.ir_identifier, args.items);
+        std.mem.reverse(mir_mod.mir_identifier, args.items);
 
         if (args.items.len == 1 and self.is_unit(args.items[0])) {
             args.clearRetainingCapacity();
@@ -5499,11 +5683,11 @@ const function_ctx = struct {
 
         const base = try self.resolve_call_base(base_id);
         var arg_ids = args.items;
-        var arg_ids_buf: [8]ir_mod.ir_identifier = undefined;
+        var arg_ids_buf: [8]mir_mod.mir_identifier = undefined;
         if (base.receiver) |recv| {
             if (arg_ids.len + 1 > arg_ids_buf.len) return error.register_overflow;
             arg_ids_buf[0] = recv;
-            std.mem.copyForwards(ir_mod.ir_identifier, arg_ids_buf[1 .. arg_ids.len + 1], arg_ids);
+            std.mem.copyForwards(mir_mod.mir_identifier, arg_ids_buf[1 .. arg_ids.len + 1], arg_ids);
             arg_ids = arg_ids_buf[0 .. arg_ids.len + 1];
         }
 
@@ -5645,14 +5829,14 @@ const function_ctx = struct {
         return self.save_result_reg(0);
     }
 
-    fn struct_field_index(info: struct_info, name: ir_mod.string_identifier) ?usize {
+    fn struct_field_index(info: struct_info, name: mir_mod.string_identifier) ?usize {
         for (info.fields, 0..) |field, idx| {
             if (field.name.idx == name.idx) return idx;
         }
         return null;
     }
 
-    fn compile_record_literal(self: *function_ctx, rec: ir_mod.record_literal) codegen_error!u8 {
+    fn compile_record_literal(self: *function_ctx, rec: mir_mod.record_literal) lower_error!u8 {
         const type_name = self.b.string_value(rec.type_name);
         const info = self.b.structs.get(type_name) orelse return error.unsupported_node;
         const field_count = info.fields.len;
@@ -5692,9 +5876,9 @@ const function_ctx = struct {
 
     fn compile_access_ptr(
         self: *function_ctx,
-        left: ir_mod.ir_identifier,
-        right: ir_mod.ir_identifier,
-    ) codegen_error!u8 {
+        left: mir_mod.mir_identifier,
+        right: mir_mod.mir_identifier,
+    ) lower_error!u8 {
         const field_node = self.b.node(right);
         if (field_node != .identifier) return error.unsupported_node;
         const field_id = field_node.identifier;
@@ -5716,7 +5900,7 @@ const function_ctx = struct {
         return ptr_reg;
     }
 
-    fn compile_borrow_expr(self: *function_ctx, target: ir_mod.ir_identifier) codegen_error!u8 {
+    fn compile_borrow_expr(self: *function_ctx, target: mir_mod.mir_identifier) lower_error!u8 {
         const node = self.b.node(target);
         switch (node) {
             .identifier => |ident| {
@@ -5742,9 +5926,9 @@ const function_ctx = struct {
 
     fn compile_deref_expr(
         self: *function_ctx,
-        target: ir_mod.ir_identifier,
-        result_id: ir_mod.ir_identifier,
-    ) codegen_error!u8 {
+        target: mir_mod.mir_identifier,
+        result_id: mir_mod.mir_identifier,
+    ) lower_error!u8 {
         var ptr_reg = try self.compile_expr(target);
         if (ptr_reg == 0) ptr_reg = try self.save_result_reg(ptr_reg);
 
@@ -5762,7 +5946,7 @@ const function_ctx = struct {
         return reg;
     }
 
-    fn compile_box_expr(self: *function_ctx, value_id: ir_mod.ir_identifier) codegen_error!u8 {
+    fn compile_box_expr(self: *function_ctx, value_id: mir_mod.mir_identifier) lower_error!u8 {
         var value_reg = try self.compile_expr(value_id);
         if (value_reg == 0) value_reg = try self.save_result_reg(value_reg);
         const value_type = self.infer_expr_type(value_id);
@@ -5773,7 +5957,7 @@ const function_ctx = struct {
         return ptr_reg;
     }
 
-    fn compile_access(self: *function_ctx, left: ir_mod.ir_identifier, right: ir_mod.ir_identifier) codegen_error!u8 {
+    fn compile_access(self: *function_ctx, left: mir_mod.mir_identifier, right: mir_mod.mir_identifier) lower_error!u8 {
         const field_node = self.b.node(right);
         if (field_node != .identifier) return error.unsupported_node;
         const field_id = field_node.identifier;
@@ -5808,10 +5992,10 @@ const function_ctx = struct {
 
     fn compile_index_expr(
         self: *function_ctx,
-        left: ir_mod.ir_identifier,
-        right: ir_mod.ir_identifier,
-        node_id: ir_mod.ir_identifier,
-    ) codegen_error!u8 {
+        left: mir_mod.mir_identifier,
+        right: mir_mod.mir_identifier,
+        node_id: mir_mod.mir_identifier,
+    ) lower_error!u8 {
         var base_reg = try self.compile_expr(left);
         if (base_reg == 0) base_reg = try self.save_result_reg(base_reg);
 
@@ -5914,9 +6098,9 @@ const function_ctx = struct {
 
     fn compile_index_ptr(
         self: *function_ctx,
-        left: ir_mod.ir_identifier,
-        right: ir_mod.ir_identifier,
-    ) codegen_error!u8 {
+        left: mir_mod.mir_identifier,
+        right: mir_mod.mir_identifier,
+    ) lower_error!u8 {
         var base_reg = try self.compile_expr(left);
         if (base_reg == 0) base_reg = try self.save_result_reg(base_reg);
 
@@ -5976,7 +6160,7 @@ const function_ctx = struct {
         return ptr_reg;
     }
 
-    fn compile_cancel_call(self: *function_ctx, args: []const ir_mod.ir_identifier) codegen_error!u8 {
+    fn compile_cancel_call(self: *function_ctx, args: []const mir_mod.mir_identifier) lower_error!u8 {
         if (args.len != 1) return error.unsupported_node;
         const arg_reg = try self.compile_expr(args[0]);
         try self.emit(.{ .task_cancel = .{ .src = arg_reg } });
@@ -6002,18 +6186,46 @@ fn intrinsic_return_type(def: intrinsic.intrinsic_def) type_key {
     };
 }
 
-pub fn generate(
+pub fn lower(
     allocator: std.mem.Allocator,
-    nodes: []const ir_mod.ir,
+    nodes: []const mir_mod.mir,
     strings: []const []const u8,
-    roots: []const ir_mod.ir_identifier,
+    roots: []const mir_mod.mir_identifier,
     foreigns: []const []const u8,
     node_types: ?[]const type_key,
     error_state: ?*error_info,
-) codegen_error!program {
+) lower_error!core.program {
+    return lower_with_options(allocator, nodes, strings, roots, foreigns, node_types, error_state, .{});
+}
+
+pub fn lower_with_options(
+    allocator: std.mem.Allocator,
+    nodes: []const mir_mod.mir,
+    strings: []const []const u8,
+    roots: []const mir_mod.mir_identifier,
+    foreigns: []const []const u8,
+    node_types: ?[]const type_key,
+    error_state: ?*error_info,
+    options: lower_options,
+) lower_error!core.program {
     var b = builder.init(allocator, nodes, strings, roots, node_types, error_state);
     defer b.deinit();
     add_builtin_traits(&b);
+    for (roots) |root| {
+        const node = nodes[@intCast(root.idx)];
+        switch (node) {
+            .decl => |decl| switch (decl) {
+                .@"const" => |c| {
+                    const name = b.string_value(c.name);
+                    if (!b.global_consts.contains(name)) {
+                        b.global_consts.put(name, .{ .value = c.value, .ty = c.ty }) catch return error.out_of_memory;
+                    }
+                },
+                else => {},
+            },
+            else => {},
+        }
+    }
 
     var functions = std.array_list.Managed(function_info).init(allocator);
     defer functions.deinit();
@@ -6057,8 +6269,8 @@ pub fn generate(
                 .@"struct" => |st| {
                     const name = b.string_value(st.name);
                     if (!b.structs.contains(name)) {
-                        const fields = b.allocator.alloc(ir_mod.ir.struct_decl.field, st.fields.len) catch return error.out_of_memory;
-                        std.mem.copyForwards(ir_mod.ir.struct_decl.field, fields, st.fields);
+                        const fields = b.allocator.alloc(mir_mod.mir.struct_decl.field, st.fields.len) catch return error.out_of_memory;
+                        std.mem.copyForwards(mir_mod.mir.struct_decl.field, fields, st.fields);
                         b.structs.put(name, .{
                             .fields = fields,
                             .is_record = st.is_record,
@@ -6220,18 +6432,33 @@ pub fn generate(
         }
     }
 
-    const main_group = b.functions.get("main") orelse return error.missing_main;
-    var main_info: ?function_info = null;
-    for (main_group.items) |info| {
-        if (info.decl.params.len == 0) {
-            if (main_info != null) return error.ambiguous_overload;
-            main_info = info;
+    if (options.signatures) |sigs| {
+        for (functions.items) |info| {
+            const name = b.string_value(info.decl.name);
+            const duped = b.allocator.dupe(u8, name) catch return error.out_of_memory;
+            sigs.append(.{
+                .name = duped,
+                .label = info.label,
+                .param_count = info.decl.params.len,
+                .is_method = info.impl_for != null,
+            }) catch return error.out_of_memory;
         }
     }
-    if (main_info == null) return error.missing_main;
 
-    try b.emit(.{ .call = .{ .target = main_info.?.label } });
-    try b.emit(.{ .halt = {} });
+    if (options.require_main) {
+        const main_group = b.functions.get("main") orelse return error.missing_main;
+        var main_info: ?function_info = null;
+        for (main_group.items) |info| {
+            if (info.decl.params.len == 0) {
+                if (main_info != null) return error.ambiguous_overload;
+                main_info = info;
+            }
+        }
+        if (main_info == null) return error.missing_main;
+
+        try b.emit(.{ .call = .{ .target = main_info.?.label } });
+        try b.emit(.{ .halt = {} });
+    }
 
     for (functions.items) |info| {
         if (info.decl.generics.len != 0) continue;

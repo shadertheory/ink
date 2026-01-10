@@ -9,6 +9,7 @@ pub const value = values;
 pub const instruction = exe.instruction; 
 pub const register = vm.register;
 pub const bytecode = assembly.bytecode;
+pub const register_count = assembly.register_count;
 pub const op = @import("vm/op.zig");
 pub const encode = @import("vm/encode.zig");
 pub const inkb = @import("vm/inkb.zig");
