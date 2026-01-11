@@ -1256,7 +1256,10 @@ fn auto_trait_sized(
             break :blk true;
         },
         .applied => |ap| blk: {
-            if (std.mem.eql(u8, ap.base, "ref") or std.mem.eql(u8, ap.base, "ref_mut") or std.mem.eql(u8, ap.base, "box") or std.mem.eql(u8, ap.base, "slice") or std.mem.eql(u8, ap.base, "task") or std.mem.eql(u8, ap.base, "atomic")) {
+            if (std.mem.eql(u8, ap.base, "slice")) {
+                break :blk false;
+            }
+            if (std.mem.eql(u8, ap.base, "ref") or std.mem.eql(u8, ap.base, "ref_mut") or std.mem.eql(u8, ap.base, "box") or std.mem.eql(u8, ap.base, "task") or std.mem.eql(u8, ap.base, "atomic")) {
                 break :blk true;
             }
             if (std.mem.eql(u8, ap.base, "array")) {
@@ -3542,10 +3545,6 @@ const function_ctx = struct {
                 return reg;
             },
             .dynamic, .@"comptime" => return self.compile_expr(un.right),
-            .box => return self.compile_box_expr(un.right),
-            .sleep => return self.compile_sleep_expr(un.right),
-            .timeout => return self.compile_timeout_expr(un.right),
-            .deadline => return self.compile_deadline_expr(un.right),
             .spawn => return self.compile_spawn_expr(un.right),
             .await => return self.compile_await_expr(un.right),
             .@"try" => return self.compile_try_expr(un.right),
@@ -3709,42 +3708,6 @@ const function_ctx = struct {
             .select_expr => |se| return self.compile_select_expr(id, se.arms),
             else => return error.unsupported_node,
         };
-    }
-
-    fn compile_sleep_expr(self: *function_ctx, arg_id: mir_mod.mir_identifier) lower_error!u8 {
-        const arg_type = self.infer_expr_type(arg_id);
-        if (type_key_base_name(arg_type)) |name| {
-            if (std.mem.eql(u8, name, "deadline") or std.mem.eql(u8, name, "instant")) {
-                _ = try self.emit_foreign_call_named("std::sleep_until", &[_]mir_mod.mir_identifier{arg_id});
-                return self.save_result_reg(0);
-            }
-        }
-        _ = try self.emit_foreign_call_named("std::sleep", &[_]mir_mod.mir_identifier{arg_id});
-        return self.save_result_reg(0);
-    }
-
-    fn compile_timeout_expr(self: *function_ctx, arg_id: mir_mod.mir_identifier) lower_error!u8 {
-        _ = try self.emit_foreign_call_named("std::timeout", &[_]mir_mod.mir_identifier{arg_id});
-        return self.save_result_reg(0);
-    }
-
-    fn compile_deadline_expr(self: *function_ctx, arg_id: mir_mod.mir_identifier) lower_error!u8 {
-        const arg_type = self.infer_expr_type(arg_id);
-        if (type_key_base_name(arg_type)) |name| {
-            if (std.mem.eql(u8, name, "deadline")) {
-                return self.compile_expr(arg_id);
-            }
-            if (std.mem.eql(u8, name, "duration")) {
-                _ = try self.emit_foreign_call_named("std::timeout", &[_]mir_mod.mir_identifier{arg_id});
-                return self.save_result_reg(0);
-            }
-            if (std.mem.eql(u8, name, "instant")) {
-                _ = try self.emit_foreign_call_named("std::deadline", &[_]mir_mod.mir_identifier{arg_id});
-                return self.save_result_reg(0);
-            }
-        }
-        _ = try self.emit_foreign_call_named("std::deadline", &[_]mir_mod.mir_identifier{arg_id});
-        return self.save_result_reg(0);
     }
 
     fn compile_yield_expr(self: *function_ctx, value: ?mir_mod.mir_identifier) lower_error!u8 {
@@ -5183,6 +5146,37 @@ const function_ctx = struct {
             .alloc => return self.emit_foreign_call_named("std::alloc", args),
             .free => return self.emit_foreign_call_named("std::free", args),
             .deref => return self.emit_foreign_call_named("std::deref", args),
+            .type_words => return blk: {
+                if (args.len != 1) return error.unsupported_node;
+                const arg_id = args[0];
+                var ty: type_key = .unknown;
+                const arg_node = self.b.node(arg_id);
+                if (arg_node == .identifier) {
+                    const ident = arg_node.identifier;
+                    const ident_name = self.b.string_value(ident);
+                    if (self.locals.get(ident_name) != null) {
+                        ty = self.local_types.get(ident_name) orelse .unknown;
+                    } else if (lookup_generic(self.bindings, ident_name)) |binding| {
+                        ty = binding;
+                    } else if (is_builtin_type_name(ident_name) or self.b.structs.contains(ident_name) or self.b.traits.contains(ident_name)) {
+                        ty = .{ .name = ident_name };
+                    } else {
+                        ty = self.infer_expr_type(arg_id);
+                    }
+                } else {
+                    ty = self.infer_expr_type(arg_id);
+                }
+                if (ty == .unknown) {
+                    self.b.set_error_message(arg_id, "type_words expects a known type");
+                    return error.unsupported_node;
+                }
+                if (!type_satisfies_trait_root(self.b, ty, "sized")) {
+                    self.b.set_error_message(arg_id, "type_words expects a sized type");
+                    return error.unsupported_node;
+                }
+                const words = word_count_for_type(self.b, ty);
+                break :blk self.load_const_reg(@intCast(words));
+            },
             .result_ok => return self.emit_foreign_call_named("std::result_ok", args),
             .result_err => return self.emit_foreign_call_named("std::result_err", args),
             .result_is_ok => return self.emit_foreign_call_named("std::result_is_ok", args),
@@ -5946,17 +5940,6 @@ const function_ctx = struct {
         return reg;
     }
 
-    fn compile_box_expr(self: *function_ctx, value_id: mir_mod.mir_identifier) lower_error!u8 {
-        var value_reg = try self.compile_expr(value_id);
-        if (value_reg == 0) value_reg = try self.save_result_reg(value_reg);
-        const value_type = self.infer_expr_type(value_id);
-        const words = self.type_word_count(value_type);
-        const ptr_reg = try self.alloc_words(words);
-        try self.store_words_to_ptr(ptr_reg, value_reg, words);
-        if (self.is_temp(value_reg)) self.free_temp_words(value_reg, words);
-        return ptr_reg;
-    }
-
     fn compile_access(self: *function_ctx, left: mir_mod.mir_identifier, right: mir_mod.mir_identifier) lower_error!u8 {
         const field_node = self.b.node(right);
         if (field_node != .identifier) return error.unsupported_node;
@@ -6173,7 +6156,7 @@ fn intrinsic_return_type(def: intrinsic.intrinsic_def) type_key {
     return switch (def.id) {
         .iadd, .isub, .imul, .idiv, .irem, .imin, .imax, .ineg, .iabs,
         .bnot, .band, .bor, .bxor, .shl, .shr, .sar, .rol, .ror,
-        .alloc, .deref => .{ .name = "int" },
+        .alloc, .deref, .type_words => .{ .name = "int" },
         .ieq, .ine, .ilt, .ile, .igt, .ige => .{ .name = "bool" },
         .fadd, .fsub, .fmul, .fdiv, .frem, .fmin, .fmax, .fneg, .fabs,
         .sqrt, .sin, .cos, .tan, .asin, .acos, .atan, .floor, .ceil, .round, .trunc => .{ .name = "float" },

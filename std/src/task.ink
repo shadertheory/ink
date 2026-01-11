@@ -1,6 +1,14 @@
 type timeout = int
 
 #[foreign] fn cancelled() -> bool
+#[foreign] fn timeout(duration: duration) -> deadline
+#[foreign] fn deadline(value: instant) -> deadline
+
+fn deadline(value: deadline) -> deadline
+	value
+
+fn deadline(value: duration) -> deadline
+	timeout(value)
 
 fn cancel<T: type>(task: task<T>)
 	0

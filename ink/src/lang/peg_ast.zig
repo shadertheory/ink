@@ -2166,11 +2166,11 @@ pub const builder = struct {
             return self.fail(.unexpected_node, id);
         }
         idx += 1;
-        const first_token = self.name_token_of(children[idx]);
-        if (first_token == null) {
+        const first_name = self.qualified_name_of(children[idx]);
+        if (first_name == null) {
             return self.fail(.unexpected_node, id);
         }
-        const first = first_token.?.what;
+        const first = first_name.?;
         idx += 1;
         var alias: ?ink.identifier = null;
         if (idx + 1 < children.len and self.is_terminal(children[idx], .as)) {
@@ -2184,11 +2184,11 @@ pub const builder = struct {
         var module = first;
         var item: ?ink.identifier = null;
         if (idx + 1 < children.len and self.is_terminal(children[idx], .from)) {
-            const module_token = self.name_token_of(children[idx + 1]);
-            if (module_token == null) {
+            const module_name = self.qualified_name_of(children[idx + 1]);
+            if (module_name == null) {
                 return self.fail(.unexpected_node, id);
             }
-            module = module_token.?.what;
+            module = module_name.?;
             item = first;
             idx += 2;
         }
@@ -3107,6 +3107,51 @@ pub const builder = struct {
         }
         if (self.is_name_token(id)) return self.token_of(id);
         return null;
+    }
+
+    fn qualified_name_of(self: *builder, id: peg_parser.node_id) ?ink.identifier {
+        if (!self.is_nonterminal(id, .qualified_name)) {
+            const tok = self.name_token_of(id) orelse return null;
+            return tok.what;
+        }
+
+        const children = self.child_nodes(id);
+        var parts = std.array_list.Managed([]const u8).init(self.allocator);
+        defer parts.deinit();
+
+        var start: usize = 0;
+        var end: usize = 0;
+        for (children) |child| {
+            const tok = self.name_token_of(child) orelse continue;
+            if (parts.items.len == 0) start = tok.where.start;
+            end = tok.where.end;
+            parts.append(tok.what.string) catch return null;
+        }
+
+        if (parts.items.len == 0) return null;
+
+        var total: usize = 0;
+        for (parts.items, 0..) |part, idx| {
+            total += part.len;
+            if (idx > 0) total += 2;
+        }
+        var buf = self.allocator.alloc(u8, total) catch return null;
+        var offset: usize = 0;
+        for (parts.items, 0..) |part, idx| {
+            if (idx > 0) {
+                buf[offset] = ':';
+                buf[offset + 1] = ':';
+                offset += 2;
+            }
+            std.mem.copyForwards(u8, buf[offset .. offset + part.len], part);
+            offset += part.len;
+        }
+
+        return .{
+            .string = buf,
+            .owner = .ref,
+            .where = .{ .start = start, .end = end },
+        };
     }
 
     fn is_name_node(self: *builder, id: peg_parser.node_id) bool {

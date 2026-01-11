@@ -2532,6 +2532,7 @@ fn infer_intrinsic(ctx: *typecheck_ctx, call: uir_intrinsic, self_name: ?[]const
     if (std.mem.eql(u8, name, "alloc")) return ctx.types.named("int");
     if (std.mem.eql(u8, name, "free")) return ctx.types.named("unit");
     if (std.mem.eql(u8, name, "deref")) return ctx.types.named("int");
+    if (std.mem.eql(u8, name, "type_words")) return ctx.types.named("int");
     if (std.mem.eql(u8, name, "store")) return ctx.types.named("unit");
     if (std.mem.eql(u8, name, "result_ok")) return ctx.types.named("int");
     if (std.mem.eql(u8, name, "result_err")) return ctx.types.named("int");
@@ -3256,7 +3257,10 @@ fn auto_trait_sized(
             break :blk true;
         },
         .applied => |ap| blk: {
-            if (std.mem.eql(u8, ap.base, "ref") or std.mem.eql(u8, ap.base, "ref_mut") or std.mem.eql(u8, ap.base, "box") or std.mem.eql(u8, ap.base, "slice") or std.mem.eql(u8, ap.base, "task") or std.mem.eql(u8, ap.base, "atomic")) {
+            if (std.mem.eql(u8, ap.base, "slice")) {
+                break :blk false;
+            }
+            if (std.mem.eql(u8, ap.base, "ref") or std.mem.eql(u8, ap.base, "ref_mut") or std.mem.eql(u8, ap.base, "box") or std.mem.eql(u8, ap.base, "task") or std.mem.eql(u8, ap.base, "atomic")) {
                 break :blk true;
             }
             if (std.mem.eql(u8, ap.base, "array")) {

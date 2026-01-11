@@ -287,6 +287,7 @@ pub const resolver = struct {
         try ctx.base_types.put("fn", type_flag_other);
         try ctx.base_types.put("slice", type_flag_other);
         try ctx.base_types.put("array", type_flag_other);
+        try ctx.base_types.put("list", type_flag_other);
         try ctx.base_types.put("box", type_flag_other);
         try ctx.base_types.put("atomic", type_flag_other);
         try ctx.base_types.put("duration", type_flag_other);

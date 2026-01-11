@@ -1400,6 +1400,9 @@ fn collect_node_spans(map: *std.AutoHashMap(usize, semantic_span), node: *const 
                 if (assoc.value) |ref| try collect_node_spans(map, ink.ast.deref(ref));
             }
         },
+        .macro_call => |mc| {
+            try mark_macro_target(map, ink.ast.deref(mc.target));
+        },
         .intrinsic => |call| {
             try record_ident(map, call.name, .operator);
             for (call.args) |ref| try collect_node_spans(map, ink.ast.deref(ref));
@@ -1524,6 +1527,24 @@ fn mark_call_target(map: *std.AutoHashMap(usize, semantic_span), node: *const in
     }
 }
 
+fn mark_macro_target(map: *std.AutoHashMap(usize, semantic_span), node: *const ink.node) semantic_error!void {
+    switch (node.*) {
+        .identifier => |id| try record_ident(map, id, .operator),
+        .binary => |bin| {
+            if (bin.op == .scope_access) {
+                const left = ink.ast.deref(bin.left);
+                const right = ink.ast.deref(bin.right);
+                if (left.* == .identifier) try record_ident(map, left.identifier, .namespace);
+                if (right.* == .identifier) try record_ident(map, right.identifier, .operator);
+            } else if (bin.op == .access) {
+                const right = ink.ast.deref(bin.right);
+                if (right.* == .identifier) try record_ident(map, right.identifier, .operator);
+            }
+        },
+        else => {},
+    }
+}
+
 fn build_line_offsets(allocator: mem_allocator, text: []const u8) ![]usize {
     var offsets = std.array_list.Managed(usize).init(allocator);
     errdefer offsets.deinit();
@@ -1554,6 +1575,7 @@ fn semantic_token_type_for(
         .identifier => {
             if (next) |next_kind| {
                 if (next_kind == .paren_left) return .function;
+                if (next_kind == .bang) return .operator;
             }
             if (prev) |prev_kind| {
                 return switch (prev_kind) {
@@ -3688,7 +3710,7 @@ fn build_ast_cache(allocator: mem_allocator, text: []const u8) !ast_cache {
     var ast_error: ?ink.peg_ast.error_info = null;
 
     if (parse.ok) {
-        var builder = ink.peg_ast.builder.init(parse.arena.allocator(), tokens, &parse.tree);
+        var builder = ink.peg_ast.builder.init(parse.arena.allocator(), tokens, &parse.tree, text);
         const built = builder.build_program(parse.root.?) catch blk: {
             ast_error = builder.last_error;
             break :blk null;

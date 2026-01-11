@@ -14,6 +14,16 @@ pub const import_decl = struct {
     alias: ?ink.identifier = null,
 };
 
+pub const prelude_spec = struct {
+    std_items: []const []const u8 = &.{},
+    std_scopes: []const []const u8 = &.{},
+};
+
+pub const default_prelude = prelude_spec{
+    .std_items = &.{ "box_new", "sleep", "timeout", "deadline" },
+    .std_scopes = &.{},
+};
+
 const symbol_import = struct {
     module: []const u8,
     item: []const u8,
@@ -50,8 +60,14 @@ const desugarer = struct {
     operator_unary: std.AutoHashMap(ink.unary, operator_target),
     operator_binary: std.AutoHashMap(ink.binary, operator_target),
     with_counter: usize,
+    prelude: prelude_spec,
 
-    fn init(node_allocator: mem_allocator, allocator: mem_allocator, diags: *array_list(diagnostic)) desugarer {
+    fn init(
+        node_allocator: mem_allocator,
+        allocator: mem_allocator,
+        diags: *array_list(diagnostic),
+        prelude: prelude_spec,
+    ) desugarer {
         return .{
             .node_allocator = node_allocator,
             .allocator = allocator,
@@ -65,6 +81,7 @@ const desugarer = struct {
             .operator_unary = std.AutoHashMap(ink.unary, operator_target).init(allocator),
             .operator_binary = std.AutoHashMap(ink.binary, operator_target).init(allocator),
             .with_counter = 0,
+            .prelude = prelude,
         };
     }
 
@@ -91,20 +108,88 @@ const desugarer = struct {
                 return;
             }
             try self.symbol_imports.put(alias.string, .{ .module = imp.module.string, .item = item.string });
+            if (!self.module_map.contains(imp.module.string)) {
+                try self.module_map.put(imp.module.string, imp.module.string);
+            }
         } else {
             const alias = imp.alias orelse imp.module;
             if (self.import_map.contains(alias.string) or self.symbol_imports.contains(alias.string)) {
                 try self.add_error("duplicate import alias", alias.where);
                 return;
             }
-            if (self.module_map.contains(imp.module.string)) {
-                try self.add_error("duplicate import", imp.module.where);
-                return;
+            if (self.module_map.get(imp.module.string)) |existing_alias| {
+                if (self.import_map.contains(existing_alias)) {
+                    try self.add_error("duplicate import", imp.module.where);
+                    return;
+                }
             }
             try self.import_map.put(alias.string, imp.module.string);
             try self.module_map.put(imp.module.string, alias.string);
         }
         try self.imports.append(.{ .module = imp.module, .item = imp.item, .alias = imp.alias });
+    }
+
+    fn module_alias(self: *desugarer, module_name: []const u8) []const u8 {
+        return self.module_map.get(module_name) orelse module_name;
+    }
+
+    fn prelude_has_std_item(self: *desugarer, name: []const u8) bool {
+        for (self.prelude.std_items) |item| {
+            if (std.mem.eql(u8, item, name)) return true;
+        }
+        return false;
+    }
+
+    fn prelude_has_std_scope(self: *desugarer, name: []const u8) bool {
+        for (self.prelude.std_scopes) |scope| {
+            if (std.mem.eql(u8, scope, name)) return true;
+        }
+        return false;
+    }
+
+    fn ensure_module_import(self: *desugarer, module_name: []const u8) desugar_error!void {
+        if (self.module_map.contains(module_name)) return;
+        const loc = ink.location{ .start = 0, .end = 0 };
+        const imp = ink.ast.import_decl{
+            .attributes = &[_]ink.ast.attribute{},
+            .module = .{ .string = module_name, .owner = .ref, .where = loc },
+            .item = null,
+            .alias = null,
+            .where = loc,
+        };
+        try self.add_import(imp);
+    }
+
+    fn ensure_prelude_std_item(self: *desugarer, name: []const u8) desugar_error!void {
+        if (!self.prelude_has_std_item(name)) return;
+        if (self.symbol_imports.contains(name)) return;
+        const loc = ink.location{ .start = 0, .end = 0 };
+        const imp = ink.ast.import_decl{
+            .attributes = &[_]ink.ast.attribute{},
+            .module = .{ .string = "std", .owner = .ref, .where = loc },
+            .item = .{ .string = name, .owner = .ref, .where = loc },
+            .alias = null,
+            .where = loc,
+        };
+        try self.add_import(imp);
+    }
+
+    fn qualify_imported_symbol(self: *desugarer, sym: symbol_import) desugar_error![]const u8 {
+        const alias = self.module_alias(sym.module);
+        return self.qualify_name(alias, sym.item);
+    }
+
+    fn call_prelude_std(
+        self: *desugarer,
+        origin_node: *ink.node,
+        name: []const u8,
+        args: []const *ink.node,
+    ) desugar_error!*ink.node {
+        try self.ensure_prelude_std_item(name);
+        const where = node_location(origin_node);
+        const base = try self.new_identifier(origin_node, name, where);
+        const qualified = try self.desugar_node(base);
+        return self.call_with_args(origin_node, qualified, args);
     }
 
     fn collect_imports(self: *desugarer, nodes: []const *ink.node) desugar_error!void {
@@ -257,7 +342,7 @@ const desugarer = struct {
             .identifier => |id| {
                 if (id.owner == .ref) {
                     if (self.symbol_imports.get(id.string)) |sym| {
-                        const qualified = try self.qualify_name(sym.module, sym.item);
+                        const qualified = try self.qualify_imported_symbol(sym);
                         node.* = .{ .identifier = .{
                             .string = qualified,
                             .owner = id.owner,
@@ -269,6 +354,13 @@ const desugarer = struct {
             },
             .unary => |un| {
                 const right = try self.desugar_node(ink.ast.deref(un.right));
+                switch (un.op) {
+                    .box => return self.call_prelude_std(node, "box_new", &.{right}),
+                    .sleep => return self.call_prelude_std(node, "sleep", &.{right}),
+                    .timeout => return self.call_prelude_std(node, "timeout", &.{right}),
+                    .deadline => return self.call_prelude_std(node, "deadline", &.{right}),
+                    else => {},
+                }
                 if (self.operator_unary.get(un.op)) |target| {
                     const loc = node_location(right);
                     const base = try self.new_identifier(node, target.name, loc);
@@ -570,7 +662,7 @@ const desugarer = struct {
                 }
                 if (id.owner == .ref) {
                     if (self.symbol_imports.get(id.string)) |sym| {
-                        const qualified = try self.qualify_name(sym.module, sym.item);
+                        const qualified = try self.qualify_imported_symbol(sym);
                         return .{ .name = .{
                             .string = qualified,
                             .owner = id.owner,
@@ -907,26 +999,109 @@ const desugarer = struct {
         return self.new_node(origin_node, .{ .record = .{ .items = items } });
     }
 
+    fn collect_scope_parts(self: *desugarer, node: *ink.node, out: *array_list(ink.identifier)) bool {
+        switch (node.*) {
+            .identifier => |id| {
+                if (std.mem.indexOf(u8, id.string, "::")) |first_idx| {
+                    var idx: usize = 0;
+                    var next: ?usize = first_idx;
+                    while (true) {
+                        const end_idx = next orelse id.string.len;
+                        const part = id.string[idx..end_idx];
+                        out.append(.{ .string = part, .owner = id.owner, .where = id.where }) catch return false;
+                        if (next == null) break;
+                        idx = end_idx + 2;
+                        next = std.mem.indexOfPos(u8, id.string, idx, "::");
+                    }
+                    return true;
+                }
+                out.append(id) catch return false;
+                return true;
+            },
+            .binary => |bin| {
+                if (bin.op != .scope_access) return false;
+                const left = ink.ast.deref(bin.left);
+                const right = ink.ast.deref(bin.right);
+                if (!collect_scope_parts(self, left, out)) return false;
+                if (!collect_scope_parts(self, right, out)) return false;
+                return true;
+            },
+            else => return false,
+        }
+    }
+
+    fn join_scope_parts(self: *desugarer, parts: []const ink.identifier) desugar_error![]const u8 {
+        if (parts.len == 0) return "";
+        var total: usize = 0;
+        for (parts, 0..) |part, idx| {
+            total += part.string.len;
+            if (idx > 0) total += 2;
+        }
+        var buf = try self.node_allocator.alloc(u8, total);
+        var offset: usize = 0;
+        for (parts, 0..) |part, idx| {
+            if (idx > 0) {
+                buf[offset] = ':';
+                buf[offset + 1] = ':';
+                offset += 2;
+            }
+            std.mem.copyForwards(u8, buf[offset .. offset + part.string.len], part.string);
+            offset += part.string.len;
+        }
+        return buf;
+    }
+
     fn desugar_scope_access(self: *desugarer, origin_node: *ink.node, left: *ink.node, right: *ink.node) desugar_error!*ink.node {
-        if (left.* != .identifier or right.* != .identifier) {
+        var parts = array_list(ink.identifier).init(self.node_allocator);
+        defer parts.deinit();
+
+        if (!self.collect_scope_parts(left, &parts) or !self.collect_scope_parts(right, &parts)) {
             try self.add_error("scope access requires identifiers", null);
             return origin_node;
         }
 
-        const left_id = left.identifier;
-        const right_id = right.identifier;
-        const is_builtin_scope = std.mem.eql(u8, left_id.string, "error");
-        const has_scope = std.mem.indexOf(u8, left_id.string, "::") != null or
-            self.import_map.contains(left_id.string) or
-            self.scope_map.contains(left_id.string) or
-            is_builtin_scope;
-        if (!has_scope) {
-            try self.add_error("unknown import", left_id.where);
+        if (parts.items.len < 2) {
+            try self.add_error("scope access requires identifiers", null);
+            return origin_node;
         }
 
-        const qualified = try self.qualify_name(left_id.string, right_id.string);
-        const where = ink.location{ .start = left_id.where.start, .end = right_id.where.end };
-        return self.new_identifier(origin_node, qualified, where);
+        const path = try self.join_scope_parts(parts.items);
+        const head = parts.items[0].string;
+        const where = ink.location{
+            .start = parts.items[0].where.start,
+            .end = parts.items[parts.items.len - 1].where.end,
+        };
+        const is_builtin_scope = std.mem.eql(u8, head, "error");
+        const has_scope = self.import_map.contains(head) or
+            self.scope_map.contains(head) or
+            self.module_map.contains(head) or
+            is_builtin_scope;
+
+        if (self.symbol_imports.get(path)) |sym| {
+            const qualified = try self.qualify_imported_symbol(sym);
+            return self.new_identifier(origin_node, qualified, where);
+        }
+
+        if (!has_scope and self.prelude_has_std_item(path)) {
+            try self.ensure_prelude_std_item(path);
+            if (self.symbol_imports.get(path)) |sym| {
+                const qualified = try self.qualify_imported_symbol(sym);
+                return self.new_identifier(origin_node, qualified, where);
+            }
+        }
+
+        if (!has_scope and self.prelude_has_std_scope(head)) {
+            try self.ensure_module_import("std");
+            const std_alias = self.module_alias("std");
+            const qualified = try self.qualify_name(std_alias, path);
+            return self.new_identifier(origin_node, qualified, where);
+        }
+
+        if (!has_scope) {
+            try self.add_error("unknown import", where);
+        }
+
+        return self.new_identifier(origin_node, path, where);
     }
 
     fn qualify_name(self: *desugarer, alias: []const u8, name: []const u8) desugar_error![]const u8 {
@@ -1055,8 +1230,9 @@ pub fn desugar(
     allocator: mem_allocator,
     nodes: []const *ink.node,
     diags: *array_list(diagnostic),
+    prelude: prelude_spec,
 ) desugar_error!result {
-    var d = desugarer.init(node_allocator, allocator, diags);
+    var d = desugarer.init(node_allocator, allocator, diags, prelude);
     defer d.deinit();
 
     try d.collect_imports(nodes);

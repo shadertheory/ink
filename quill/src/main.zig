@@ -7,7 +7,7 @@ const mem_allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 const array_list = std.array_list.Managed;
 
-const Command = enum { build, run, env, install, help };
+const Command = enum { build, run, sim, init, new, env, install, help };
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -27,8 +27,11 @@ pub fn main() !void {
 
     const cmd = parse_command(args[1]);
     switch (cmd) {
-        .build => handle_build(allocator, args[2..], false) catch |err| try handle_usage_error(err, args[0]),
-        .run => handle_build(allocator, args[2..], true) catch |err| try handle_usage_error(err, args[0]),
+        .build => handle_build(allocator, args[2..], false, null) catch |err| try handle_usage_error(err, args[0]),
+        .run => handle_build(allocator, args[2..], true, null) catch |err| try handle_usage_error(err, args[0]),
+        .sim => handle_build(allocator, args[2..], true, "sim") catch |err| try handle_usage_error(err, args[0]),
+        .init => handle_init(allocator, args[2..]) catch |err| try handle_usage_error(err, args[0]),
+        .new => handle_new(allocator, args[2..]) catch |err| try handle_usage_error(err, args[0]),
         .env => handle_env(allocator) catch |err| try handle_usage_error(err, args[0]),
         .install => handle_install(allocator, args[2..]) catch |err| try handle_usage_error(err, args[0]),
         .help => {
@@ -43,6 +46,9 @@ pub fn main() !void {
 fn parse_command(arg: []const u8) Command {
     if (std.mem.eql(u8, arg, "build")) return .build;
     if (std.mem.eql(u8, arg, "run")) return .run;
+    if (std.mem.eql(u8, arg, "sim")) return .sim;
+    if (std.mem.eql(u8, arg, "init")) return .init;
+    if (std.mem.eql(u8, arg, "new")) return .new;
     if (std.mem.eql(u8, arg, "env")) return .env;
     if (std.mem.eql(u8, arg, "install")) return .install;
     return .help;
@@ -57,11 +63,15 @@ fn print_usage(writer: *std.Io.Writer, exe_name: []const u8) !void {
         "Commands:\n" ++
             "  build        Compile the current package\n" ++
             "  run          Compile and run the current package\n" ++
+            "  sim          Compile and run using the sim profile\n" ++
+            "  init         Initialize a package in the current directory\n" ++
+            "  new          Create a new package in a directory\n" ++
             "  env          Print PATH instructions for zig-out/bin\n" ++
             "  install      Install tools to a prefix\n" ++
-            "Options:\n" ++
+        "Options:\n" ++
             "  --manifest <path>  Path to package.ink or package dir (default: .)\n" ++
             "  --out <path>       Output .inkb path (build only)\n" ++
+            "  --profile <name>   Build profile to use (build/run)\n" ++
             "  --target <target>  Target backend (build/run)\n" ++
             "  --prefix <path>    Install prefix (install only)\n",
     );
@@ -88,10 +98,11 @@ fn resolve_manifest_root(allocator: mem_allocator, path: []const u8) ![]const u8
     return duped;
 }
 
-fn handle_build(allocator: mem_allocator, args: []const []const u8, run_after: bool) !void {
+fn handle_build(allocator: mem_allocator, args: []const []const u8, run_after: bool, forced_profile: ?[]const u8) !void {
     var manifest_path: []const u8 = ".";
     var out_path: ?[]const u8 = null;
     var target_text: ?[]const u8 = null;
+    var profile: ?[]const u8 = forced_profile;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -111,6 +122,13 @@ fn handle_build(allocator: mem_allocator, args: []const []const u8, run_after: b
         if (std.mem.eql(u8, arg, "--target") or std.mem.eql(u8, arg, "-t")) {
             if (i + 1 >= args.len) return error.InvalidArgs;
             target_text = args[i + 1];
+            i += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--profile")) {
+            if (i + 1 >= args.len) return error.InvalidArgs;
+            if (forced_profile != null) return error.InvalidArgs;
+            profile = args[i + 1];
             i += 1;
             continue;
         }
@@ -180,6 +198,10 @@ fn handle_build(allocator: mem_allocator, args: []const []const u8, run_after: b
     try extra_args.append(root_dir);
     try extra_args.append("--output");
     try extra_args.append(final_out);
+    if (profile) |name| {
+        try extra_args.append("--profile");
+        try extra_args.append(name);
+    }
     if (target_text) |text| {
         try extra_args.append("--target");
         try extra_args.append(text);
@@ -191,11 +213,100 @@ fn handle_build(allocator: mem_allocator, args: []const []const u8, run_after: b
     if (!term_ok(compile_term)) return error.CompileFailed;
 
     if (run_after) {
+        if (profile != null and std.mem.eql(u8, profile.?, "sim")) {
+            const inkvm_args = try build_tool_args(allocator, inkvm_path.?, &.{ "--sim", final_out });
+            defer allocator.free(inkvm_args);
+            const run_term = try run_tool(allocator, inkvm_args, root_dir);
+            if (!term_ok(run_term)) return error.RunFailed;
+            return;
+        }
         const inkvm_args = try build_tool_args(allocator, inkvm_path.?, &.{final_out});
         defer allocator.free(inkvm_args);
         const run_term = try run_tool(allocator, inkvm_args, root_dir);
         if (!term_ok(run_term)) return error.RunFailed;
     }
+}
+
+fn handle_init(allocator: mem_allocator, args: []const []const u8) !void {
+    if (args.len != 0) return error.InvalidArgs;
+    try write_project_templates(allocator, ".");
+}
+
+fn handle_new(allocator: mem_allocator, args: []const []const u8) !void {
+    if (args.len != 1) return error.InvalidArgs;
+    const dir = args[0];
+    try std.fs.cwd().makePath(dir);
+    try write_project_templates(allocator, dir);
+}
+
+fn write_project_templates(allocator: mem_allocator, root_dir: []const u8) !void {
+    const package_template =
+        "import build\n\n" ++
+        "fn package()\n" ++
+        "\tbuild::package\n" ++
+        "\t\tname = \"app\"\n" ++
+        "\t\tversion = \"0.1.0\"\n" ++
+        "\t\troot = \"src\"\n" ++
+        "\t\tprofile = build::profile\n" ++
+        "\t\t\tname = \"debug\"\n" ++
+        "\t\t\ttarget = \"vm\"\n" ++
+        "\t\tprofile = build::profile\n" ++
+        "\t\t\tname = \"release\"\n" ++
+        "\t\t\ttarget = \"vm\"\n" ++
+        "\t\tprofile = build::profile\n" ++
+        "\t\t\tname = \"sim\"\n" ++
+        "\t\t\ttarget = \"vm\"\n" ++
+        "\t\tmodule = build::module\n" ++
+        "\t\t\tname = \"app\"\n" ++
+        "\t\t\tsources = \"src\"\n";
+    const simulator_template =
+        "import sim\n\n" ++
+        "fn simulator()\n" ++
+        "\tsim::simulator\n" ++
+        "\t\tseed = 0\n" ++
+        "\t\tconcurrency = \"half\"\n" ++
+        "\t\tsnapshots = sim::snapshots\n" ++
+        "\t\t\tsteps = 1\n" ++
+        "\t\t\tmode = \"full+delta\"\n" ++
+        "\t\t\tcompress = \"zstd\"\n" ++
+        "\t\tvalidation = sim::validation\n" ++
+        "\t\t\tlevel = \"strict\"\n" ++
+        "\t\tscenario = sim::scenario\n" ++
+        "\t\t\tname = \"default\"\n" ++
+        "\t\t\tcomponents = sim::components\n" ++
+        "\t\t\t\ttcp = \"mock\"\n" ++
+        "\t\t\t\tudp = \"mock\"\n" ++
+        "\t\t\t\tfs = \"real\"\n" ++
+        "\t\t\t\tclock = \"sim\"\n" ++
+        "\t\t\t\trng = \"sim\"\n" ++
+        "\t\t\t\talloc = \"sim\"\n" ++
+        "\t\t\t\tscheduler = \"sim\"\n" ++
+        "\t\t\tfaults = sim::faults\n";
+    const main_template =
+        "fn main() -> int\n" ++
+        "\t0\n";
+
+    const package_path = try std.fs.path.join(allocator, &.{ root_dir, "package.ink" });
+    defer allocator.free(package_path);
+    try write_new_file(package_path, package_template);
+
+    const simulator_path = try std.fs.path.join(allocator, &.{ root_dir, "simulator.ink" });
+    defer allocator.free(simulator_path);
+    try write_new_file(simulator_path, simulator_template);
+
+    const src_dir = try std.fs.path.join(allocator, &.{ root_dir, "src" });
+    defer allocator.free(src_dir);
+    try std.fs.cwd().makePath(src_dir);
+
+    const main_path = try std.fs.path.join(allocator, &.{ root_dir, "src", "main.ink" });
+    defer allocator.free(main_path);
+    try write_new_file(main_path, main_template);
+}
+
+fn write_new_file(path: []const u8, contents: []const u8) !void {
+    var file = try std.fs.cwd().createFile(path, .{ .exclusive = true });
+    defer file.close();
+    try file.writeAll(contents);
 }
 
 fn resolve_output_path(

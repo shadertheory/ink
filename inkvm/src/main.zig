@@ -7,12 +7,14 @@ const mem_allocator = std.mem.Allocator;
 const Cli = struct {
     const Options = struct {
         input_path: []const u8,
+        sim: bool = false,
     };
 
     const ParseError = error{InvalidArgs};
 
     fn parse(args: []const []const u8, p: *std.Io.Writer) ParseError!Options {
         var input_path: ?[]const u8 = null;
+        var sim = false;
 
         var i: usize = 1;
         while (i < args.len) : (i += 1) {
@@ -20,6 +22,10 @@ const Cli = struct {
             if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
                 print_usage(p, args[0]) catch {};
                 return error.InvalidArgs;
+            }
+            if (std.mem.eql(u8, arg, "--sim")) {
+                sim = true;
+                continue;
             }
             if (input_path == null) {
                 input_path = arg;
@@ -35,11 +41,11 @@ const Cli = struct {
             return error.InvalidArgs;
         }
 
-        return .{ .input_path = input_path.? };
+        return .{ .input_path = input_path.?, .sim = sim };
     }
 
     fn print_usage(p: *std.Io.Writer, exe_name: []const u8) !void {
-        try p.print("Usage: {s} <program.inkb>\n", .{exe_name});
+        try p.print("Usage: {s} [--sim] <program.inkb>\n", .{exe_name});
     }
 };
 
@@ -74,6 +80,7 @@ pub fn main() !void {
         try std.fs.path.join(allocator, &.{ program_dir, ".quill", "lib" });
     defer allocator.free(lib_dir);
 
+    _ = options.sim;
     try ink.vm.runtime.run_program(allocator, &program, lib_dir);
 }
 

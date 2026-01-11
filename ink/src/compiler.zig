@@ -38,6 +38,7 @@ pub const compiler = struct {
         modules: []const module_spec,
         root_module: []const u8,
         target: target_mod.target_spec = .{ .kind = .vm },
+        prelude: desugar.prelude_spec = desugar.default_prelude,
     };
 
     pub const compile_result = struct {
@@ -1413,6 +1414,7 @@ pub const compiler = struct {
                 mod.id,
                 module_foreigns,
                 &module_macro_imports[mi],
+                req.prelude,
                 &diags,
                 &diag_messages,
             );
@@ -1484,7 +1486,13 @@ pub const compiler = struct {
 
         for (modules.items, 0..) |mod, mi| {
             _ = mod;
-            var desugared = desugar.desugar(module_arenas[mi].allocator(), allocator, module_raw_nodes[mi], &diags) catch {
+            var desugared = desugar.desugar(
+                module_arenas[mi].allocator(),
+                allocator,
+                module_raw_nodes[mi],
+                &diags,
+                req.prelude,
+            ) catch {
                 try diags.append(.{ .danger = .@"error", .message = "desugar error", .span = null });
                 continue;
             };
@@ -2283,8 +2291,12 @@ pub const compiler = struct {
         diags: *array_list(diagnostic),
     ) ![]const resolver.module_import {
         var out = array_list(resolver.module_import).init(allocator);
+        var seen_modules = string_map(void).init(allocator);
+        defer seen_modules.deinit();
+
         for (imports) |imp| {
             if (imp.item != null) continue;
+            if (seen_modules.contains(imp.module.string)) continue;
             const alias = imp.alias orelse imp.module;
             const maybe_module_id = module_names.get(imp.module.string);
             if (maybe_module_id == null) {
@@ -2296,6 +2308,23 @@ pub const compiler = struct {
                 continue;
             }
             try out.append(.{ .id = maybe_module_id.?, .alias = alias.string });
+            try seen_modules.put(imp.module.string, {});
+        }
+
+        for (imports) |imp| {
+            if (imp.item == null) continue;
+            if (seen_modules.contains(imp.module.string)) continue;
+            const maybe_module_id = module_names.get(imp.module.string);
+            if (maybe_module_id == null) {
+                try diags.append(.{
+                    .danger = .@"error",
+                    .message = "unknown module dependency",
+                    .span = span{ .start = imp.module.where.start, .end = imp.module.where.end },
+                });
+                continue;
+            }
+            try out.append(.{ .id = maybe_module_id.?, .alias = imp.module.string });
+            try seen_modules.put(imp.module.string, {});
         }
         return out.toOwnedSlice();
     }
@@ -2315,6 +2344,7 @@ pub const compiler = struct {
         module_id_value: module_id,
         module_foreigns: []const []const []const u8,
         imports: *const macro_imports,
+        prelude: desugar.prelude_spec,
         diags: *array_list(diagnostic),
         diag_messages: *array_list([]const u8),
     ) !?macro_runtime {
@@ -2360,7 +2390,13 @@ pub const compiler = struct {
         var node_arena = arena_allocator.init(allocator);
         defer node_arena.deinit();
 
-        var desugared = desugar.desugar(node_arena.allocator(), allocator, nodes, diags) catch {
+        var desugared = desugar.desugar(
+            node_arena.allocator(),
+            allocator,
+            nodes,
+            diags,
+            prelude,
+        ) catch {
             return error.OutOfMemory;
         };
         defer desugared.origin.deinit();

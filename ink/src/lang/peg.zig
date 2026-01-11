@@ -8,6 +8,7 @@ pub const nonterminal_kind = enum {
     program,
     layout,
     name,
+    qualified_name,
     attribute_list,
     attribute,
     attribute_args,
@@ -277,6 +278,11 @@ pub fn build(allocator: mem_allocator) !grammar {
     try b.rule(.name, name);
 
     const name_token = try n(&b, .name);
+    const qualified_name = try b.sequence(&.{
+        name_token,
+        try b.zero_or_more(try b.sequence(&.{ try t(&b, .double_colon), name_token })),
+    });
+    try b.rule(.qualified_name, qualified_name);
 
     const token_stream_paren_token = blk: {
         var items = std.array_list.Managed(expr_id).init(allocator);
@@ -1346,7 +1352,7 @@ pub fn build(allocator: mem_allocator) !grammar {
     const import_decl = try b.sequence(&.{
         try b.optional(try n(&b, .attribute_list)),
         try t(&b, .import),
-        name_token,
+        try n(&b, .qualified_name),
         try b.optional(try b.sequence(&.{
             try t(&b, .as),
             name_token,

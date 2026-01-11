@@ -17,6 +17,20 @@ pub const Dep = struct {
     path: []const u8,
 };
 
+pub const Profile = struct {
+    name: []const u8,
+    target: []const u8,
+    opt: []const u8,
+    debug_info: []const u8,
+    prelude: []const u8,
+    sandbox: ?bool,
+};
+
+pub const Prelude = struct {
+    std_items: []const []const u8,
+    std_scopes: []const []const u8,
+};
+
 pub const Manifest = struct {
     name: []const u8,
     version: []const u8,
@@ -25,6 +39,8 @@ pub const Manifest = struct {
     modules: []const Module,
     registries: []const Registry,
     deps: []const Dep,
+    profiles: []const Profile,
+    prelude: ?Prelude,
     arena: std.heap.ArenaAllocator,
 
     pub fn deinit(self: *Manifest) void {
@@ -42,7 +58,7 @@ pub const ParseError = error{
     InvalidManifest,
 };
 
-const ContextKind = enum { root, package, module, registries, registry, deps, dep };
+const ContextKind = enum { root, package, module, registries, registry, deps, dep, profile, prelude };
 
 const Context = struct {
     kind: ContextKind,
@@ -63,10 +79,14 @@ pub fn parse(allocator: std.mem.Allocator, manifest_path: []const u8) !Manifest 
     var modules = array_list(Module).init(a);
     var registries = array_list(Registry).init(a);
     var deps = array_list(Dep).init(a);
+    var profiles = array_list(Profile).init(a);
+    var prelude_std_items = array_list([]const u8).init(a);
+    var prelude_std_scopes = array_list([]const u8).init(a);
 
     var name: ?[]const u8 = null;
     var version: ?[]const u8 = null;
     var default_registry: ?[]const u8 = null;
+    var prelude_defined = false;
 
     var stack = array_list(Context).init(a);
     try stack.append(.{ .kind = .root, .indent = 0, .index = 0 });
@@ -113,6 +133,23 @@ pub fn parse(allocator: std.mem.Allocator, manifest_path: []const u8) !Manifest 
                 try stack.append(.{ .kind = .dep, .indent = indent, .index = deps.items.len - 1 });
                 continue;
             }
+            if (std.mem.eql(u8, assign.value, "build::profile")) {
+                try profiles.append(.{
+                    .name = "",
+                    .target = "",
+                    .opt = "",
+                    .debug_info = "",
+                    .prelude = "",
+                    .sandbox = null,
+                });
+                try stack.append(.{ .kind = .profile, .indent = indent, .index = profiles.items.len - 1 });
+                continue;
+            }
+            if (std.mem.eql(u8, assign.value, "build::prelude")) {
+                prelude_defined = true;
+                try stack.append(.{ .kind = .prelude, .indent = indent, .index = 0 });
+                continue;
+            }
 
             switch (ctx.kind) {
                 .package => {
@@ -153,6 +190,30 @@ pub fn parse(allocator: std.mem.Allocator, manifest_path: []const u8) !Manifest 
                         }
                     }
                 },
+                .profile => {
+                    if (ctx.index < profiles.items.len) {
+                        if (std.mem.eql(u8, assign.key, "name")) {
+                            profiles.items[ctx.index].name = assign.value;
+                        } else if (std.mem.eql(u8, assign.key, "target")) {
+                            profiles.items[ctx.index].target = assign.value;
+                        } else if (std.mem.eql(u8, assign.key, "opt")) {
+                            profiles.items[ctx.index].opt = assign.value;
+                        } else if (std.mem.eql(u8, assign.key, "debug_info")) {
+                            profiles.items[ctx.index].debug_info = assign.value;
+                        } else if (std.mem.eql(u8, assign.key, "prelude")) {
+                            profiles.items[ctx.index].prelude = assign.value;
+                        } else if (std.mem.eql(u8, assign.key, "sandbox")) {
+                            profiles.items[ctx.index].sandbox = parse_bool(assign.value) orelse return error.InvalidManifest;
+                        }
+                    }
+                },
+                .prelude => {
+                    if (std.mem.eql(u8, assign.key, "std_items")) {
+                        try append_prelude_list(&prelude_std_items, assign.value);
+                    } else if (std.mem.eql(u8, assign.key, "std_scopes")) {
+                        try append_prelude_list(&prelude_std_scopes, assign.value);
+                    }
+                },
                 else => {},
             }
         }
@@ -182,6 +243,18 @@ pub fn parse(allocator: std.mem.Allocator, manifest_path: []const u8) !Manifest 
         }
     }
 
+    for (profiles.items) |p| {
+        if (p.name.len == 0) return error.InvalidManifest;
+    }
+
+    var prelude: ?Prelude = null;
+    if (prelude_defined) {
+        prelude = .{
+            .std_items = try prelude_std_items.toOwnedSlice(),
+            .std_scopes = try prelude_std_scopes.toOwnedSlice(),
+        };
+    }
+
     return .{
         .name = name.?,
         .version = version.?,
@@ -190,6 +263,8 @@ pub fn parse(allocator: std.mem.Allocator, manifest_path: []const u8) !Manifest 
         .modules = try modules.toOwnedSlice(),
         .registries = try registries.toOwnedSlice(),
         .deps = try deps.toOwnedSlice(),
+        .profiles = try profiles.toOwnedSlice(),
+        .prelude = prelude,
         .arena = arena,
     };
 }
@@ -214,6 +289,12 @@ fn parse_value(raw_val: []const u8) []const u8 {
     return raw_val;
 }
 
+fn parse_bool(raw_val: []const u8) ?bool {
+    if (std.mem.eql(u8, raw_val, "true") or std.mem.eql(u8, raw_val, "1")) return true;
+    if (std.mem.eql(u8, raw_val, "false") or std.mem.eql(u8, raw_val, "0")) return false;
+    return null;
+}
+
 fn count_indent(line: []const u8) usize {
     var count: usize = 0;
     while (count < line.len) : (count += 1) {
@@ -221,4 +302,12 @@ fn count_indent(line: []const u8) usize {
         if (ch != ' ' and ch != '\t') break;
     }
     return count;
+}
+
+fn append_prelude_list(list: *array_list([]const u8), raw_val: []const u8) !void {
+    var iter = std.mem.tokenizeAny(u8, raw_val, " ,\t");
+    while (iter.next()) |token| {
+        if (token.len == 0) continue;
+        try list.append(token);
+    }
 }

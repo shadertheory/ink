@@ -2,6 +2,7 @@ const std = @import("std");
 const ink = @import("ink");
 const inkc = @import("inkc");
 const graph = @import("graph.zig");
+const manifest = @import("manifest.zig");
 const target_mod = ink.target;
 
 const mem_allocator = std.mem.Allocator;
@@ -11,6 +12,7 @@ const Cli = struct {
         input_path: ?[]const u8 = null,
         output_path: ?[]const u8 = null,
         manifest_path: ?[]const u8 = null,
+        profile: ?[]const u8 = null,
         target: ?[]const u8 = null,
     };
 
@@ -20,6 +22,7 @@ const Cli = struct {
         var input_path: ?[]const u8 = null;
         var output_path: ?[]const u8 = null;
         var manifest_path: ?[]const u8 = null;
+        var profile: ?[]const u8 = null;
         var target: ?[]const u8 = null;
 
         var i: usize = 1;
@@ -42,6 +45,16 @@ const Cli = struct {
                     return error.InvalidArgs;
                 }
                 manifest_path = args[i + 1];
+                i += 1;
+                continue;
+            }
+            if (std.mem.eql(u8, arg, "--profile")) {
+                if (i + 1 >= args.len) {
+                    p.print("error: missing value for {s}\n", .{arg}) catch {};
+                    print_usage(p, args[0]) catch {};
+                    return error.InvalidArgs;
+                }
+                profile = args[i + 1];
                 i += 1;
                 continue;
             }
@@ -83,13 +96,14 @@ const Cli = struct {
             .input_path = input_path,
             .output_path = output_path,
             .manifest_path = manifest_path,
+            .profile = profile,
             .target = target,
         };
     }
 
     fn print_usage(p: *std.Io.Writer, exe_name: []const u8) !void {
         try p.print("Usage: {s} [-o <path>] [-t <target>] <source_file>\n", .{exe_name});
-        try p.print("       {s} --manifest <path> [-o <path>] [-t <target>]\n", .{exe_name});
+        try p.print("       {s} --manifest <path> [--profile <name>] [-o <path>] [-t <target>]\n", .{exe_name});
     }
 };
 
@@ -793,6 +807,12 @@ pub fn main() !void {
         return err;
     };
 
+    if (options.profile != null and options.manifest_path == null) {
+        err_writer.writeAll("error: --profile requires --manifest\n") catch {};
+        err_writer.flush() catch {};
+        std.process.exit(1);
+    }
+
     var target_spec: target_mod.target_spec = .{ .kind = .vm };
     if (options.target) |target_text| {
         target_spec = target_mod.parse_target(target_text) catch {
@@ -832,12 +852,46 @@ pub fn main() !void {
 
         try std.fs.cwd().makePath(std.fs.path.dirname(output_path) orelse ".");
 
-        const request = ink.compiler.compile_request{
+        if (options.profile) |profile_name| {
+            const profile = find_profile(dep_graph.profiles.items, profile_name) orelse {
+                err_writer.print("error: unknown profile: {s}\n", .{profile_name}) catch {};
+                err_writer.flush() catch {};
+                std.process.exit(1);
+            };
+            if (options.target == null and profile.target.len != 0) {
+                target_spec = target_mod.parse_target(profile.target) catch {
+                    err_writer.print("error: invalid target: {s}\n", .{profile.target}) catch {};
+                    err_writer.flush() catch {};
+                    std.process.exit(1);
+                };
+            }
+            if (std.mem.eql(u8, profile.name, "sim")) {
+                const simulator_path = try std.fs.path.join(allocator, &.{ root_dir, "simulator.ink" });
+                defer allocator.free(simulator_path);
+                const sim_cfg = ink.sim.parse(allocator, simulator_path) catch |err| {
+                    switch (err) {
+                        error.FileNotFound => err_writer.writeAll("error: simulator.ink not found\n") catch {},
+                        error.MissingSimulator => err_writer.writeAll("error: simulator.ink missing sim::simulator\n") catch {},
+                        error.MissingScenarioName => err_writer.writeAll("error: simulator.ink missing scenario name\n") catch {},
+                        error.InvalidSimulator => err_writer.writeAll("error: invalid simulator.ink format\n") catch {},
+                        else => return err,
+                    }
+                    err_writer.flush() catch {};
+                    std.process.exit(1);
+                };
+                defer sim_cfg.deinit();
+            }
+        }
+
+        var request = ink.compiler.compile_request{
             .sources = dep_graph.sources.items,
             .modules = dep_graph.modules.items,
             .root_module = dep_graph.root_module,
             .target = target_spec,
         };
+        if (dep_graph.prelude) |prelude| {
+            request.prelude = prelude;
+        }
 
         var result = try inkc.compile_to_inkb(allocator, request, output_path);
         defer result.deinit(allocator);
@@ -930,4 +984,11 @@ pub fn main() !void {
     if (!result.ok) {
         std.process.exit(1);
     }
+}
+
+fn find_profile(profiles: []const manifest.Profile, name: []const u8) ?manifest.Profile {
+    for (profiles) |profile| {
+        if (std.mem.eql(u8, profile.name, name)) return profile;
+    }
+    return null;
 }

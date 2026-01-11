@@ -15,8 +15,10 @@ pub const Graph = struct {
     owned_paths: array_list([]const u8),
     root_module_indices: array_list(usize),
     root_module: []const u8,
+    prelude: ?ink.desugar.prelude_spec,
     default_registry: []const u8,
     registries: array_list(manifest.Registry),
+    profiles: array_list(manifest.Profile),
     next_source_id: ink.compiler.source_id,
 
     pub fn init(allocator: mem_allocator) Graph {
@@ -30,8 +32,10 @@ pub const Graph = struct {
             .owned_paths = array_list([]const u8).init(allocator),
             .root_module_indices = array_list(usize).init(allocator),
             .root_module = "",
+            .prelude = null,
             .default_registry = "",
             .registries = array_list(manifest.Registry).init(allocator),
+            .profiles = array_list(manifest.Profile).init(allocator),
             .next_source_id = 0,
         };
     }
@@ -52,6 +56,7 @@ pub const Graph = struct {
         self.owned_paths.deinit();
         self.root_module_indices.deinit();
         self.registries.deinit();
+        self.profiles.deinit();
     }
 };
 
@@ -100,6 +105,24 @@ fn load_package(
                 .name = try dupe_string(graph, reg.name),
                 .url = try dupe_string(graph, reg.url),
             });
+        }
+        for (man.profiles) |profile| {
+            try graph.profiles.append(.{
+                .name = try dupe_string(graph, profile.name),
+                .target = try dupe_string(graph, profile.target),
+                .opt = try dupe_string(graph, profile.opt),
+                .debug_info = try dupe_string(graph, profile.debug_info),
+                .prelude = try dupe_string(graph, profile.prelude),
+                .sandbox = profile.sandbox,
+            });
+        }
+        if (man.prelude) |prelude| {
+            const std_items = try dupe_string_list(graph, prelude.std_items);
+            const std_scopes = try dupe_string_list(graph, prelude.std_scopes);
+            graph.prelude = .{
+                .std_items = std_items,
+                .std_scopes = std_scopes,
+            };
         }
     }
 
@@ -271,6 +294,16 @@ fn dupe_path(graph: *Graph, value: []const u8) ![]const u8 {
 fn dupe_string(graph: *Graph, value: []const u8) ![]const u8 {
     const duped = try graph.allocator.dupe(u8, value);
     try graph.owned_strings.append(duped);
+    return duped;
+}
+
+fn dupe_string_list(graph: *Graph, values: []const []const u8) ![]const []const u8 {
+    if (values.len == 0) return &.{};
+    const duped = try graph.allocator.alloc([]const u8, values.len);
+    for (values, 0..) |value, idx| {
+        duped[idx] = try dupe_string(graph, value);
+    }
+    try graph.string_slices.append(duped);
     return duped;
 }
 

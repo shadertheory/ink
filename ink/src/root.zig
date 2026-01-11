@@ -7,6 +7,7 @@ pub const peg_parser = @import("lang/peg_parser.zig");
 pub const peg_ast = @import("lang/peg_ast.zig");
 pub const lang_spec = @import("lang/spec.zig");
 pub const desugar = @import("lang/desugar.zig");
+pub const sim = @import("sim.zig");
 pub const uir = @import("uir/core.zig");
 pub const uir_build = @import("uir/build.zig");
 pub const mir = @import("mir/core.zig");
