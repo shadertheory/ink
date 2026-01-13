@@ -1,8 +1,8 @@
 type timeout = int
 
-#[foreign] fn cancelled() -> bool
-#[foreign] fn timeout(duration: duration) -> deadline
-#[foreign] fn deadline(value: instant) -> deadline
+#[foreign] #[sandbox(category=task, allowed)] #[sim(category=task, allowed)] fn cancelled() -> bool
+#[foreign] #[sandbox(category=time, allowed)] #[sim(category=time, allowed)] fn timeout(duration: duration) -> deadline
+#[foreign] #[sandbox(category=time, allowed)] #[sim(category=time, allowed)] fn deadline(value: instant) -> deadline
 
 fn deadline(value: deadline) -> deadline
 	value

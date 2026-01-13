@@ -17,6 +17,7 @@ pub const nonterminal_kind = enum {
     stmt,
     decl,
     expr,
+    expr_no_record,
     label_expr,
     branch,
     if_expr,
@@ -63,6 +64,20 @@ pub const nonterminal_kind = enum {
     product,
     unary,
     postfix,
+    assign_no_record,
+    pipe_no_record,
+    coalesce_no_record,
+    logical_or_no_record,
+    logical_and_no_record,
+    bitwise_or_no_record,
+    bitwise_xor_no_record,
+    bitwise_and_no_record,
+    comparison_no_record,
+    shift_no_record,
+    sum_no_record,
+    product_no_record,
+    unary_no_record,
+    postfix_no_record,
     macro_suffix,
     macro_block,
     token_stream_indent,
@@ -425,7 +440,7 @@ pub fn build(allocator: mem_allocator) !grammar {
 
     const if_expr = try b.sequence(&.{
         try t(&b, .expr_if),
-        try n(&b, .expr),
+        try n(&b, .expr_no_record),
         try n(&b, .branch),
         try b.optional(try b.sequence(&.{
             try n(&b, .layout),
@@ -455,28 +470,28 @@ pub fn build(allocator: mem_allocator) !grammar {
         try t(&b, .@"while"),
         try n(&b, .pattern),
         try t(&b, .in),
-        try n(&b, .expr),
+        try n(&b, .expr_no_record),
         try n(&b, .branch),
     });
     try b.rule(.while_in_expr, while_in_expr);
 
     const while_expr = try b.sequence(&.{
         try t(&b, .@"while"),
-        try n(&b, .expr),
+        try n(&b, .expr_no_record),
         try n(&b, .branch),
     });
     try b.rule(.while_expr, while_expr);
 
     const until_expr = try b.sequence(&.{
         try t(&b, .until),
-        try n(&b, .expr),
+        try n(&b, .expr_no_record),
         try n(&b, .branch),
     });
     try b.rule(.until_expr, until_expr);
 
     const repeat_expr = try b.sequence(&.{
         try t(&b, .repeat),
-        try n(&b, .expr),
+        try n(&b, .expr_no_record),
         try n(&b, .branch),
     });
     try b.rule(.repeat_expr, repeat_expr);
@@ -485,7 +500,7 @@ pub fn build(allocator: mem_allocator) !grammar {
         try t(&b, .@"for"),
         try n(&b, .pattern),
         try t(&b, .in),
-        try n(&b, .expr),
+        try n(&b, .expr_no_record),
         try n(&b, .branch),
     });
     try b.rule(.for_expr, for_expr);
@@ -494,7 +509,7 @@ pub fn build(allocator: mem_allocator) !grammar {
         try t(&b, .each),
         try n(&b, .pattern),
         try t(&b, .in),
-        try n(&b, .expr),
+        try n(&b, .expr_no_record),
         try n(&b, .branch),
     });
     try b.rule(.each_expr, each_expr);
@@ -940,6 +955,160 @@ pub fn build(allocator: mem_allocator) !grammar {
         try b.optional(try n(&b, .macro_suffix)),
     });
     try b.rule(.postfix, postfix);
+
+    const postfix_no_record = try b.sequence(&.{
+        try n(&b, .primary),
+        try b.zero_or_more(try b.choice(&.{
+            try n(&b, .generic_args),
+            try n(&b, .call_suffix),
+            try n(&b, .access_suffix),
+            try n(&b, .cast_suffix),
+            try n(&b, .index_suffix),
+            try t(&b, .question),
+        })),
+        try b.optional(try n(&b, .macro_suffix)),
+    });
+    try b.rule(.postfix_no_record, postfix_no_record);
+
+    const unary_no_record = try b.choice(&.{
+        try b.sequence(&.{ try t(&b, .minus), try n(&b, .unary_no_record) }),
+        try b.sequence(&.{ try t(&b, .bang), try n(&b, .unary_no_record) }),
+        try b.sequence(&.{ try t(&b, .logical_not), try n(&b, .unary_no_record) }),
+        try b.sequence(&.{ try t(&b, .tilde), try n(&b, .unary_no_record) }),
+        try b.sequence(&.{ try t(&b, .asterisk), try n(&b, .unary_no_record) }),
+        try b.sequence(&.{ try t(&b, .ampersand), try b.optional(try t(&b, .mut)), try n(&b, .unary_no_record) }),
+        try b.sequence(&.{ try t(&b, .@"comptime"), try n(&b, .unary_no_record) }),
+        try b.sequence(&.{ try t(&b, .box), try n(&b, .unary_no_record) }),
+        try b.sequence(&.{ try t(&b, .sleep), try n(&b, .unary_no_record) }),
+        try b.sequence(&.{ try t(&b, .timeout), try n(&b, .unary_no_record) }),
+        try b.sequence(&.{ try t(&b, .deadline), try n(&b, .unary_no_record) }),
+        try b.sequence(&.{ try t(&b, .spawn), try n(&b, .unary_no_record) }),
+        try b.sequence(&.{ try t(&b, .await), try n(&b, .unary_no_record) }),
+        try b.sequence(&.{ try t(&b, .@"try"), try n(&b, .unary_no_record) }),
+        try n(&b, .postfix_no_record),
+    });
+    try b.rule(.unary_no_record, unary_no_record);
+
+    const product_no_record = try b.sequence(&.{
+        try n(&b, .unary_no_record),
+        try b.zero_or_more(try b.sequence(&.{
+            try b.choice(&.{
+                try t(&b, .asterisk),
+                try t(&b, .slash),
+                try t(&b, .percent),
+            }),
+            try n(&b, .unary_no_record),
+        })),
+    });
+    try b.rule(.product_no_record, product_no_record);
+
+    const sum_no_record = try b.sequence(&.{
+        try n(&b, .product_no_record),
+        try b.zero_or_more(try b.sequence(&.{
+            try b.choice(&.{
+                try t(&b, .plus),
+                try t(&b, .minus),
+            }),
+            try n(&b, .product_no_record),
+        })),
+    });
+    try b.rule(.sum_no_record, sum_no_record);
+
+    const shift_no_record = try b.sequence(&.{
+        try n(&b, .sum_no_record),
+        try b.zero_or_more(try b.sequence(&.{
+            try b.choice(&.{
+                try t(&b, .shift_left),
+                try t(&b, .shift_right),
+            }),
+            try n(&b, .sum_no_record),
+        })),
+    });
+    try b.rule(.shift_no_record, shift_no_record);
+
+    const comparison_no_record = try b.sequence(&.{
+        try n(&b, .shift_no_record),
+        try b.zero_or_more(try b.sequence(&.{
+            comparison_op,
+            try n(&b, .shift_no_record),
+        })),
+    });
+    try b.rule(.comparison_no_record, comparison_no_record);
+
+    const bitwise_and_no_record = try b.sequence(&.{
+        try n(&b, .comparison_no_record),
+        try b.zero_or_more(try b.sequence(&.{
+            try t(&b, .ampersand),
+            try n(&b, .comparison_no_record),
+        })),
+    });
+    try b.rule(.bitwise_and_no_record, bitwise_and_no_record);
+
+    const bitwise_xor_no_record = try b.sequence(&.{
+        try n(&b, .bitwise_and_no_record),
+        try b.zero_or_more(try b.sequence(&.{
+            try t(&b, .caret),
+            try n(&b, .bitwise_and_no_record),
+        })),
+    });
+    try b.rule(.bitwise_xor_no_record, bitwise_xor_no_record);
+
+    const bitwise_or_no_record = try b.sequence(&.{
+        try n(&b, .bitwise_xor_no_record),
+        try b.zero_or_more(try b.sequence(&.{
+            try t(&b, .bar),
+            try n(&b, .bitwise_xor_no_record),
+        })),
+    });
+    try b.rule(.bitwise_or_no_record, bitwise_or_no_record);
+
+    const logical_and_no_record = try b.sequence(&.{
+        try n(&b, .bitwise_or_no_record),
+        try b.zero_or_more(try b.sequence(&.{
+            try t(&b, .logical_and),
+            try n(&b, .bitwise_or_no_record),
+        })),
+    });
+    try b.rule(.logical_and_no_record, logical_and_no_record);
+
+    const logical_or_no_record = try b.sequence(&.{
+        try n(&b, .logical_and_no_record),
+        try b.zero_or_more(try b.sequence(&.{
+            try b.choice(&.{
+                try t(&b, .logical_or),
+                try t(&b, .logical_xor),
+            }),
+            try n(&b, .logical_and_no_record),
+        })),
+    });
+    try b.rule(.logical_or_no_record, logical_or_no_record);
+
+    const coalesce_no_record = try b.sequence(&.{
+        try n(&b, .logical_or_no_record),
+        try b.zero_or_more(try b.sequence(&.{
+            try t(&b, .coalesce),
+            try n(&b, .logical_or_no_record),
+        })),
+    });
+    try b.rule(.coalesce_no_record, coalesce_no_record);
+
+    const pipe_no_record = try b.sequence(&.{
+        try n(&b, .coalesce_no_record),
+        try b.zero_or_more(try b.sequence(&.{
+            try t(&b, .pipe),
+            try n(&b, .coalesce_no_record),
+        })),
+    });
+    try b.rule(.pipe_no_record, pipe_no_record);
+
+    const assign_no_record = try b.sequence(&.{
+        try n(&b, .pipe_no_record),
+        try b.optional(try b.sequence(&.{
+            try n(&b, .assign_op),
+            try n(&b, .assign_no_record),
+        })),
+    });
+    try b.rule(.assign_no_record, assign_no_record);
 
     const arg_list = try b.sequence(&.{
         try n(&b, .expr),
@@ -1433,6 +1602,27 @@ pub fn build(allocator: mem_allocator) !grammar {
         try n(&b, .assign),
     });
     try b.rule(.expr, expr_rule);
+
+    const expr_no_record = try b.choice(&.{
+        try n(&b, .label_expr),
+        try n(&b, .if_expr),
+        try n(&b, .match_expr),
+        try n(&b, .select_expr),
+        try n(&b, .with_expr),
+        try n(&b, .loop_expr),
+        try n(&b, .while_in_expr),
+        try n(&b, .while_expr),
+        try n(&b, .until_expr),
+        try n(&b, .repeat_expr),
+        try n(&b, .for_expr),
+        try n(&b, .each_expr),
+        try n(&b, .break_expr),
+        try n(&b, .continue_expr),
+        try n(&b, .yield_expr),
+        try n(&b, .return_expr),
+        try n(&b, .assign_no_record),
+    });
+    try b.rule(.expr_no_record, expr_no_record);
 
     const stmt = try b.choice(&.{
         try n(&b, .decl),

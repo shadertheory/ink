@@ -1,0 +1,18 @@
+.{
+    .name = .inksim,
+    .version = "0.1.0",
+    .fingerprint = 0x85975d1d77b19c3e,
+
+    .dependencies = .{
+        .ink = .{
+            .name = .ink,
+            .path = "../ink",
+        },
+    },
+
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

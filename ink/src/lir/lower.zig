@@ -22,9 +22,26 @@ pub fn lower(
     node_types: ?[]const type_key_mod.type_key,
     info: ?*error_info,
 ) lower_error!lower_result {
+    return lower_with_options(allocator, target, nodes, strings, roots, foreigns, node_types, info, null);
+}
+
+pub fn lower_with_options(
+    allocator: std.mem.Allocator,
+    target: target_mod.target_spec,
+    nodes: []const mir_core.mir,
+    strings: []const []const u8,
+    roots: []const mir_core.mir_identifier,
+    foreigns: []const []const u8,
+    node_types: ?[]const type_key_mod.type_key,
+    info: ?*error_info,
+    options: ?vm_lower.lower_options,
+) lower_error!lower_result {
     return switch (target.kind) {
         .vm => blk: {
-            const program = try vm_lower.lower(allocator, nodes, strings, roots, foreigns, node_types, info);
+            const program = if (options) |opts|
+                try vm_lower.lower_with_options(allocator, nodes, strings, roots, foreigns, node_types, info, opts)
+            else
+                try vm_lower.lower(allocator, nodes, strings, roots, foreigns, node_types, info);
             break :blk .{ .vm = .{ .program = program, .strings = strings } };
         },
         else => error.unsupported_target,

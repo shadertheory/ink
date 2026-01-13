@@ -227,6 +227,12 @@ fn is_cancel_name(name: []const u8) bool {
     return std.mem.eql(u8, name, "cancel") or std.mem.endsWith(u8, name, "::cancel");
 }
 
+fn split_enum_constructor_name(name: []const u8) ?struct { enum_name: []const u8, variant_name: []const u8 } {
+    const split = std.mem.lastIndexOf(u8, name, "::") orelse return null;
+    if (split == 0 or split + 2 >= name.len) return null;
+    return .{ .enum_name = name[0..split], .variant_name = name[split + 2 ..] };
+}
+
 fn is_builtin_type_name(name: []const u8) bool {
     return std.mem.eql(u8, name, "int") or
         std.mem.eql(u8, name, "uint") or
@@ -360,6 +366,7 @@ pub const function_signature = struct {
     label: ink.exe.label_id,
     param_count: usize,
     is_method: bool,
+    impl_for: ?[]const u8 = null,
 };
 
 pub const lower_options = struct {
@@ -370,6 +377,11 @@ pub const lower_options = struct {
 const struct_info = struct {
     fields: []const mir_mod.mir.struct_decl.field,
     is_record: bool,
+    generics: []const mir_mod.mir.generic_param,
+};
+
+const enum_info = struct {
+    variants: []const mir_mod.mir.enum_variant,
     generics: []const mir_mod.mir.generic_param,
 };
 
@@ -422,10 +434,12 @@ const builder = struct {
     foreigns: std.StringHashMap(u32),
     global_consts: std.StringHashMap(global_const),
     structs: std.StringHashMap(struct_info),
+    enums: std.StringHashMap(enum_info),
     traits: std.StringHashMap(trait_info),
     trait_impls: std.StringHashMap(std.array_list.Managed([]const u8)),
     trait_neg_impls: std.StringHashMap(std.array_list.Managed([]const u8)),
     trait_vtables: std.StringHashMap(std.StringHashMap([]const ink.exe.label_id)),
+    type_aliases: std.StringHashMap(mir_mod.mir_identifier),
     label_constants: std.AutoHashMap(ink.exe.label_id, u32),
     owned_slices: std.ArrayListUnmanaged([]const u8),
     owned_type_slices: std.ArrayListUnmanaged([]const type_key),
@@ -457,10 +471,12 @@ const builder = struct {
             .foreigns = std.StringHashMap(u32).init(allocator),
             .global_consts = std.StringHashMap(global_const).init(allocator),
             .structs = std.StringHashMap(struct_info).init(allocator),
+            .enums = std.StringHashMap(enum_info).init(allocator),
             .traits = std.StringHashMap(trait_info).init(allocator),
             .trait_impls = std.StringHashMap(std.array_list.Managed([]const u8)).init(allocator),
             .trait_neg_impls = std.StringHashMap(std.array_list.Managed([]const u8)).init(allocator),
             .trait_vtables = std.StringHashMap(std.StringHashMap([]const ink.exe.label_id)).init(allocator),
+            .type_aliases = std.StringHashMap(mir_mod.mir_identifier).init(allocator),
             .label_constants = std.AutoHashMap(ink.exe.label_id, u32).init(allocator),
             .owned_slices = std.ArrayListUnmanaged([]const u8){},
             .owned_type_slices = std.ArrayListUnmanaged([]const type_key){},
@@ -497,6 +513,11 @@ const builder = struct {
             self.allocator.free(entry.value_ptr.*.fields);
         }
         self.structs.deinit();
+        var enum_it = self.enums.iterator();
+        while (enum_it.next()) |entry| {
+            self.allocator.free(entry.value_ptr.*.variants);
+        }
+        self.enums.deinit();
         var trait_impl_it = self.trait_impls.iterator();
         while (trait_impl_it.next()) |entry| {
             entry.value_ptr.*.deinit();
@@ -513,6 +534,7 @@ const builder = struct {
             self.allocator.free(entry.value_ptr.*.requires);
         }
         self.traits.deinit();
+        self.type_aliases.deinit();
         var vtable_it = self.trait_vtables.iterator();
         while (vtable_it.next()) |entry| {
             var inner_it = entry.value_ptr.*.iterator();
@@ -636,10 +658,22 @@ const builder = struct {
 fn type_key_from_type_node_with_self(b: *builder, id: mir_mod.mir_identifier, self_name: ?[]const u8) type_key {
     const node = b.node(id);
     return switch (node) {
-        .identifier => |ident| .{ .name = b.string_value(ident) },
+        .identifier => |ident| blk: {
+            const name = b.string_value(ident);
+            if (b.type_aliases.get(name)) |alias_ref| {
+                break :blk type_key_from_type_node_with_self(b, alias_ref, self_name);
+            }
+            break :blk .{ .name = name };
+        },
         .type => |ty| switch (ty) {
             .self => if (self_name) |name| .{ .name = name } else .{ .name = "self" },
-            .name => |name_id| .{ .name = b.string_value(name_id) },
+            .name => |name_id| blk: {
+                const name = b.string_value(name_id);
+                if (b.type_aliases.get(name)) |alias_ref| {
+                    break :blk type_key_from_type_node_with_self(b, alias_ref, self_name);
+                }
+                break :blk .{ .name = name };
+            },
             .dyn => |ref| blk: {
                 var pos = std.array_list.Managed([]const u8).init(b.allocator);
                 defer pos.deinit();
@@ -685,17 +719,15 @@ fn type_key_from_type_node_with_self(b: *builder, id: mir_mod.mir_identifier, se
                             args[idx] = type_key_from_type_node_with_self(b, arg, self_name);
                         },
                         .identifier => |ident| {
-                            args[idx] = .{ .name = b.string_value(ident) };
+                            const name = b.string_value(ident);
+                            if (b.type_aliases.get(name)) |alias_ref| {
+                                args[idx] = type_key_from_type_node_with_self(b, alias_ref, self_name);
+                            } else {
+                                args[idx] = .{ .name = name };
+                            }
                         },
-                        .integer => |value| {
-                            const owned = std.fmt.allocPrint(b.allocator, "{d}", .{value}) catch break :blk .unknown;
-                            b.owned_slices.append(b.allocator, owned) catch break :blk .unknown;
-                            args[idx] = .{ .name = owned };
-                        },
-                        .float => |value| {
-                            const owned = std.fmt.allocPrint(b.allocator, "{d}", .{value}) catch break :blk .unknown;
-                            b.owned_slices.append(b.allocator, owned) catch break :blk .unknown;
-                            args[idx] = .{ .name = owned };
+                        .integer, .float => {
+                            args[idx] = .unknown;
                         },
                         .string => |value| {
                             args[idx] = .{ .name = b.string_value(value) };
@@ -838,6 +870,49 @@ fn struct_word_count(
     return count;
 }
 
+fn enum_payload_type_key(
+    b: *builder,
+    enum_name: []const u8,
+    payload_id: mir_mod.mir_identifier,
+    bindings: []const generic_binding,
+) type_key {
+    var payload_key = type_key_from_type_node_with_self(b, payload_id, enum_name);
+    if (bindings.len > 0) {
+        payload_key = apply_bindings_to_type_key(b, payload_key, bindings);
+    }
+    return payload_key;
+}
+
+fn enum_max_payload_words(b: *builder, enum_name: []const u8, info: enum_info, bindings: []const generic_binding) u8 {
+    var max_words: u8 = 0;
+    for (info.variants) |variant| {
+        if (variant.payload) |payload_id| {
+            const payload_key = enum_payload_type_key(b, enum_name, payload_id, bindings);
+            const words = word_count_for_type(b, payload_key);
+            if (words > max_words) max_words = words;
+        }
+    }
+    return max_words;
+}
+
+fn enum_word_count(b: *builder, enum_name: []const u8, info: enum_info, type_args: ?[]const type_key) u8 {
+    var bindings = std.ArrayListUnmanaged(generic_binding){};
+    defer bindings.deinit(b.allocator);
+
+    if (type_args) |args| {
+        const limit = @min(info.generics.len, args.len);
+        var idx: usize = 0;
+        while (idx < limit) : (idx += 1) {
+            const gen = info.generics[idx];
+            if (gen.kind != .type) continue;
+            const gen_name = b.string_value(gen.name);
+            _ = bind_generic(b.allocator, &bindings, gen_name, args[idx]);
+        }
+    }
+
+    return enum_max_payload_words(b, enum_name, info, bindings.items) + 1;
+}
+
 fn array_length_from_type_key(key: type_key) ?u64 {
     return switch (key) {
         .name => |name| std.fmt.parseInt(u64, name, 10) catch null,
@@ -848,6 +923,9 @@ fn array_length_from_type_key(key: type_key) ?u64 {
 fn word_count_for_type(b: *builder, ty: type_key) u8 {
     switch (ty) {
         .name => |name| {
+            if (b.enums.get(name)) |info| {
+                return enum_word_count(b, name, info, null);
+            }
             if (!b.structs.contains(name)) return 1;
             var visited = std.StringHashMapUnmanaged(void){};
             defer visited.deinit(b.allocator);
@@ -865,6 +943,9 @@ fn word_count_for_type(b: *builder, ty: type_key) u8 {
                 if (total == 0) return 1;
                 if (total > std.math.maxInt(u8)) return std.math.maxInt(u8);
                 return @intCast(total);
+            }
+            if (b.enums.get(ap.base)) |info| {
+                return enum_word_count(b, ap.base, info, ap.args);
             }
             if (!b.structs.contains(ap.base)) return 1;
             var visited = std.StringHashMapUnmanaged(void){};
@@ -893,6 +974,21 @@ fn apply_bindings_to_type_key(
             break :blk .{ .applied = .{ .base = ap.base, .args = out } };
         },
     };
+}
+
+fn enum_return_type_key(b: *builder, enum_name: []const u8, info: enum_info, bindings: []const generic_binding) type_key {
+    if (info.generics.len == 0) return .{ .name = enum_name };
+    const args = b.allocator.alloc(type_key, info.generics.len) catch return .unknown;
+    for (info.generics, 0..) |gen, idx| {
+        if (gen.kind != .type) {
+            args[idx] = .unknown;
+            continue;
+        }
+        const gen_name = b.string_value(gen.name);
+        args[idx] = lookup_generic(bindings, gen_name) orelse .unknown;
+    }
+    b.owned_type_slices.append(b.allocator, args) catch return .unknown;
+    return .{ .applied = .{ .base = enum_name, .args = args } };
 }
 
 fn element_type_from_container(key: type_key) ?type_key {
@@ -1008,6 +1104,49 @@ fn match_param_type(
                 if (ap.args.len != arg_ap.args.len) break :blk false;
                 for (ap.args, 0..) |param_arg, idx| {
                     if (!match_param_type(b, decl, param_arg, arg_ap.args[idx], bindings)) break :blk false;
+                }
+                break :blk true;
+            },
+            else => false,
+        },
+    };
+}
+
+fn is_enum_generic(b: *builder, info: enum_info, name: []const u8) bool {
+    for (info.generics) |gen| {
+        if (gen.kind != .type) continue;
+        if (std.mem.eql(u8, b.string_value(gen.name), name)) return true;
+    }
+    return false;
+}
+
+fn match_enum_param_type(
+    b: *builder,
+    info: enum_info,
+    param_type: type_key,
+    arg_type: type_key,
+    bindings: *std.ArrayListUnmanaged(generic_binding),
+) bool {
+    return switch (param_type) {
+        .unknown => true,
+        .name => |name| blk: {
+            if (is_enum_generic(b, info, name)) {
+                break :blk bind_generic(b.allocator, bindings, name, arg_type);
+            }
+            break :blk type_key_eq(param_type, arg_type);
+        },
+        .dyn_trait => |name| blk: {
+            if (is_enum_generic(b, info, name)) {
+                break :blk bind_generic(b.allocator, bindings, name, arg_type);
+            }
+            break :blk type_key_eq(param_type, arg_type);
+        },
+        .applied => |ap| switch (arg_type) {
+            .applied => |arg_ap| blk: {
+                if (!std.mem.eql(u8, ap.base, arg_ap.base)) break :blk false;
+                if (ap.args.len != arg_ap.args.len) break :blk false;
+                for (ap.args, 0..) |param_arg, idx| {
+                    if (!match_enum_param_type(b, info, param_arg, arg_ap.args[idx], bindings)) break :blk false;
                 }
                 break :blk true;
             },
@@ -2432,9 +2571,10 @@ const function_ctx = struct {
         const left_type = self.infer_expr_type(left_id);
         const right_type = self.infer_expr_type(right_id);
 
+        const optional_method = op == .equal or op == .not_equal;
         if (self.trait_name_from_type(left_type) != null or self.is_known_non_builtin(left_type)) {
             const maybe_reg = self.try_compile_method_call(method, left_id, &.{right_id}) catch |err| switch (err) {
-                error.unknown_function => {
+                error.unknown_function => if (optional_method) null else {
                     self.record_binary_operator_error(node_id, op, left_type, right_type);
                     return err;
                 },
@@ -2447,7 +2587,7 @@ const function_ctx = struct {
             if (maybe_reg) |reg| {
                 return reg;
             }
-            if (self.is_known_non_builtin(left_type)) {
+            if (self.is_known_non_builtin(left_type) and !optional_method) {
                 self.record_binary_operator_error(node_id, op, left_type, right_type);
                 return error.unknown_function;
             }
@@ -2464,6 +2604,23 @@ const function_ctx = struct {
         left_type: type_key,
         right_type: type_key,
     ) lower_error!u8 {
+        if (op == .equal or op == .not_equal) {
+            if (type_key_base_name(left_type)) |left_name| {
+                if (self.b.enums.contains(left_name)) {
+                    const right_name = type_key_base_name(right_type);
+                    if (right_name == null or std.mem.eql(u8, left_name, right_name.?)) {
+                        const left_reg = try self.compile_expr(left_id);
+                        const right_reg = try self.compile_expr(right_id);
+                        const words = self.type_word_count(left_type);
+                        const result = try self.emit_compare_words(left_reg, right_reg, words, op == .not_equal);
+                        self.free_temp_value(left_reg, left_type);
+                        self.free_temp_value(right_reg, right_type);
+                        return result;
+                    }
+                }
+            }
+        }
+
         const same_int = self.is_int_type_key(left_type) and self.is_int_type_key(right_type);
         const same_float = self.is_float_type_key(left_type) and self.is_float_type_key(right_type);
         const same_bool = self.is_bool_type_key(left_type) and self.is_bool_type_key(right_type);
@@ -2935,6 +3092,9 @@ const function_ctx = struct {
         }
 
         const name = base.name;
+        if (base.receiver == null) {
+            if (self.infer_enum_constructor_type(name, arg_ids)) |enum_ty| return enum_ty;
+        }
         if (is_print_name(name)) return .{ .name = "unit" };
         if (is_cancel_name(name)) return .{ .name = "unit" };
 
@@ -2959,6 +3119,7 @@ const function_ctx = struct {
 
         const group = self.b.functions.get(name) orelse return .unknown;
         const resolved = self.resolve_function_overload(group.items, arg_type_slice) catch return .unknown;
+        defer if (resolved.bindings.len > 0) self.b.allocator.free(resolved.bindings);
         const info = resolved.info;
         const return_type = info.decl.return_type orelse return .unknown;
         const base_return = type_key_from_type_node_with_self(self.b, return_type, info.impl_for);
@@ -2966,8 +3127,36 @@ const function_ctx = struct {
         if (resolved.bindings.len > 0) {
             resolved_return = apply_bindings_to_type_key(self.b, base_return, resolved.bindings);
         }
-        if (resolved.bindings.len > 0) self.b.allocator.free(resolved.bindings);
         return resolved_return;
+    }
+
+    fn infer_enum_constructor_type(
+        self: *function_ctx,
+        name: []const u8,
+        arg_ids: []const mir_mod.mir_identifier,
+    ) ?type_key {
+        const split = split_enum_constructor_name(name) orelse return null;
+        const info = self.b.enums.get(split.enum_name) orelse return null;
+
+        var payload: ?mir_mod.mir_identifier = null;
+        var found = false;
+        for (info.variants) |variant| {
+            if (std.mem.eql(u8, self.b.string_value(variant.name), split.variant_name)) {
+                payload = variant.payload;
+                found = true;
+                break;
+            }
+        }
+        if (!found) return null;
+
+        var bindings = std.ArrayListUnmanaged(generic_binding){};
+        defer bindings.deinit(self.b.allocator);
+        if (payload != null and arg_ids.len == 1) {
+            const payload_key = type_key_from_type_node_with_self(self.b, payload.?, split.enum_name);
+            const arg_key = self.infer_expr_type(arg_ids[0]);
+            _ = match_enum_param_type(self.b, info, payload_key, arg_key, &bindings);
+        }
+        return enum_return_type_key(self.b, split.enum_name, info, bindings.items);
     }
 
     fn match_overload(
@@ -3075,6 +3264,10 @@ const function_ctx = struct {
 
         const info = overloads[best_idx.?];
         const owned = best_bindings.toOwnedSlice(self.b.allocator) catch return error.out_of_memory;
+        if (owned.len == 0) {
+            self.b.allocator.free(owned);
+            return .{ .info = info, .bindings = &[_]generic_binding{} };
+        }
         return .{ .info = info, .bindings = owned };
     }
 
@@ -3491,6 +3684,13 @@ const function_ctx = struct {
     }
 
     fn compile_expr(self: *function_ctx, id: mir_mod.mir_identifier) lower_error!u8 {
+        errdefer |err| {
+            if (err == error.unsupported_node) {
+                if (self.b.error_info != null and self.b.error_info.?.message == null) {
+                    self.b.set_error_message(id, "lir unsupported node");
+                }
+            }
+        }
         const node = self.b.node(id);
         return switch (node) {
             .integer => |value| blk: {
@@ -4325,11 +4525,16 @@ const function_ctx = struct {
         const same_bool = self.is_bool_type_key(left_type) and self.is_bool_type_key(right_type);
 
         if (binary_operator_method_name(op)) |method| {
+            const optional_method = op == .equal or op == .not_equal;
             if (self.trait_name_from_type(left_type) != null or self.is_known_non_builtin(left_type)) {
-                if (try self.try_compile_method_call_regs(method, left, left_type, null, &.{right}, &.{right_type})) |reg| {
+                const maybe_reg = self.try_compile_method_call_regs(method, left, left_type, null, &.{right}, &.{right_type}) catch |err| switch (err) {
+                    error.unknown_function => if (optional_method) null else return err,
+                    else => return err,
+                };
+                if (maybe_reg) |reg| {
                     return reg;
                 }
-                if (self.is_known_non_builtin(left_type)) return error.unknown_function;
+                if (self.is_known_non_builtin(left_type) and !optional_method) return error.unknown_function;
             }
         }
 
@@ -4443,6 +4648,26 @@ const function_ctx = struct {
         return dst;
     }
 
+    fn emit_compare_words(self: *function_ctx, left: u8, right: u8, words: u8, negate: bool) lower_error!u8 {
+        if (words == 0) return error.unsupported_node;
+        const dst = try self.alloc_temp();
+        try self.emit(.{ .compare_eq = .{ .dst = dst, .src_a = left, .src_b = right } });
+        var idx: u8 = 1;
+        while (idx < words) : (idx += 1) {
+            const tmp = try self.alloc_temp();
+            try self.emit(.{ .compare_eq = .{ .dst = tmp, .src_a = left + idx, .src_b = right + idx } });
+            try self.emit(.{ .bit_and = .{ .dst = dst, .src_a = dst, .src_b = tmp } });
+            self.free_temp(tmp);
+        }
+        if (!negate) return dst;
+        const zero_idx = try self.b.intern_const(0);
+        const zero_reg = try self.alloc_temp();
+        try self.emit(.{ .load_const = .{ .dst = zero_reg, .const_index = zero_idx } });
+        try self.emit(.{ .compare_eq = .{ .dst = dst, .src_a = dst, .src_b = zero_reg } });
+        self.free_temp(zero_reg);
+        return dst;
+    }
+
     fn wrap_atomic_value(
         self: *function_ctx,
         value_reg: u8,
@@ -4551,6 +4776,99 @@ const function_ctx = struct {
         const dst_reg = try self.alloc_temp();
         try self.emit(.{ .task_spawn = .{ .dst = dst_reg, .target = info.label, .argc = total_words - 1 } });
         return dst_reg;
+    }
+
+    fn try_compile_enum_constructor(
+        self: *function_ctx,
+        name: []const u8,
+        arg_ids: []const mir_mod.mir_identifier,
+        arg_types: []const type_key,
+        node_id: mir_mod.mir_identifier,
+    ) lower_error!?u8 {
+        const split = split_enum_constructor_name(name) orelse return null;
+        const info = self.b.enums.get(split.enum_name) orelse return null;
+
+        var payload_id: ?mir_mod.mir_identifier = null;
+        var variant_idx: usize = 0;
+        var found = false;
+        for (info.variants, 0..) |variant, idx| {
+            if (std.mem.eql(u8, self.b.string_value(variant.name), split.variant_name)) {
+                payload_id = variant.payload;
+                variant_idx = idx;
+                found = true;
+                break;
+            }
+        }
+        if (!found) return null;
+
+        const expected_args: usize = if (payload_id != null) 1 else 0;
+        if (arg_ids.len != expected_args) {
+            self.b.set_error_fmt(
+                node_id,
+                "invalid call to {s}: expected {d} arguments, got {d}",
+                .{ name, expected_args, arg_ids.len },
+            );
+            return error.unknown_function;
+        }
+
+        var bindings = std.ArrayListUnmanaged(generic_binding){};
+        defer bindings.deinit(self.b.allocator);
+
+        const return_type = self.infer_expr_type(node_id);
+        if (return_type == .applied and std.mem.eql(u8, return_type.applied.base, split.enum_name)) {
+            const args = return_type.applied.args;
+            const limit = @min(info.generics.len, args.len);
+            var idx: usize = 0;
+            while (idx < limit) : (idx += 1) {
+                const gen = info.generics[idx];
+                if (gen.kind != .type) continue;
+                const gen_name = self.b.string_value(gen.name);
+                _ = bind_generic(self.b.allocator, &bindings, gen_name, args[idx]);
+            }
+        }
+
+        var payload_type: ?type_key = null;
+        var payload_words: u8 = 0;
+        if (payload_id) |payload_node| {
+            var payload_key = type_key_from_type_node_with_self(self.b, payload_node, split.enum_name);
+            if (arg_types.len == 1) {
+                _ = match_enum_param_type(self.b, info, payload_key, arg_types[0], &bindings);
+            }
+            if (bindings.items.len > 0) {
+                payload_key = apply_bindings_to_type_key(self.b, payload_key, bindings.items);
+            }
+            payload_type = payload_key;
+            payload_words = word_count_for_type(self.b, payload_key);
+        }
+
+        const max_payload_words = enum_max_payload_words(self.b, split.enum_name, info, bindings.items);
+        const total_words = max_payload_words + 1;
+        const base_reg = try self.alloc_temp_words(total_words);
+
+        const tag_reg = try self.load_const_reg(@intCast(variant_idx));
+        try self.emit(.{ .move = .{ .dst = base_reg, .src = tag_reg } });
+        if (self.is_temp(tag_reg)) self.free_temp(tag_reg);
+
+        if (payload_id != null) {
+            const value_reg = try self.compile_expr(arg_ids[0]);
+            if (payload_words <= 1) {
+                const dst = base_reg + 1;
+                if (value_reg != dst) {
+                    try self.emit(.{ .move = .{ .dst = dst, .src = value_reg } });
+                }
+            } else {
+                try self.copy_words(base_reg + 1, value_reg, payload_words);
+            }
+            if (payload_type) |payload_key| {
+                self.free_temp_value(value_reg, payload_key);
+            }
+        }
+
+        if (payload_words < max_payload_words) {
+            try self.zero_words(base_reg + 1 + payload_words, max_payload_words - payload_words);
+        }
+
+        return base_reg;
     }
 
     fn compile_await_expr(self: *function_ctx, id: mir_mod.mir_identifier) lower_error!u8 {
@@ -5497,7 +5815,11 @@ const function_ctx = struct {
                     self.b.set_error_fmt(arg_id, "cannot print value of dyn {s}", .{type_name});
                     return error.unknown_function;
                 },
-                .applied => |ap| {
+                .applied => |ap| blk: {
+                    if (std.mem.eql(u8, ap.base, "int") or std.mem.eql(u8, ap.base, "uint")) break :blk "print_int";
+                    if (std.mem.eql(u8, ap.base, "float")) break :blk "print_float";
+                    if (std.mem.eql(u8, ap.base, "bool")) break :blk "print_bool";
+                    if (std.mem.eql(u8, ap.base, "string")) break :blk "print_string";
                     self.b.set_error_fmt(arg_id, "cannot print value of type {s}", .{ap.base});
                     return error.unknown_function;
                 },
@@ -5723,6 +6045,10 @@ const function_ctx = struct {
             return self.compile_cancel_call(arg_ids);
         }
 
+        if (base.receiver == null) {
+            if (try self.try_compile_enum_constructor(name, arg_ids, arg_type_slice, id)) |reg| return reg;
+        }
+
         if (self.b.foreigns.contains(name)) {
             if (self.b.foreign_overloads.get(name)) |overloads| {
                 if (overloads.items.len > 1) {
@@ -5780,8 +6106,21 @@ const function_ctx = struct {
             },
             else => return err,
         };
-        defer if (resolved.bindings.len > 0) self.b.allocator.free(resolved.bindings);
         const info = resolved.info;
+
+        var call_bindings = std.ArrayListUnmanaged(generic_binding){};
+        defer call_bindings.deinit(self.b.allocator);
+        if (resolved.bindings.len > 0) {
+            call_bindings.appendSlice(self.b.allocator, resolved.bindings) catch return error.out_of_memory;
+        }
+        if (call_bindings.items.len < info.decl.generics.len) {
+            if (info.decl.return_type) |ret_id| {
+                const base_return = type_key_from_type_node_with_self(self.b, ret_id, info.impl_for);
+                const call_return = self.infer_expr_type(id);
+                _ = match_param_type(self.b, info.decl, base_return, call_return, &call_bindings);
+            }
+        }
+        defer if (resolved.bindings.len > 0) self.b.allocator.free(resolved.bindings);
 
         var arg_regs: [8]u8 = undefined;
         for (arg_ids, 0..) |arg_id, idx| {
@@ -5792,8 +6131,8 @@ const function_ctx = struct {
             type_key_from_type_node_with_self(self.b, ret_id, info.impl_for)
         else
             type_key{ .name = "unit" };
-        if (resolved.bindings.len > 0) {
-            base_return = apply_bindings_to_type_key(self.b, base_return, resolved.bindings);
+        if (call_bindings.items.len > 0) {
+            base_return = apply_bindings_to_type_key(self.b, base_return, call_bindings.items);
         }
         const return_words = self.type_word_count(base_return);
 
@@ -5811,7 +6150,7 @@ const function_ctx = struct {
 
         _ = try self.emit_argument_values(arg_regs[0..arg_ids.len], arg_type_slice, dst_start);
 
-        const target = try self.b.ensure_instance(info, resolved.bindings);
+        const target = try self.b.ensure_instance(info, call_bindings.items);
         try self.emit(.{ .call = .{ .target = target } });
 
         if (sret_ptr) |ptr| if (self.is_temp(ptr)) self.free_temp(ptr);
@@ -6261,6 +6600,17 @@ pub fn lower_with_options(
                         }) catch return error.out_of_memory;
                     }
                 },
+                .@"enum" => |en| {
+                    const name = b.string_value(en.name);
+                    if (!b.enums.contains(name)) {
+                        const variants = b.allocator.alloc(mir_mod.mir.enum_variant, en.variants.len) catch return error.out_of_memory;
+                        std.mem.copyForwards(mir_mod.mir.enum_variant, variants, en.variants);
+                        b.enums.put(name, .{
+                            .variants = variants,
+                            .generics = en.generics,
+                        }) catch return error.out_of_memory;
+                    }
+                },
                 .trait => |tr| {
                     const trait_name = b.string_value(tr.name);
                     if (!b.traits.contains(trait_name)) {
@@ -6286,6 +6636,13 @@ pub fn lower_with_options(
                             .requires = req_slice,
                             .is_auto = tr.is_auto,
                         }) catch return error.out_of_memory;
+                    }
+                },
+                .type_alias => |alias| {
+                    if (alias.generics.len != 0) break;
+                    const name = b.string_value(alias.name);
+                    if (!b.type_aliases.contains(name)) {
+                        b.type_aliases.put(name, alias.value) catch return error.out_of_memory;
                     }
                 },
                 else => {},
@@ -6415,19 +6772,6 @@ pub fn lower_with_options(
         }
     }
 
-    if (options.signatures) |sigs| {
-        for (functions.items) |info| {
-            const name = b.string_value(info.decl.name);
-            const duped = b.allocator.dupe(u8, name) catch return error.out_of_memory;
-            sigs.append(.{
-                .name = duped,
-                .label = info.label,
-                .param_count = info.decl.params.len,
-                .is_method = info.impl_for != null,
-            }) catch return error.out_of_memory;
-        }
-    }
-
     if (options.require_main) {
         const main_group = b.functions.get("main") orelse return error.missing_main;
         var main_info: ?function_info = null;
@@ -6466,6 +6810,31 @@ pub fn lower_with_options(
             }
         } else {
             try ctx.emit(.{ .ret = {} });
+        }
+    }
+
+    if (options.signatures) |sigs| {
+        for (b.instances.items) |instance| {
+            const info = instance.info;
+            const base_name = if (instance.bindings.len != 0)
+                try b.instance_key(info, instance.bindings)
+            else
+                b.string_value(info.decl.name);
+            const duped = b.allocator.dupe(u8, base_name) catch return error.out_of_memory;
+            const impl_for = if (info.impl_for) |impl_name|
+                b.allocator.dupe(u8, impl_name) catch {
+                    b.allocator.free(duped);
+                    return error.out_of_memory;
+                }
+            else
+                null;
+            sigs.append(.{
+                .name = duped,
+                .label = info.label,
+                .param_count = info.decl.params.len,
+                .is_method = info.impl_for != null,
+                .impl_for = impl_for,
+            }) catch return error.out_of_memory;
         }
     }
 

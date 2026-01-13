@@ -19,7 +19,7 @@ pub fn compile_to_inkb(allocator: mem_allocator, req: compile_request, output_pa
         const constants = result.constants orelse return error.MissingConstants;
         const data = result.data orelse return error.MissingData;
         const foreigns = result.foreigns orelse return error.MissingForeigns;
-        try inkb.write_file(output_path, bytecode, constants, data, foreigns);
+        try inkb.write_file(output_path, bytecode, constants, data, foreigns, result.debug);
     }
     return result;
 }

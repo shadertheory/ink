@@ -72,6 +72,11 @@ fn print_usage(writer: *std.Io.Writer, exe_name: []const u8) !void {
             "  --manifest <path>  Path to package.ink or package dir (default: .)\n" ++
             "  --out <path>       Output .inkb path (build only)\n" ++
             "  --profile <name>   Build profile to use (build/run)\n" ++
+            "  --scenario <name>  Scenario to run (sim only)\n" ++
+            "  --all              Run all scenarios (sim only)\n" ++
+            "  --seed <n>          Override simulator seed (sim only)\n" ++
+            "  --samples <n>       Override sweep samples (sim only)\n" ++
+            "  --replay <path>    Replay snapshot path (sim only)\n" ++
             "  --target <target>  Target backend (build/run)\n" ++
             "  --prefix <path>    Install prefix (install only)\n",
     );
@@ -86,7 +91,21 @@ fn handle_usage_error(err: anyerror, exe_name: []const u8) !void {
 }
 
 fn resolve_manifest_root(allocator: mem_allocator, path: []const u8) ![]const u8 {
-    const abs = try std.fs.cwd().realpathAlloc(allocator, path);
+    const abs = std.fs.cwd().realpathAlloc(allocator, path) catch |err| {
+        if (err == error.FileNotFound and !std.fs.path.isAbsolute(path)) {
+            if (try find_workspace_root(allocator)) |root| {
+                defer allocator.free(root);
+                const candidate = try std.fs.path.join(allocator, &.{ root, path });
+                defer allocator.free(candidate);
+                return resolve_manifest_root(allocator, candidate);
+            }
+        }
+        return err;
+    };
+    return manifest_root_from_abs(allocator, abs);
+}
+
+fn manifest_root_from_abs(allocator: mem_allocator, abs: []const u8) ![]const u8 {
     errdefer allocator.free(abs);
     const stat = try std.fs.cwd().statFile(abs);
     if (stat.kind == .directory) {
@@ -103,6 +122,11 @@ fn handle_build(allocator: mem_allocator, args: []const []const u8, run_after: b
     var out_path: ?[]const u8 = null;
     var target_text: ?[]const u8 = null;
     var profile: ?[]const u8 = forced_profile;
+    var scenario: ?[]const u8 = null;
+    var replay_path: ?[]const u8 = null;
+    var seed_text: ?[]const u8 = null;
+    var samples_text: ?[]const u8 = null;
+    var run_all = false;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -132,6 +156,38 @@ fn handle_build(allocator: mem_allocator, args: []const []const u8, run_after: b
             i += 1;
             continue;
         }
+        if (std.mem.eql(u8, arg, "--scenario")) {
+            if (i + 1 >= args.len) return error.InvalidArgs;
+            scenario = args[i + 1];
+            i += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--all")) {
+            run_all = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--replay")) {
+            if (i + 1 >= args.len) return error.InvalidArgs;
+            replay_path = args[i + 1];
+            i += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--seed")) {
+            if (i + 1 >= args.len) return error.InvalidArgs;
+            seed_text = args[i + 1];
+            i += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--samples")) {
+            if (i + 1 >= args.len) return error.InvalidArgs;
+            samples_text = args[i + 1];
+            i += 1;
+            continue;
+        }
+        return error.InvalidArgs;
+    }
+
+    if ((replay_path != null or seed_text != null or samples_text != null or run_all) and !(run_after and profile != null and std.mem.eql(u8, profile.?, "sim"))) {
         return error.InvalidArgs;
     }
 
@@ -189,6 +245,11 @@ fn handle_build(allocator: mem_allocator, args: []const []const u8, run_after: b
     defer allocator.free(inkc_path);
     const inkvm_path = if (run_after) try find_tool_path(allocator, "inkvm") else null;
     defer if (inkvm_path != null) allocator.free(inkvm_path.?);
+    var inksim_path: ?[]const u8 = null;
+    defer if (inksim_path != null) allocator.free(inksim_path.?);
+    if (run_after and profile != null and std.mem.eql(u8, profile.?, "sim")) {
+        inksim_path = find_tool_path(allocator, "inksim") catch null;
+    }
 
     try std.fs.cwd().makePath(std.fs.path.dirname(final_out) orelse ".");
 
@@ -214,7 +275,33 @@ fn handle_build(allocator: mem_allocator, args: []const []const u8, run_after: b
 
     if (run_after) {
         if (profile != null and std.mem.eql(u8, profile.?, "sim")) {
-            const inkvm_args = try build_tool_args(allocator, inkvm_path.?, &.{ "--sim", final_out });
+            var argv = array_list([]const u8).init(allocator);
+            defer argv.deinit();
+            const runner = inksim_path orelse inkvm_path.?;
+            try argv.append(runner);
+            if (inksim_path == null) {
+                try argv.append("--sim");
+            }
+            if (run_all) {
+                try argv.append("--all");
+            } else if (scenario) |name| {
+                try argv.append("--scenario");
+                try argv.append(name);
+            }
+            if (replay_path) |path| {
+                try argv.append("--replay");
+                try argv.append(path);
+            }
+            if (seed_text) |seed| {
+                try argv.append("--seed");
+                try argv.append(seed);
+            }
+            if (samples_text) |samples| {
+                try argv.append("--samples");
+                try argv.append(samples);
+            }
+            try argv.append(final_out);
+            const inkvm_args = try argv.toOwnedSlice();
             defer allocator.free(inkvm_args);
             const run_term = try run_tool(allocator, inkvm_args, root_dir);
             if (!term_ok(run_term)) return error.RunFailed;
@@ -241,8 +328,8 @@ fn handle_new(allocator: mem_allocator, args: []const []const u8) !void {
 
 fn write_project_templates(allocator: mem_allocator, root_dir: []const u8) !void {
     const package_template =
-        "import build\n\n" ++
-        "fn package()\n" ++
+        "import build\n" ++
+        "\nfn package()\n" ++
         "\tbuild::package\n" ++
         "\t\tname = \"app\"\n" ++
         "\t\tversion = \"0.1.0\"\n" ++
@@ -250,6 +337,7 @@ fn write_project_templates(allocator: mem_allocator, root_dir: []const u8) !void
         "\t\tprofile = build::profile\n" ++
         "\t\t\tname = \"debug\"\n" ++
         "\t\t\ttarget = \"vm\"\n" ++
+        "\t\t\tsandbox = true\n" ++
         "\t\tprofile = build::profile\n" ++
         "\t\t\tname = \"release\"\n" ++
         "\t\t\ttarget = \"vm\"\n" ++
@@ -265,6 +353,8 @@ fn write_project_templates(allocator: mem_allocator, root_dir: []const u8) !void
         "\tsim::simulator\n" ++
         "\t\tseed = 0\n" ++
         "\t\tconcurrency = \"half\"\n" ++
+        "\t\tforeigns = sim::foreigns\n" ++
+        "\t\t\tallow_categories = \"mem io time task macro\"\n" ++
         "\t\tsnapshots = sim::snapshots\n" ++
         "\t\t\tsteps = 1\n" ++
         "\t\t\tmode = \"full+delta\"\n" ++
@@ -483,6 +573,12 @@ fn handle_install(allocator: mem_allocator, args: []const []const u8) !void {
             const inkvm_name = try tool_filename(allocator, "inkvm");
             defer allocator.free(inkvm_name);
             try copy_tool(std.fs.cwd(), inkvm_path, dest_dir, inkvm_name);
+        }
+        if (try find_tool_binary(allocator, root, "inksim")) |inksim_path| {
+            defer allocator.free(inksim_path);
+            const inksim_name = try tool_filename(allocator, "inksim");
+            defer allocator.free(inksim_name);
+            try copy_tool(std.fs.cwd(), inksim_path, dest_dir, inksim_name);
         }
     }
 }

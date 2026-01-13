@@ -374,11 +374,13 @@ const desugarer = struct {
                 return node;
             },
             .binary => |bin| {
-                const left = try self.desugar_node(ink.ast.deref(bin.left));
-                const right = try self.desugar_node(ink.ast.deref(bin.right));
                 if (bin.op == .scope_access) {
+                    const left = ink.ast.deref(bin.left);
+                    const right = ink.ast.deref(bin.right);
                     return self.desugar_scope_access(node, left, right);
                 }
+                const left = try self.desugar_node(ink.ast.deref(bin.left));
+                const right = try self.desugar_node(ink.ast.deref(bin.right));
                 if (self.operator_binary.get(bin.op)) |target| {
                     const loc = node_location(left);
                     const base = try self.new_identifier(node, target.name, loc);
@@ -1071,7 +1073,10 @@ const desugarer = struct {
             .start = parts.items[0].where.start,
             .end = parts.items[parts.items.len - 1].where.end,
         };
-        const is_builtin_scope = std.mem.eql(u8, head, "error");
+        const is_builtin_scope = std.mem.eql(u8, head, "error") or
+            std.mem.eql(u8, head, "token_tree_kind") or
+            std.mem.eql(u8, head, "token_kind") or
+            std.mem.eql(u8, head, "delimiter");
         const has_scope = self.import_map.contains(head) or
             self.scope_map.contains(head) or
             self.module_map.contains(head) or

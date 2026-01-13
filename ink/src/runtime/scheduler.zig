@@ -34,10 +34,10 @@ pub const scheduler = struct {
     children: std.AutoHashMap(task_id, std.ArrayListUnmanaged(task_id)),
     joining: std.AutoHashMap(task_id, void),
 
-    pub fn init(allocator: std.mem.Allocator) !scheduler {
+    pub fn init(allocator: std.mem.Allocator, config: async.Config) !scheduler {
         return .{
             .allocator = allocator,
-            .reactor = try async.reactor.init(allocator),
+            .reactor = try async.reactor.init(allocator, config),
             .next_task_id = 1,
             .tasks = std.AutoHashMap(task_id, task).init(allocator),
             .ready = .{},
@@ -167,6 +167,10 @@ pub const scheduler = struct {
     pub fn sleep(self: *scheduler, id: task_id, timeout_ns: u64) !void {
         const op_id = try self.reactor.submit_timer(timeout_ns, @intCast(id));
         try self.wait(id, op_id);
+    }
+
+    pub fn now_ns(self: *scheduler) u64 {
+        return self.reactor.now_ns();
     }
 
     pub fn run(self: *scheduler) !void {

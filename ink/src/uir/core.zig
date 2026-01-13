@@ -19,6 +19,7 @@ pub const uir = union(enum) {
     duration: i64,
     string: string_identifier,
     boolean: bool,
+    none: void,
     identifier: string_identifier,
 
     unary: struct { op: ink.unary, right: uir_identifier },

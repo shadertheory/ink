@@ -2,6 +2,9 @@ const std = @import("std");
 const builtin = @import("builtin");
 const inkb = @import("inkb.zig");
 const macro_context = @import("../macro_context.zig");
+const runtime_fd = @import("../runtime/fd.zig");
+const async_common = @import("../runtime/async_common.zig");
+const op_kind = async_common.op_kind;
 const thread_mutex = std.Thread.Mutex;
 
 var atomic_mutex = thread_mutex{};
@@ -150,7 +153,7 @@ pub const Resolver = struct {
 };
 
 pub fn dispatch(machine: anytype, id: foreign_id) void {
-    const debug_checks = builtin.mode != .ReleaseFast;
+    const debug_checks = machine.debug_checks;
     if (id >= machine.foreign_names.len) {
         fail(machine, "unknown foreign id");
         return;
@@ -750,10 +753,17 @@ fn builtin_sleep(machine: anytype, debug_checks: bool) void {
     }
 
     const timeout_ns = read_arg(machine, 1);
-    const op_id = sched.reactor.submit_timer(timeout_ns, @intCast(machine.current_task_id)) catch {
+    const op_id = sched.reactor.submit_timer(timeout_ns, @intCast(machine.current_task_id)) catch |err| {
+        if (err == error.ReplayMismatch) {
+            fail(machine, "sim replay mismatch");
+            return;
+        }
         set_result(machine, false, 0, debug_checks);
         return;
     };
+    if (machine.trace) |trace_ctx| {
+        trace_ctx.note_io(machine.current_task_id, op_kind.timer);
+    }
     set_pending(machine, op_id);
     machine.suspend_op(op_id);
 }
@@ -779,13 +789,20 @@ fn builtin_sleep_until(machine: anytype, debug_checks: bool) void {
     }
 
     const deadline_ns = read_arg(machine, 1);
-    const now_ns = monotonic_now_ns();
+    const now_ns = sched.now_ns();
     const sub = @subWithOverflow(deadline_ns, now_ns);
     const timeout_ns = if (sub[1] != 0) 0 else sub[0];
-    const op_id = sched.reactor.submit_timer(timeout_ns, @intCast(machine.current_task_id)) catch {
+    const op_id = sched.reactor.submit_timer(timeout_ns, @intCast(machine.current_task_id)) catch |err| {
+        if (err == error.ReplayMismatch) {
+            fail(machine, "sim replay mismatch");
+            return;
+        }
         set_result(machine, false, 0, debug_checks);
         return;
     };
+    if (machine.trace) |trace_ctx| {
+        trace_ctx.note_io(machine.current_task_id, op_kind.timer);
+    }
     set_pending(machine, op_id);
     machine.suspend_op(op_id);
 }
@@ -801,7 +818,7 @@ fn monotonic_now_ns() u64 {
 fn builtin_timeout(machine: anytype, debug_checks: bool) void {
     _ = debug_checks;
     const duration_ns = read_arg(machine, 1);
-    const now_ns = monotonic_now_ns();
+    const now_ns = if (machine.scheduler) |sched| sched.now_ns() else monotonic_now_ns();
     const add = @addWithOverflow(now_ns, duration_ns);
     const deadline_ns = if (add[1] != 0) std.math.maxInt(u64) else add[0];
     set_ret(machine, deadline_ns);
@@ -846,17 +863,25 @@ fn builtin_io_read(machine: anytype, debug_checks: bool) void {
         return;
     }
 
-    const fd = to_fd(read_arg(machine, 1), debug_checks, machine) orelse return;
+    const fd_val = read_arg(machine, 1);
+    _ = to_fd_info(fd_val, debug_checks, machine) orelse return;
     const buf_handle = read_arg(machine, 2);
     const slice = buf_write_slice(machine, buf_handle, debug_checks) orelse return;
     if (slice.len == 0) {
         set_result(machine, true, 0, debug_checks);
         return;
     }
-    const op_id = sched.reactor.submit_read(fd, slice, @intCast(machine.current_task_id)) catch {
+    const op_id = sched.reactor.submit_read(fd_val, slice, @intCast(machine.current_task_id)) catch |err| {
+        if (err == error.ReplayMismatch) {
+            fail(machine, "sim replay mismatch");
+            return;
+        }
         set_result(machine, false, 0, debug_checks);
         return;
     };
+    if (machine.trace) |trace_ctx| {
+        trace_ctx.note_io(machine.current_task_id, op_kind.read);
+    }
     set_pending(machine, op_id);
     machine.suspend_op(op_id);
 }
@@ -888,17 +913,25 @@ fn builtin_io_write(machine: anytype, debug_checks: bool) void {
         return;
     }
 
-    const fd = to_fd(read_arg(machine, 1), debug_checks, machine) orelse return;
+    const fd_val = read_arg(machine, 1);
+    _ = to_fd_info(fd_val, debug_checks, machine) orelse return;
     const buf_handle = read_arg(machine, 2);
     const slice = buf_read_slice(machine, buf_handle, debug_checks) orelse return;
     if (slice.len == 0) {
         set_result(machine, true, 0, debug_checks);
         return;
     }
-    const op_id = sched.reactor.submit_write(fd, slice, @intCast(machine.current_task_id)) catch {
+    const op_id = sched.reactor.submit_write(fd_val, slice, @intCast(machine.current_task_id)) catch |err| {
+        if (err == error.ReplayMismatch) {
+            fail(machine, "sim replay mismatch");
+            return;
+        }
         set_result(machine, false, 0, debug_checks);
         return;
     };
+    if (machine.trace) |trace_ctx| {
+        trace_ctx.note_io(machine.current_task_id, op_kind.write);
+    }
     set_pending(machine, op_id);
     machine.suspend_op(op_id);
 }
@@ -908,6 +941,8 @@ fn builtin_io_accept(machine: anytype, debug_checks: bool) void {
         set_result(machine, false, 0, debug_checks);
         return;
     };
+    const fd_val = read_arg(machine, 1);
+    const info = to_fd_info(fd_val, debug_checks, machine) orelse return;
     if (pending_match(machine)) {
         const op_id = machine.pending_op_id;
         if (sched.take_completion(op_id)) |completion| {
@@ -916,19 +951,30 @@ fn builtin_io_accept(machine: anytype, debug_checks: bool) void {
                 set_result(machine, false, err_code(err), debug_checks);
                 return;
             }
-            const fd_val = result_count(completion.result) orelse 0;
-            set_result(machine, true, fd_val, debug_checks);
+            const raw_val = result_count(completion.result) orelse 0;
+            const already_tagged = (raw_val & runtime_fd.fd_raw_mask) != raw_val;
+            const out_val = if (already_tagged)
+                raw_val
+            else
+                runtime_fd.encode(@intCast(raw_val), if (info.kind == .unknown) .tcp else info.kind);
+            set_result(machine, true, out_val, debug_checks);
             return;
         }
         machine.suspend_op(op_id);
         return;
     }
 
-    const fd = to_fd(read_arg(machine, 1), debug_checks, machine) orelse return;
-    const op_id = sched.reactor.submit_accept(fd, @intCast(machine.current_task_id)) catch {
+    const op_id = sched.reactor.submit_accept(fd_val, @intCast(machine.current_task_id)) catch |err| {
+        if (err == error.ReplayMismatch) {
+            fail(machine, "sim replay mismatch");
+            return;
+        }
         set_result(machine, false, 0, debug_checks);
         return;
     };
+    if (machine.trace) |trace_ctx| {
+        trace_ctx.note_io(machine.current_task_id, op_kind.accept);
+    }
     set_pending(machine, op_id);
     machine.suspend_op(op_id);
 }
@@ -1011,6 +1057,9 @@ fn builtin_string_new(machine: anytype, debug_checks: bool) void {
 
 fn builtin_string_free(machine: anytype, debug_checks: bool) void {
     const handle = read_arg(machine, 1);
+    if (handle < @as(u64, @intCast(machine.data.len))) {
+        return;
+    }
     const ptr = to_usize(handle, debug_checks, machine) orelse return;
     free_block(machine, ptr, debug_checks);
 }
@@ -1603,8 +1652,7 @@ fn bytes_alloc(machine: anytype, cap: usize, debug_checks: bool) ?usize {
     return ptr;
 }
 
-fn string_info(machine: anytype, handle: u64, debug_checks: bool) ?string_view {
-    const ptr = to_usize(handle, debug_checks, machine) orelse return null;
+fn string_info_ptr(machine: anytype, ptr: usize, debug_checks: bool) ?string_view {
     if (debug_checks and ptr + string_header_words > machine.memory.data.len) {
         std.debug.print("string handle out of range: {d} mem={d} data={d}\n", .{ ptr, machine.memory.data.len, machine.data.len });
         fail(machine, "string handle out of range");
@@ -1625,6 +1673,42 @@ fn string_info(machine: anytype, handle: u64, debug_checks: bool) ?string_view {
         .payload_ptr = payload_ptr,
         .payload = payload,
     };
+}
+
+fn string_data_ptr(machine: anytype, idx: usize, debug_checks: bool) ?usize {
+    if (idx >= machine.data.len) {
+        if (debug_checks) fail(machine, "string data index out of range");
+        return null;
+    }
+    if (idx < machine.data_string_ptrs.len) {
+        const cached = machine.data_string_ptrs[idx];
+        if (cached != 0) return cached;
+    }
+    const entry = machine.data[idx];
+    if (entry.kind != .string) {
+        if (debug_checks) fail(machine, "string data kind mismatch");
+        return null;
+    }
+    const cap = entry.bytes.len;
+    const ptr = string_alloc(machine, cap, debug_checks) orelse return null;
+    const payload_ptr = ptr + string_header_words;
+    const payload = bytes_payload(machine, payload_ptr, cap);
+    std.mem.copyForwards(u8, payload[0..cap], entry.bytes);
+    machine.memory.write(ptr, @intCast(cap));
+    if (idx < machine.data_string_ptrs.len) {
+        machine.data_string_ptrs[idx] = ptr;
+    }
+    return ptr;
+}
+
+fn string_info(machine: anytype, handle: u64, debug_checks: bool) ?string_view {
+    if (handle < @as(u64, @intCast(machine.data.len))) {
+        const idx: usize = @intCast(handle);
+        const ptr = string_data_ptr(machine, idx, debug_checks) orelse return null;
+        return string_info_ptr(machine, ptr, debug_checks);
+    }
+    const ptr = to_usize(handle, debug_checks, machine) orelse return null;
+    return string_info_ptr(machine, ptr, debug_checks);
 }
 
 fn string_bytes(machine: anytype, value: u64, debug_checks: bool) ?[]const u8 {
@@ -1785,12 +1869,13 @@ fn result_count(value: isize) ?u64 {
     return @intCast(value);
 }
 
-fn to_fd(value: u64, debug_checks: bool, machine: anytype) ?std.posix.fd_t {
-    if (value > std.math.maxInt(std.posix.fd_t)) {
+fn to_fd_info(value: u64, debug_checks: bool, machine: anytype) ?runtime_fd.fd_info {
+    const raw = value & runtime_fd.fd_raw_mask;
+    if (raw > std.math.maxInt(std.posix.fd_t)) {
         if (debug_checks) fail(machine, "fd out of range");
         return null;
     }
-    return @intCast(value);
+    return runtime_fd.decode(value);
 }
 
 fn to_usize(value: u64, debug_checks: bool, machine: anytype) ?usize {
@@ -1879,6 +1964,7 @@ fn free_block(machine: anytype, ptr: usize, debug_checks: bool) void {
 
 fn heap_header_for_ptr(machine: anytype, ptr: usize) ?usize {
     const header_words: usize = 3;
+    const null_ptr = std.math.maxInt(usize);
     if (ptr < header_words) return null;
     var header = ptr - header_words;
     while (true) {
@@ -1898,7 +1984,22 @@ fn heap_header_for_ptr(machine: anytype, ptr: usize) ?usize {
                 header -= 1;
                 continue;
             }
-            if (ptr >= start and ptr < end) return header;
+            if (ptr >= start and ptr < end) {
+                const flags = machine.memory.read(header + 1);
+                if (flags == 0) {
+                    const next = @as(usize, @intCast(machine.memory.read(header + 2)));
+                    if (next != null_ptr) {
+                        if (header == 0) break;
+                        header -= 1;
+                        continue;
+                    }
+                } else if (flags != 1) {
+                    if (header == 0) break;
+                    header -= 1;
+                    continue;
+                }
+                return header;
+            }
         }
         if (header == 0) break;
         header -= 1;

@@ -11,6 +11,7 @@ fn package()
 		profile = build::profile
 			name = "debug"
 			target = "vm"
+			sandbox = true
 		profile = build::profile
 			name = "release"
 			target = "vm"

@@ -31,6 +31,7 @@ pub const lexer = struct {
     indent: stack,
     dedent: u8,
     cursor: u8,
+    line_start: bool,
 
     const stack = [255]u8;
 
@@ -46,6 +47,7 @@ pub const lexer = struct {
             .indent = undefined,
             .cursor = undefined,
             .dedent = 0,
+            .line_start = true,
         };
 
         instance.read_char();
@@ -106,6 +108,7 @@ pub const lexer = struct {
             self.read_char();
         }
 
+        self.line_start = true;
         const current_depth = self.indent[self.cursor - 1];
 
         if (tab_count > current_depth) {
@@ -125,6 +128,15 @@ pub const lexer = struct {
         }
 
         return self.delineate_from(.new_line, start);
+    }
+
+    fn match_leading_spaces(self: *lexer) ?token {
+        if (!self.line_start or self.current != spec.whitespace.space) return null;
+        const start = self.head;
+        while (self.current == spec.whitespace.space) {
+            self.read_char();
+        }
+        return self.delineate_from(.illegal, start);
     }
 
     fn match_whitespace_token(self: *lexer) ?token {
@@ -274,13 +286,30 @@ pub const lexer = struct {
             return self.delineate(.dedent);
         }
 
+        if (self.match_leading_spaces()) |illegal| return illegal;
+
         //Flush pending tokens.
         if (self.match_whitespace_token()) |whitespace| return whitespace;
-        if (self.match_simple_token_greedy()) |simple| return simple;
-        if (self.match_string_token()) |string| return string;
-        if (self.match_label_token()) |label| return label;
-        if (self.match_alpha_token()) |alpha| return alpha;
-        if (self.match_number_token()) |number| return number;
+        if (self.match_simple_token_greedy()) |simple| {
+            self.line_start = false;
+            return simple;
+        }
+        if (self.match_string_token()) |string| {
+            self.line_start = false;
+            return string;
+        }
+        if (self.match_label_token()) |label| {
+            self.line_start = false;
+            return label;
+        }
+        if (self.match_alpha_token()) |alpha| {
+            self.line_start = false;
+            return alpha;
+        }
+        if (self.match_number_token()) |number| {
+            self.line_start = false;
+            return number;
+        }
         if (self.match_end_of_file()) |eof| return eof;
         if (self.done()) return null;
 

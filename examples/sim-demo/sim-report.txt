@@ -1,0 +1,710 @@
+sim report: 8 runs
+runs:
+run chaos: scenario=chaos seed=7277622673076160841 events=39
+  snapshot dir: .ink/snapshots
+  faults:
+    none: 35
+    error: 1
+    delay: 3
+  fault events (4): #14 error, #21 delay, #22 delay, #28 delay
+  snapshots: 39
+    first: .ink/snapshots/chaos-h200d6rpq8g4kmxm.inksnapshot
+    last:  .ink/snapshots/chaos-06hhefj43z0gqbgu.inksnapshot
+  events: 39
+    #1 accept fault=none result=2305843009214693952 err=0 task=2 op=1 time=0
+    #2 accept fault=none result=2305843009214693954 err=0 task=4 op=3 time=0
+    #3 accept fault=none result=2305843009214693953 err=0 task=3 op=2 time=0
+    #4 accept fault=none result=2305843009214693955 err=0 task=4 op=4 time=0
+    #5 write fault=none result=17 err=0 task=6 op=6 time=0
+    #6 write fault=none result=17 err=0 task=5 op=5 time=0
+    #7 accept fault=none result=2305843009214693956 err=0 task=4 op=7 time=0
+    #8 read fault=none result=64 err=0 task=5 op=9 time=0
+    #9 accept fault=none result=2305843009214693957 err=0 task=4 op=10 time=0
+    #10 write fault=none result=28 err=0 task=5 op=11 time=0
+    #11 accept fault=none result=2305843009214693958 err=0 task=4 op=12 time=0
+    #12 accept fault=none result=2305843009214693959 err=0 task=4 op=13 time=0
+    #13 accept fault=none result=2305843009214693960 err=0 task=4 op=14 time=0
+    #14 accept fault=error result=-1 err=151 task=4 op=15 time=0
+    #15 accept fault=none result=2305843009214693962 err=0 task=4 op=16 time=0
+    #16 accept fault=none result=2305843009214693963 err=0 task=4 op=17 time=0
+    #17 accept fault=none result=2305843009214693964 err=0 task=4 op=18 time=0
+    #18 accept fault=none result=2305843009214693965 err=0 task=4 op=19 time=0
+    #19 accept fault=none result=2305843009214693966 err=0 task=4 op=20 time=0
+    #20 accept fault=none result=2305843009214693967 err=0 task=4 op=21 time=0
+    #21 read fault=delay result=64 err=0 task=6 op=8 time=1000000
+    #22 accept fault=delay result=2305843009214693968 err=0 task=4 op=22 time=1000000
+    #23 write fault=none result=28 err=0 task=6 op=23 time=1000000
+    #24 accept fault=none result=2305843009214693969 err=0 task=4 op=24 time=1000000
+    #25 accept fault=none result=2305843009214693970 err=0 task=4 op=25 time=1000000
+    #26 accept fault=none result=2305843009214693971 err=0 task=4 op=26 time=1000000
+    #27 accept fault=none result=2305843009214693972 err=0 task=4 op=27 time=1000000
+    #28 accept fault=delay result=2305843009214693973 err=0 task=4 op=28 time=2000000
+    #29 accept fault=none result=2305843009214693974 err=0 task=4 op=29 time=2000000
+    #30 accept fault=none result=2305843009214693975 err=0 task=4 op=30 time=2000000
+    #31 accept fault=none result=2305843009214693976 err=0 task=4 op=31 time=2000000
+    #32 accept fault=none result=2305843009214693977 err=0 task=4 op=32 time=2000000
+    #33 accept fault=none result=2305843009214693978 err=0 task=4 op=33 time=2000000
+    #34 accept fault=none result=2305843009214693979 err=0 task=4 op=34 time=2000000
+    #35 accept fault=none result=2305843009214693980 err=0 task=4 op=35 time=2000000
+    #36 accept fault=none result=2305843009214693981 err=0 task=4 op=36 time=2000000
+    #37 accept fault=none result=2305843009214693982 err=0 task=4 op=37 time=2000000
+    #38 accept fault=none result=2305843009214693983 err=0 task=4 op=38 time=2000000
+    #39 accept fault=none result=2305843009214693984 err=0 task=4 op=39 time=2000000
+  replay: quill sim --manifest /Volumes/Shadertheory/ink/examples/sim-demo/simulator.ink --scenario chaos --replay /Volumes/Shadertheory/ink/examples/sim-demo/.ink/snapshots/chaos-06hhefj43z0gqbgu.inksnapshot
+run default: scenario=default seed=8328551588505240077 events=40
+  snapshot dir: .ink/snapshots
+  faults:
+    none: 40
+  snapshots: 40
+    first: .ink/snapshots/default-miv1pymzvxkordtn.inksnapshot
+    last:  .ink/snapshots/default-2cihk32txp7ulysy.inksnapshot
+  events: 40
+    #1 accept fault=none result=2305843009214693952 err=0 task=2 op=1 time=0
+    #2 accept fault=none result=2305843009214693954 err=0 task=4 op=3 time=0
+    #3 accept fault=none result=2305843009214693953 err=0 task=3 op=2 time=0
+    #4 accept fault=none result=2305843009214693955 err=0 task=4 op=4 time=0
+    #5 write fault=none result=17 err=0 task=6 op=6 time=0
+    #6 write fault=none result=17 err=0 task=5 op=5 time=0
+    #7 accept fault=none result=2305843009214693956 err=0 task=4 op=7 time=0
+    #8 read fault=none result=64 err=0 task=5 op=9 time=0
+    #9 read fault=none result=64 err=0 task=6 op=8 time=0
+    #10 accept fault=none result=2305843009214693957 err=0 task=4 op=10 time=0
+    #11 write fault=none result=28 err=0 task=6 op=12 time=0
+    #12 write fault=none result=28 err=0 task=5 op=11 time=0
+    #13 accept fault=none result=2305843009214693958 err=0 task=4 op=13 time=0
+    #14 accept fault=none result=2305843009214693959 err=0 task=4 op=14 time=0
+    #15 accept fault=none result=2305843009214693960 err=0 task=4 op=15 time=0
+    #16 accept fault=none result=2305843009214693961 err=0 task=4 op=16 time=0
+    #17 accept fault=none result=2305843009214693962 err=0 task=4 op=17 time=0
+    #18 accept fault=none result=2305843009214693963 err=0 task=4 op=18 time=0
+    #19 accept fault=none result=2305843009214693964 err=0 task=4 op=19 time=0
+    #20 accept fault=none result=2305843009214693965 err=0 task=4 op=20 time=0
+    #21 accept fault=none result=2305843009214693966 err=0 task=4 op=21 time=0
+    #22 accept fault=none result=2305843009214693967 err=0 task=4 op=22 time=0
+    #23 accept fault=none result=2305843009214693968 err=0 task=4 op=23 time=0
+    #24 accept fault=none result=2305843009214693969 err=0 task=4 op=24 time=0
+    #25 accept fault=none result=2305843009214693970 err=0 task=4 op=25 time=0
+    #26 accept fault=none result=2305843009214693971 err=0 task=4 op=26 time=0
+    #27 accept fault=none result=2305843009214693972 err=0 task=4 op=27 time=0
+    #28 accept fault=none result=2305843009214693973 err=0 task=4 op=28 time=0
+    #29 accept fault=none result=2305843009214693974 err=0 task=4 op=29 time=0
+    #30 accept fault=none result=2305843009214693975 err=0 task=4 op=30 time=0
+    #31 accept fault=none result=2305843009214693976 err=0 task=4 op=31 time=0
+    #32 accept fault=none result=2305843009214693977 err=0 task=4 op=32 time=0
+    #33 accept fault=none result=2305843009214693978 err=0 task=4 op=33 time=0
+    #34 accept fault=none result=2305843009214693979 err=0 task=4 op=34 time=0
+    #35 accept fault=none result=2305843009214693980 err=0 task=4 op=35 time=0
+    #36 accept fault=none result=2305843009214693981 err=0 task=4 op=36 time=0
+    #37 accept fault=none result=2305843009214693982 err=0 task=4 op=37 time=0
+    #38 accept fault=none result=2305843009214693983 err=0 task=4 op=38 time=0
+    #39 accept fault=none result=2305843009214693984 err=0 task=4 op=39 time=0
+    #40 accept fault=none result=2305843009214693985 err=0 task=4 op=40 time=0
+  replay: quill sim --manifest /Volumes/Shadertheory/ink/examples/sim-demo/simulator.ink --scenario default --replay /Volumes/Shadertheory/ink/examples/sim-demo/.ink/snapshots/default-2cihk32txp7ulysy.inksnapshot
+run sweep-s0-r0: scenario=sweep seed=12538920746099325804 events=40
+  params: faults.tcp_drop=0 components.fs=mock
+  snapshot dir: .ink/snapshots
+  faults:
+    none: 40
+  snapshots: 40
+    first: .ink/snapshots/sweep-s0-r0-li5xc4b9sh5u5qvr.inksnapshot
+    last:  .ink/snapshots/sweep-s0-r0-bs0fcurgkff4wjhg.inksnapshot
+  events: 40
+    #1 accept fault=none result=2305843009214693952 err=0 task=2 op=1 time=0
+    #2 accept fault=none result=2305843009214693954 err=0 task=4 op=3 time=0
+    #3 accept fault=none result=2305843009214693953 err=0 task=3 op=2 time=0
+    #4 accept fault=none result=2305843009214693955 err=0 task=4 op=4 time=0
+    #5 write fault=none result=17 err=0 task=6 op=6 time=0
+    #6 write fault=none result=17 err=0 task=5 op=5 time=0
+    #7 accept fault=none result=2305843009214693956 err=0 task=4 op=7 time=0
+    #8 read fault=none result=64 err=0 task=5 op=9 time=0
+    #9 read fault=none result=64 err=0 task=6 op=8 time=0
+    #10 accept fault=none result=2305843009214693957 err=0 task=4 op=10 time=0
+    #11 write fault=none result=28 err=0 task=6 op=12 time=0
+    #12 write fault=none result=28 err=0 task=5 op=11 time=0
+    #13 accept fault=none result=2305843009214693958 err=0 task=4 op=13 time=0
+    #14 accept fault=none result=2305843009214693959 err=0 task=4 op=14 time=0
+    #15 accept fault=none result=2305843009214693960 err=0 task=4 op=15 time=0
+    #16 accept fault=none result=2305843009214693961 err=0 task=4 op=16 time=0
+    #17 accept fault=none result=2305843009214693962 err=0 task=4 op=17 time=0
+    #18 accept fault=none result=2305843009214693963 err=0 task=4 op=18 time=0
+    #19 accept fault=none result=2305843009214693964 err=0 task=4 op=19 time=0
+    #20 accept fault=none result=2305843009214693965 err=0 task=4 op=20 time=0
+    #21 accept fault=none result=2305843009214693966 err=0 task=4 op=21 time=0
+    #22 accept fault=none result=2305843009214693967 err=0 task=4 op=22 time=0
+    #23 accept fault=none result=2305843009214693968 err=0 task=4 op=23 time=0
+    #24 accept fault=none result=2305843009214693969 err=0 task=4 op=24 time=0
+    #25 accept fault=none result=2305843009214693970 err=0 task=4 op=25 time=0
+    #26 accept fault=none result=2305843009214693971 err=0 task=4 op=26 time=0
+    #27 accept fault=none result=2305843009214693972 err=0 task=4 op=27 time=0
+    #28 accept fault=none result=2305843009214693973 err=0 task=4 op=28 time=0
+    #29 accept fault=none result=2305843009214693974 err=0 task=4 op=29 time=0
+    #30 accept fault=none result=2305843009214693975 err=0 task=4 op=30 time=0
+    #31 accept fault=none result=2305843009214693976 err=0 task=4 op=31 time=0
+    #32 accept fault=none result=2305843009214693977 err=0 task=4 op=32 time=0
+    #33 accept fault=none result=2305843009214693978 err=0 task=4 op=33 time=0
+    #34 accept fault=none result=2305843009214693979 err=0 task=4 op=34 time=0
+    #35 accept fault=none result=2305843009214693980 err=0 task=4 op=35 time=0
+    #36 accept fault=none result=2305843009214693981 err=0 task=4 op=36 time=0
+    #37 accept fault=none result=2305843009214693982 err=0 task=4 op=37 time=0
+    #38 accept fault=none result=2305843009214693983 err=0 task=4 op=38 time=0
+    #39 accept fault=none result=2305843009214693984 err=0 task=4 op=39 time=0
+    #40 accept fault=none result=2305843009214693985 err=0 task=4 op=40 time=0
+  replay: quill sim --manifest /Volumes/Shadertheory/ink/examples/sim-demo/simulator.ink --scenario sweep --replay /Volumes/Shadertheory/ink/examples/sim-demo/.ink/snapshots/sweep-s0-r0-bs0fcurgkff4wjhg.inksnapshot
+run sweep-s0-r1: scenario=sweep seed=18060583579904758179 events=40
+  params: faults.tcp_drop=0 components.fs=real
+  snapshot dir: .ink/snapshots
+  faults:
+    none: 40
+  snapshots: 40
+    first: .ink/snapshots/sweep-s0-r1-7dwsynok7s3hv1wd.inksnapshot
+    last:  .ink/snapshots/sweep-s0-r1-pqcu5u91cy5te1rw.inksnapshot
+  events: 40
+    #1 accept fault=none result=2305843009214693952 err=0 task=2 op=1 time=0
+    #2 accept fault=none result=2305843009214693954 err=0 task=4 op=3 time=0
+    #3 accept fault=none result=2305843009214693953 err=0 task=3 op=2 time=0
+    #4 accept fault=none result=2305843009214693955 err=0 task=4 op=4 time=0
+    #5 write fault=none result=17 err=0 task=6 op=6 time=0
+    #6 write fault=none result=17 err=0 task=5 op=5 time=0
+    #7 accept fault=none result=2305843009214693956 err=0 task=4 op=7 time=0
+    #8 read fault=none result=64 err=0 task=5 op=9 time=0
+    #9 read fault=none result=64 err=0 task=6 op=8 time=0
+    #10 write fault=none result=28 err=0 task=5 op=11 time=0
+    #11 accept fault=none result=2305843009214693957 err=0 task=4 op=10 time=0
+    #12 write fault=none result=28 err=0 task=6 op=12 time=0
+    #13 accept fault=none result=2305843009214693958 err=0 task=4 op=13 time=0
+    #14 accept fault=none result=2305843009214693959 err=0 task=4 op=14 time=0
+    #15 accept fault=none result=2305843009214693960 err=0 task=4 op=15 time=0
+    #16 accept fault=none result=2305843009214693961 err=0 task=4 op=16 time=0
+    #17 accept fault=none result=2305843009214693962 err=0 task=4 op=17 time=0
+    #18 accept fault=none result=2305843009214693963 err=0 task=4 op=18 time=0
+    #19 accept fault=none result=2305843009214693964 err=0 task=4 op=19 time=0
+    #20 accept fault=none result=2305843009214693965 err=0 task=4 op=20 time=0
+    #21 accept fault=none result=2305843009214693966 err=0 task=4 op=21 time=0
+    #22 accept fault=none result=2305843009214693967 err=0 task=4 op=22 time=0
+    #23 accept fault=none result=2305843009214693968 err=0 task=4 op=23 time=0
+    #24 accept fault=none result=2305843009214693969 err=0 task=4 op=24 time=0
+    #25 accept fault=none result=2305843009214693970 err=0 task=4 op=25 time=0
+    #26 accept fault=none result=2305843009214693971 err=0 task=4 op=26 time=0
+    #27 accept fault=none result=2305843009214693972 err=0 task=4 op=27 time=0
+    #28 accept fault=none result=2305843009214693973 err=0 task=4 op=28 time=0
+    #29 accept fault=none result=2305843009214693974 err=0 task=4 op=29 time=0
+    #30 accept fault=none result=2305843009214693975 err=0 task=4 op=30 time=0
+    #31 accept fault=none result=2305843009214693976 err=0 task=4 op=31 time=0
+    #32 accept fault=none result=2305843009214693977 err=0 task=4 op=32 time=0
+    #33 accept fault=none result=2305843009214693978 err=0 task=4 op=33 time=0
+    #34 accept fault=none result=2305843009214693979 err=0 task=4 op=34 time=0
+    #35 accept fault=none result=2305843009214693980 err=0 task=4 op=35 time=0
+    #36 accept fault=none result=2305843009214693981 err=0 task=4 op=36 time=0
+    #37 accept fault=none result=2305843009214693982 err=0 task=4 op=37 time=0
+    #38 accept fault=none result=2305843009214693983 err=0 task=4 op=38 time=0
+    #39 accept fault=none result=2305843009214693984 err=0 task=4 op=39 time=0
+    #40 accept fault=none result=2305843009214693985 err=0 task=4 op=40 time=0
+  replay: quill sim --manifest /Volumes/Shadertheory/ink/examples/sim-demo/simulator.ink --scenario sweep --replay /Volumes/Shadertheory/ink/examples/sim-demo/.ink/snapshots/sweep-s0-r1-pqcu5u91cy5te1rw.inksnapshot
+run sweep-s0-r2: scenario=sweep seed=6652191562927176473 events=40
+  params: faults.tcp_drop=0.02 components.fs=mock
+  snapshot dir: .ink/snapshots
+  faults:
+    none: 39
+    drop: 1
+  fault events (1): #37 drop
+  snapshots: 40
+    first: .ink/snapshots/sweep-s0-r2-j9ffphig5vgm9gl8.inksnapshot
+    last:  .ink/snapshots/sweep-s0-r2-vvrlpdt729j18koh.inksnapshot
+  events: 40
+    #1 accept fault=none result=2305843009214693952 err=0 task=2 op=1 time=0
+    #2 accept fault=none result=2305843009214693954 err=0 task=4 op=3 time=0
+    #3 accept fault=none result=2305843009214693953 err=0 task=3 op=2 time=0
+    #4 accept fault=none result=2305843009214693955 err=0 task=4 op=4 time=0
+    #5 write fault=none result=17 err=0 task=6 op=6 time=0
+    #6 write fault=none result=17 err=0 task=5 op=5 time=0
+    #7 accept fault=none result=2305843009214693956 err=0 task=4 op=7 time=0
+    #8 read fault=none result=64 err=0 task=5 op=9 time=0
+    #9 read fault=none result=64 err=0 task=6 op=8 time=0
+    #10 accept fault=none result=2305843009214693957 err=0 task=4 op=10 time=0
+    #11 write fault=none result=28 err=0 task=6 op=12 time=0
+    #12 write fault=none result=28 err=0 task=5 op=11 time=0
+    #13 accept fault=none result=2305843009214693958 err=0 task=4 op=13 time=0
+    #14 accept fault=none result=2305843009214693959 err=0 task=4 op=14 time=0
+    #15 accept fault=none result=2305843009214693960 err=0 task=4 op=15 time=0
+    #16 accept fault=none result=2305843009214693961 err=0 task=4 op=16 time=0
+    #17 accept fault=none result=2305843009214693962 err=0 task=4 op=17 time=0
+    #18 accept fault=none result=2305843009214693963 err=0 task=4 op=18 time=0
+    #19 accept fault=none result=2305843009214693964 err=0 task=4 op=19 time=0
+    #20 accept fault=none result=2305843009214693965 err=0 task=4 op=20 time=0
+    #21 accept fault=none result=2305843009214693966 err=0 task=4 op=21 time=0
+    #22 accept fault=none result=2305843009214693967 err=0 task=4 op=22 time=0
+    #23 accept fault=none result=2305843009214693968 err=0 task=4 op=23 time=0
+    #24 accept fault=none result=2305843009214693969 err=0 task=4 op=24 time=0
+    #25 accept fault=none result=2305843009214693970 err=0 task=4 op=25 time=0
+    #26 accept fault=none result=2305843009214693971 err=0 task=4 op=26 time=0
+    #27 accept fault=none result=2305843009214693972 err=0 task=4 op=27 time=0
+    #28 accept fault=none result=2305843009214693973 err=0 task=4 op=28 time=0
+    #29 accept fault=none result=2305843009214693974 err=0 task=4 op=29 time=0
+    #30 accept fault=none result=2305843009214693975 err=0 task=4 op=30 time=0
+    #31 accept fault=none result=2305843009214693976 err=0 task=4 op=31 time=0
+    #32 accept fault=none result=2305843009214693977 err=0 task=4 op=32 time=0
+    #33 accept fault=none result=2305843009214693978 err=0 task=4 op=33 time=0
+    #34 accept fault=none result=2305843009214693979 err=0 task=4 op=34 time=0
+    #35 accept fault=none result=2305843009214693980 err=0 task=4 op=35 time=0
+    #36 accept fault=none result=2305843009214693981 err=0 task=4 op=36 time=0
+    #37 accept fault=drop result=-1 err=152 task=4 op=37 time=0
+    #38 accept fault=none result=2305843009214693983 err=0 task=4 op=38 time=0
+    #39 accept fault=none result=2305843009214693984 err=0 task=4 op=39 time=0
+    #40 accept fault=none result=2305843009214693985 err=0 task=4 op=40 time=0
+  replay: quill sim --manifest /Volumes/Shadertheory/ink/examples/sim-demo/simulator.ink --scenario sweep --replay /Volumes/Shadertheory/ink/examples/sim-demo/.ink/snapshots/sweep-s0-r2-vvrlpdt729j18koh.inksnapshot
+run sweep-s0-r3: scenario=sweep seed=16319103719560769181 events=39
+  params: faults.tcp_drop=0.02 components.fs=real
+  snapshot dir: .ink/snapshots
+  faults:
+    none: 35
+    drop: 4
+  fault events (4): #6 drop, #23 drop, #27 drop, #31 drop
+  snapshots: 39
+    first: .ink/snapshots/sweep-s0-r3-6w1lof1f6y5b1mc4.inksnapshot
+    last:  .ink/snapshots/sweep-s0-r3-f5v2oi3g1x6l1d6t.inksnapshot
+  events: 39
+    #1 accept fault=none result=2305843009214693952 err=0 task=2 op=1 time=0
+    #2 accept fault=none result=2305843009214693954 err=0 task=4 op=3 time=0
+    #3 accept fault=none result=2305843009214693953 err=0 task=3 op=2 time=0
+    #4 accept fault=none result=2305843009214693955 err=0 task=4 op=4 time=0
+    #5 write fault=none result=17 err=0 task=6 op=6 time=0
+    #6 write fault=drop result=-1 err=152 task=5 op=5 time=0
+    #7 write fault=none result=28 err=0 task=5 op=9 time=0
+    #8 accept fault=none result=2305843009214693956 err=0 task=4 op=7 time=0
+    #9 read fault=none result=64 err=0 task=6 op=8 time=0
+    #10 write fault=none result=28 err=0 task=6 op=11 time=0
+    #11 accept fault=none result=2305843009214693957 err=0 task=4 op=10 time=0
+    #12 accept fault=none result=2305843009214693958 err=0 task=4 op=12 time=0
+    #13 accept fault=none result=2305843009214693959 err=0 task=4 op=13 time=0
+    #14 accept fault=none result=2305843009214693960 err=0 task=4 op=14 time=0
+    #15 accept fault=none result=2305843009214693961 err=0 task=4 op=15 time=0
+    #16 accept fault=none result=2305843009214693962 err=0 task=4 op=16 time=0
+    #17 accept fault=none result=2305843009214693963 err=0 task=4 op=17 time=0
+    #18 accept fault=none result=2305843009214693964 err=0 task=4 op=18 time=0
+    #19 accept fault=none result=2305843009214693965 err=0 task=4 op=19 time=0
+    #20 accept fault=none result=2305843009214693966 err=0 task=4 op=20 time=0
+    #21 accept fault=none result=2305843009214693967 err=0 task=4 op=21 time=0
+    #22 accept fault=none result=2305843009214693968 err=0 task=4 op=22 time=0
+    #23 accept fault=drop result=-1 err=152 task=4 op=23 time=0
+    #24 accept fault=none result=2305843009214693970 err=0 task=4 op=24 time=0
+    #25 accept fault=none result=2305843009214693971 err=0 task=4 op=25 time=0
+    #26 accept fault=none result=2305843009214693972 err=0 task=4 op=26 time=0
+    #27 accept fault=drop result=-1 err=152 task=4 op=27 time=0
+    #28 accept fault=none result=2305843009214693974 err=0 task=4 op=28 time=0
+    #29 accept fault=none result=2305843009214693975 err=0 task=4 op=29 time=0
+    #30 accept fault=none result=2305843009214693976 err=0 task=4 op=30 time=0
+    #31 accept fault=drop result=-1 err=152 task=4 op=31 time=0
+    #32 accept fault=none result=2305843009214693978 err=0 task=4 op=32 time=0
+    #33 accept fault=none result=2305843009214693979 err=0 task=4 op=33 time=0
+    #34 accept fault=none result=2305843009214693980 err=0 task=4 op=34 time=0
+    #35 accept fault=none result=2305843009214693981 err=0 task=4 op=35 time=0
+    #36 accept fault=none result=2305843009214693982 err=0 task=4 op=36 time=0
+    #37 accept fault=none result=2305843009214693983 err=0 task=4 op=37 time=0
+    #38 accept fault=none result=2305843009214693984 err=0 task=4 op=38 time=0
+    #39 accept fault=none result=2305843009214693985 err=0 task=4 op=39 time=0
+  replay: quill sim --manifest /Volumes/Shadertheory/ink/examples/sim-demo/simulator.ink --scenario sweep --replay /Volumes/Shadertheory/ink/examples/sim-demo/.ink/snapshots/sweep-s0-r3-f5v2oi3g1x6l1d6t.inksnapshot
+run sweep-s0-r4: scenario=sweep seed=14835949493040345986 events=37
+  params: faults.tcp_drop=0.1 components.fs=mock
+  snapshot dir: .ink/snapshots
+  faults:
+    none: 33
+    drop: 4
+  fault events (4): #3 drop, #16 drop, #22 drop, #29 drop
+  snapshots: 37
+    first: .ink/snapshots/sweep-s0-r4-j7j0d5oiime22k1n.inksnapshot
+    last:  .ink/snapshots/sweep-s0-r4-2oo9qyso3v63fsj5.inksnapshot
+  events: 37
+    #1 accept fault=none result=2305843009214693952 err=0 task=2 op=1 time=0
+    #2 accept fault=none result=2305843009214693954 err=0 task=4 op=3 time=0
+    #3 accept fault=drop result=-1 err=152 task=3 op=2 time=0
+    #4 accept fault=none result=2305843009214693955 err=0 task=4 op=4 time=0
+    #5 write fault=none result=17 err=0 task=5 op=5 time=0
+    #6 accept fault=none result=2305843009214693956 err=0 task=4 op=6 time=0
+    #7 read fault=none result=64 err=0 task=5 op=7 time=0
+    #8 accept fault=none result=2305843009214693957 err=0 task=4 op=8 time=0
+    #9 write fault=none result=28 err=0 task=5 op=9 time=0
+    #10 accept fault=none result=2305843009214693958 err=0 task=4 op=10 time=0
+    #11 accept fault=none result=2305843009214693959 err=0 task=4 op=11 time=0
+    #12 accept fault=none result=2305843009214693960 err=0 task=4 op=12 time=0
+    #13 accept fault=none result=2305843009214693961 err=0 task=4 op=13 time=0
+    #14 accept fault=none result=2305843009214693962 err=0 task=4 op=14 time=0
+    #15 accept fault=none result=2305843009214693963 err=0 task=4 op=15 time=0
+    #16 accept fault=drop result=-1 err=152 task=4 op=16 time=0
+    #17 accept fault=none result=2305843009214693965 err=0 task=4 op=17 time=0
+    #18 accept fault=none result=2305843009214693966 err=0 task=4 op=18 time=0
+    #19 accept fault=none result=2305843009214693967 err=0 task=4 op=19 time=0
+    #20 accept fault=none result=2305843009214693968 err=0 task=4 op=20 time=0
+    #21 accept fault=none result=2305843009214693969 err=0 task=4 op=21 time=0
+    #22 accept fault=drop result=-1 err=152 task=4 op=22 time=0
+    #23 accept fault=none result=2305843009214693971 err=0 task=4 op=23 time=0
+    #24 accept fault=none result=2305843009214693972 err=0 task=4 op=24 time=0
+    #25 accept fault=none result=2305843009214693973 err=0 task=4 op=25 time=0
+    #26 accept fault=none result=2305843009214693974 err=0 task=4 op=26 time=0
+    #27 accept fault=none result=2305843009214693975 err=0 task=4 op=27 time=0
+    #28 accept fault=none result=2305843009214693976 err=0 task=4 op=28 time=0
+    #29 accept fault=drop result=-1 err=152 task=4 op=29 time=0
+    #30 accept fault=none result=2305843009214693978 err=0 task=4 op=30 time=0
+    #31 accept fault=none result=2305843009214693979 err=0 task=4 op=31 time=0
+    #32 accept fault=none result=2305843009214693980 err=0 task=4 op=32 time=0
+    #33 accept fault=none result=2305843009214693981 err=0 task=4 op=33 time=0
+    #34 accept fault=none result=2305843009214693982 err=0 task=4 op=34 time=0
+    #35 accept fault=none result=2305843009214693983 err=0 task=4 op=35 time=0
+    #36 accept fault=none result=2305843009214693984 err=0 task=4 op=36 time=0
+    #37 accept fault=none result=2305843009214693985 err=0 task=4 op=37 time=0
+  replay: quill sim --manifest /Volumes/Shadertheory/ink/examples/sim-demo/simulator.ink --scenario sweep --replay /Volumes/Shadertheory/ink/examples/sim-demo/.ink/snapshots/sweep-s0-r4-2oo9qyso3v63fsj5.inksnapshot
+run sweep-s0-r5: scenario=sweep seed=771615206987757860 events=40
+  params: faults.tcp_drop=0.1 components.fs=real
+  snapshot dir: .ink/snapshots
+  faults:
+    none: 36
+    drop: 4
+  fault events (4): #16 drop, #25 drop, #28 drop, #29 drop
+  snapshots: 40
+    first: .ink/snapshots/sweep-s0-r5-3d5lwz3rwdm0hsrt.inksnapshot
+    last:  .ink/snapshots/sweep-s0-r5-3gu3dhehg56l4zye.inksnapshot
+  events: 40
+    #1 accept fault=none result=2305843009214693952 err=0 task=2 op=1 time=0
+    #2 accept fault=none result=2305843009214693954 err=0 task=4 op=3 time=0
+    #3 accept fault=none result=2305843009214693953 err=0 task=3 op=2 time=0
+    #4 accept fault=none result=2305843009214693955 err=0 task=4 op=4 time=0
+    #5 write fault=none result=17 err=0 task=6 op=6 time=0
+    #6 write fault=none result=17 err=0 task=5 op=5 time=0
+    #7 accept fault=none result=2305843009214693956 err=0 task=4 op=7 time=0
+    #8 read fault=none result=64 err=0 task=5 op=9 time=0
+    #9 read fault=none result=64 err=0 task=6 op=8 time=0
+    #10 write fault=none result=28 err=0 task=5 op=11 time=0
+    #11 accept fault=none result=2305843009214693957 err=0 task=4 op=10 time=0
+    #12 write fault=none result=28 err=0 task=6 op=12 time=0
+    #13 accept fault=none result=2305843009214693958 err=0 task=4 op=13 time=0
+    #14 accept fault=none result=2305843009214693959 err=0 task=4 op=14 time=0
+    #15 accept fault=none result=2305843009214693960 err=0 task=4 op=15 time=0
+    #16 accept fault=drop result=-1 err=152 task=4 op=16 time=0
+    #17 accept fault=none result=2305843009214693962 err=0 task=4 op=17 time=0
+    #18 accept fault=none result=2305843009214693963 err=0 task=4 op=18 time=0
+    #19 accept fault=none result=2305843009214693964 err=0 task=4 op=19 time=0
+    #20 accept fault=none result=2305843009214693965 err=0 task=4 op=20 time=0
+    #21 accept fault=none result=2305843009214693966 err=0 task=4 op=21 time=0
+    #22 accept fault=none result=2305843009214693967 err=0 task=4 op=22 time=0
+    #23 accept fault=none result=2305843009214693968 err=0 task=4 op=23 time=0
+    #24 accept fault=none result=2305843009214693969 err=0 task=4 op=24 time=0
+    #25 accept fault=drop result=-1 err=152 task=4 op=25 time=0
+    #26 accept fault=none result=2305843009214693971 err=0 task=4 op=26 time=0
+    #27 accept fault=none result=2305843009214693972 err=0 task=4 op=27 time=0
+    #28 accept fault=drop result=-1 err=152 task=4 op=28 time=0
+    #29 accept fault=drop result=-1 err=152 task=4 op=29 time=0
+    #30 accept fault=none result=2305843009214693975 err=0 task=4 op=30 time=0
+    #31 accept fault=none result=2305843009214693976 err=0 task=4 op=31 time=0
+    #32 accept fault=none result=2305843009214693977 err=0 task=4 op=32 time=0
+    #33 accept fault=none result=2305843009214693978 err=0 task=4 op=33 time=0
+    #34 accept fault=none result=2305843009214693979 err=0 task=4 op=34 time=0
+    #35 accept fault=none result=2305843009214693980 err=0 task=4 op=35 time=0
+    #36 accept fault=none result=2305843009214693981 err=0 task=4 op=36 time=0
+    #37 accept fault=none result=2305843009214693982 err=0 task=4 op=37 time=0
+    #38 accept fault=none result=2305843009214693983 err=0 task=4 op=38 time=0
+    #39 accept fault=none result=2305843009214693984 err=0 task=4 op=39 time=0
+    #40 accept fault=none result=2305843009214693985 err=0 task=4 op=40 time=0
+  replay: quill sim --manifest /Volumes/Shadertheory/ink/examples/sim-demo/simulator.ink --scenario sweep --replay /Volumes/Shadertheory/ink/examples/sim-demo/.ink/snapshots/sweep-s0-r5-3gu3dhehg56l4zye.inksnapshot
+scenario chaos: runs=1 events=39
+  none: 35
+  error: 1
+  delay: 3
+scenario default: runs=1 events=40
+  none: 40
+scenario sweep: runs=6 events=236
+  none: 223
+  drop: 13
+aggregate: events=315
+  none: 298
+  error: 1
+  drop: 13
+  delay: 3
+event tree:
+  └─ accept (count=8)
+     └─ accept (count=8)
+        ├─ accept (count=7)
+        │  └─ accept (count=7)
+        │     └─ write (count=7)
+        │        ├─ write (count=6)
+        │        │  └─ accept (count=6)
+        │        │     └─ read (count=6)
+        │        │        ├─ read (count=5)
+        │        │        │  ├─ write (count=2)
+        │        │        │  │  └─ accept (count=2)
+        │        │        │  │     └─ write (count=2)
+        │        │        │  │        └─ accept (count=2)
+        │        │        │  │           └─ accept (count=2)
+        │        │        │  │              └─ accept (count=2)
+        │        │        │  │                 ├─ accept (count=1)
+        │        │        │  │                 │  └─ accept (count=1)
+        │        │        │  │                 │     └─ accept (count=1)
+        │        │        │  │                 │        └─ accept (count=1)
+        │        │        │  │                 │           └─ accept (count=1)
+        │        │        │  │                 │              └─ accept (count=1)
+        │        │        │  │                 │                 └─ accept (count=1)
+        │        │        │  │                 │                    └─ accept (count=1)
+        │        │        │  │                 │                       └─ accept (count=1)
+        │        │        │  │                 │                          └─ accept (count=1)
+        │        │        │  │                 │                             └─ accept (count=1)
+        │        │        │  │                 │                                └─ accept (count=1)
+        │        │        │  │                 │                                   └─ accept (count=1)
+        │        │        │  │                 │                                      └─ accept (count=1)
+        │        │        │  │                 │                                         └─ accept (count=1)
+        │        │        │  │                 │                                            └─ accept (count=1)
+        │        │        │  │                 │                                               └─ accept (count=1)
+        │        │        │  │                 │                                                  └─ accept (count=1)
+        │        │        │  │                 │                                                     └─ accept (count=1)
+        │        │        │  │                 │                                                        └─ accept (count=1)
+        │        │        │  │                 │                                                           └─ accept (count=1)
+        │        │        │  │                 │                                                              └─ accept (count=1)
+        │        │        │  │                 │                                                                 └─ accept (count=1)
+        │        │        │  │                 │                                                                    └─ accept (count=1)
+        │        │        │  │                 │                                                                       └─ accept (count=1)
+        │        │        │  │                 └─ accept/drop (count=1)
+        │        │        │  │                    └─ accept (count=1)
+        │        │        │  │                       └─ accept (count=1)
+        │        │        │  │                          └─ accept (count=1)
+        │        │        │  │                             └─ accept (count=1)
+        │        │        │  │                                └─ accept (count=1)
+        │        │        │  │                                   └─ accept (count=1)
+        │        │        │  │                                      └─ accept (count=1)
+        │        │        │  │                                         └─ accept (count=1)
+        │        │        │  │                                            └─ accept/drop (count=1)
+        │        │        │  │                                               └─ accept (count=1)
+        │        │        │  │                                                  └─ accept (count=1)
+        │        │        │  │                                                     └─ accept/drop (count=1)
+        │        │        │  │                                                        └─ accept/drop (count=1)
+        │        │        │  │                                                           └─ accept (count=1)
+        │        │        │  │                                                              └─ accept (count=1)
+        │        │        │  │                                                                 └─ accept (count=1)
+        │        │        │  │                                                                    └─ accept (count=1)
+        │        │        │  │                                                                       └─ accept (count=1)
+        │        │        │  │                                                                          └─ accept (count=1)
+        │        │        │  │                                                                             └─ accept (count=1)
+        │        │        │  │                                                                                └─ accept (count=1)
+        │        │        │  │                                                                                   └─ accept (count=1)
+        │        │        │  │                                                                                      └─ accept (count=1)
+        │        │        │  │                                                                                         └─ accept (count=1)
+        │        │        │  └─ accept (count=3)
+        │        │        │     └─ write (count=3)
+        │        │        │        └─ write (count=3)
+        │        │        │           └─ accept (count=3)
+        │        │        │              └─ accept (count=3)
+        │        │        │                 └─ accept (count=3)
+        │        │        │                    └─ accept (count=3)
+        │        │        │                       └─ accept (count=3)
+        │        │        │                          └─ accept (count=3)
+        │        │        │                             └─ accept (count=3)
+        │        │        │                                └─ accept (count=3)
+        │        │        │                                   └─ accept (count=3)
+        │        │        │                                      └─ accept (count=3)
+        │        │        │                                         └─ accept (count=3)
+        │        │        │                                            └─ accept (count=3)
+        │        │        │                                               └─ accept (count=3)
+        │        │        │                                                  └─ accept (count=3)
+        │        │        │                                                     └─ accept (count=3)
+        │        │        │                                                        └─ accept (count=3)
+        │        │        │                                                           └─ accept (count=3)
+        │        │        │                                                              └─ accept (count=3)
+        │        │        │                                                                 └─ accept (count=3)
+        │        │        │                                                                    └─ accept (count=3)
+        │        │        │                                                                       └─ accept (count=3)
+        │        │        │                                                                          └─ accept (count=3)
+        │        │        │                                                                             └─ accept (count=3)
+        │        │        │                                                                                └─ accept (count=3)
+        │        │        │                                                                                   ├─ accept (count=2)
+        │        │        │                                                                                   │  └─ accept (count=2)
+        │        │        │                                                                                   │     └─ accept (count=2)
+        │        │        │                                                                                   │        └─ accept (count=2)
+        │        │        │                                                                                   └─ accept/drop (count=1)
+        │        │        │                                                                                      └─ accept (count=1)
+        │        │        │                                                                                         └─ accept (count=1)
+        │        │        │                                                                                            └─ accept (count=1)
+        │        │        └─ accept (count=1)
+        │        │           └─ write (count=1)
+        │        │              └─ accept (count=1)
+        │        │                 └─ accept (count=1)
+        │        │                    └─ accept (count=1)
+        │        │                       └─ accept/error (count=1)
+        │        │                          └─ accept (count=1)
+        │        │                             └─ accept (count=1)
+        │        │                                └─ accept (count=1)
+        │        │                                   └─ accept (count=1)
+        │        │                                      └─ accept (count=1)
+        │        │                                         └─ accept (count=1)
+        │        │                                            └─ read/delay (count=1)
+        │        │                                               └─ accept/delay (count=1)
+        │        │                                                  └─ write (count=1)
+        │        │                                                     └─ accept (count=1)
+        │        │                                                        └─ accept (count=1)
+        │        │                                                           └─ accept (count=1)
+        │        │                                                              └─ accept (count=1)
+        │        │                                                                 └─ accept/delay (count=1)
+        │        │                                                                    └─ accept (count=1)
+        │        │                                                                       └─ accept (count=1)
+        │        │                                                                          └─ accept (count=1)
+        │        │                                                                             └─ accept (count=1)
+        │        │                                                                                └─ accept (count=1)
+        │        │                                                                                   └─ accept (count=1)
+        │        │                                                                                      └─ accept (count=1)
+        │        │                                                                                         └─ accept (count=1)
+        │        │                                                                                            └─ accept (count=1)
+        │        │                                                                                               └─ accept (count=1)
+        │        │                                                                                                  └─ accept (count=1)
+        │        └─ write/drop (count=1)
+        │           └─ write (count=1)
+        │              └─ accept (count=1)
+        │                 └─ read (count=1)
+        │                    └─ write (count=1)
+        │                       └─ accept (count=1)
+        │                          └─ accept (count=1)
+        │                             └─ accept (count=1)
+        │                                └─ accept (count=1)
+        │                                   └─ accept (count=1)
+        │                                      └─ accept (count=1)
+        │                                         └─ accept (count=1)
+        │                                            └─ accept (count=1)
+        │                                               └─ accept (count=1)
+        │                                                  └─ accept (count=1)
+        │                                                     └─ accept (count=1)
+        │                                                        └─ accept (count=1)
+        │                                                           └─ accept/drop (count=1)
+        │                                                              └─ accept (count=1)
+        │                                                                 └─ accept (count=1)
+        │                                                                    └─ accept (count=1)
+        │                                                                       └─ accept/drop (count=1)
+        │                                                                          └─ accept (count=1)
+        │                                                                             └─ accept (count=1)
+        │                                                                                └─ accept (count=1)
+        │                                                                                   └─ accept/drop (count=1)
+        │                                                                                      └─ accept (count=1)
+        │                                                                                         └─ accept (count=1)
+        │                                                                                            └─ accept (count=1)
+        │                                                                                               └─ accept (count=1)
+        │                                                                                                  └─ accept (count=1)
+        │                                                                                                     └─ accept (count=1)
+        │                                                                                                        └─ accept (count=1)
+        │                                                                                                           └─ accept (count=1)
+        └─ accept/drop (count=1)
+           └─ accept (count=1)
+              └─ write (count=1)
+                 └─ accept (count=1)
+                    └─ read (count=1)
+                       └─ accept (count=1)
+                          └─ write (count=1)
+                             └─ accept (count=1)
+                                └─ accept (count=1)
+                                   └─ accept (count=1)
+                                      └─ accept (count=1)
+                                         └─ accept (count=1)
+                                            └─ accept (count=1)
+                                               └─ accept/drop (count=1)
+                                                  └─ accept (count=1)
+                                                     └─ accept (count=1)
+                                                        └─ accept (count=1)
+                                                           └─ accept (count=1)
+                                                              └─ accept (count=1)
+                                                                 └─ accept/drop (count=1)
+                                                                    └─ accept (count=1)
+                                                                       └─ accept (count=1)
+                                                                          └─ accept (count=1)
+                                                                             └─ accept (count=1)
+                                                                                └─ accept (count=1)
+                                                                                   └─ accept (count=1)
+                                                                                      └─ accept/drop (count=1)
+                                                                                         └─ accept (count=1)
+                                                                                            └─ accept (count=1)
+                                                                                               └─ accept (count=1)
+                                                                                                  └─ accept (count=1)
+                                                                                                     └─ accept (count=1)
+                                                                                                        └─ accept (count=1)
+                                                                                                           └─ accept (count=1)
+                                                                                                              └─ accept (count=1)
+event path leaves:
+  ├─ accept x4 -> write x2 -> accept -> read x2 -> write -> accept -> write -> accept x28 (count=1)
+  ├─ accept x4 -> write x2 -> accept -> read x2 -> write -> accept -> write -> accept x3 -> accept/drop -> accept x8 -> accept/drop -> accept x2 -> accept/drop x2 -> accept x11 (count=1)
+  ├─ accept x4 -> write x2 -> accept -> read x2 -> accept -> write x2 -> accept x28 (count=2)
+  ├─ accept x4 -> write x2 -> accept -> read x2 -> accept -> write x2 -> accept x24 -> accept/drop -> accept x3 (count=1)
+  ├─ accept x4 -> write x2 -> accept -> read -> accept -> write -> accept x3 -> accept/error -> accept x6 -> read/delay -> accept/delay -> write -> accept x4 -> accept/delay -> accept x11 (count=1)
+  ├─ accept x4 -> write -> write/drop -> write -> accept -> read -> write -> accept x12 -> accept/drop -> accept x3 -> accept/drop -> accept x3 -> accept/drop -> accept x8 (count=1)
+  └─ accept x2 -> accept/drop -> accept -> write -> accept -> read -> accept -> write -> accept x6 -> accept/drop -> accept x5 -> accept/drop -> accept x6 -> accept/drop -> accept x8 (count=1)
+program tree:
+  └─ task entry (count=8)
+     ├─ fn entry (count=8)
+     │  └─ fn main (count=8)
+     │     └─ fn fd_fake_tcp (count=8)
+     │        └─ fn fd_encode (count=8)
+     ├─ task accept_and_spawn (count=16)
+     │  ├─ fn accept_and_spawn (count=16)
+     │  │  ├─ io.accept (count=16)
+     │  │  ├─ fn print_label_int (count=16)
+     │  │  ├─ fn std::is_ok<T=fd,E=int> (count=16)
+     │  │  ├─ fn std::unwrap<T=fd,E=int> (count=15)
+     │  │  └─ fn std::unwrap_err<T=fd,E=int> (count=1)
+     │  └─ task handle_client (count=15)
+     │     └─ fn handle_client (count=15)
+     │        ├─ fn fd_stdout (count=15)
+     │        │  └─ fn fd_encode (count=15)
+     │        ├─ fn tcp_roundtrip (count=15)
+     │        │  ├─ io.read (count=14)
+     │        │  ├─ io.write (count=15)
+     │        │  ├─ fn print_label_int (count=29)
+     │        │  ├─ fn std::is_ok<T=int,E=int> (count=29)
+     │        │  ├─ fn std::unwrap<T=int,E=int> (count=28)
+     │        │  ├─ fn std::unwrap_err<T=int,E=int> (count=1)
+     │        │  └─ fn write_buf (count=15)
+     │        │     ├─ fn std::bytes_free (count=15)
+     │        │     │  └─ fn std::list_free<T=uint<unknown>> (count=15)
+     │        │     │     └─ fn std::list_header<T=unknown> (count=15)
+     │        │     └─ fn std::bytes_from_string (count=15)
+     │        │        ├─ fn std::list_new<T=uint<unknown>> (count=15)
+     │        │        ├─ fn std::list_ptr<T=uint<unknown>> (count=15)
+     │        │        │  └─ fn std::list_header<T=unknown> (count=15)
+     │        │        └─ fn std::list_set_len<T=uint<unknown>> (count=15)
+     │        │           └─ fn std::list_header<T=unknown> (count=15)
+     │        └─ fn write_line (count=15)
+     │           ├─ io.write (count=15)
+     │           ├─ fn print_label_int (count=15)
+     │           ├─ fn std::is_ok<T=int,E=int> (count=15)
+     │           ├─ fn std::unwrap<T=int,E=int> (count=15)
+     │           └─ fn write_buf (count=15)
+     │              ├─ fn std::bytes_free (count=15)
+     │              │  └─ fn std::list_free<T=uint<unknown>> (count=15)
+     │              │     └─ fn std::list_header<T=unknown> (count=15)
+     │              └─ fn std::bytes_from_string (count=15)
+     │                 ├─ fn std::list_new<T=uint<unknown>> (count=15)
+     │                 ├─ fn std::list_ptr<T=uint<unknown>> (count=15)
+     │                 │  └─ fn std::list_header<T=unknown> (count=15)
+     │                 └─ fn std::list_set_len<T=uint<unknown>> (count=15)
+     │                    └─ fn std::list_header<T=unknown> (count=15)
+     └─ task fault_probe (count=8)
+        └─ fn fault_probe (count=8)
+           ├─ io.accept (count=255)
+           └─ fn std::is_ok<T=fd,E=int> (count=256)
+program path leaves:
+  ├─ task entry -> fn entry -> fn main -> fn fd_fake_tcp -> fn fd_encode (count=8)
+  ├─ task entry -> task accept_and_spawn -> fn accept_and_spawn -> io.accept (count=16)
+  ├─ task entry -> task accept_and_spawn -> fn accept_and_spawn -> fn print_label_int (count=16)
+  ├─ task entry -> task accept_and_spawn -> fn accept_and_spawn -> fn std::is_ok<T=fd,E=int> (count=16)
+  ├─ task entry -> task accept_and_spawn -> fn accept_and_spawn -> fn std::unwrap<T=fd,E=int> (count=15)
+  ├─ task entry -> task accept_and_spawn -> fn accept_and_spawn -> fn std::unwrap_err<T=fd,E=int> (count=1)
+  ├─ task entry -> task accept_and_spawn -> task handle_client -> fn handle_client -> fn fd_stdout -> fn fd_encode (count=15)
+  ├─ task entry -> task accept_and_spawn -> task handle_client -> fn handle_client -> fn tcp_roundtrip -> io.read (count=14)
+  ├─ task entry -> task accept_and_spawn -> task handle_client -> fn handle_client -> fn tcp_roundtrip -> io.write (count=15)
+  ├─ task entry -> task accept_and_spawn -> task handle_client -> fn handle_client -> fn tcp_roundtrip -> fn print_label_int (count=29)
+  ├─ task entry -> task accept_and_spawn -> task handle_client -> fn handle_client -> fn tcp_roundtrip -> fn std::is_ok<T=int,E=int> (count=29)
+  ├─ task entry -> task accept_and_spawn -> task handle_client -> fn handle_client -> fn tcp_roundtrip -> fn std::unwrap<T=int,E=int> (count=28)
+  ├─ task entry -> task accept_and_spawn -> task handle_client -> fn handle_client -> fn tcp_roundtrip -> fn std::unwrap_err<T=int,E=int> (count=1)
+  ├─ task entry -> task accept_and_spawn -> task handle_client -> fn handle_client -> fn tcp_roundtrip -> fn write_buf -> fn std::bytes_free -> fn std::list_free<T=uint<unknown>> -> fn std::list_header<T=unknown> (count=15)
+  ├─ task entry -> task accept_and_spawn -> task handle_client -> fn handle_client -> fn tcp_roundtrip -> fn write_buf -> fn std::bytes_from_string -> fn std::list_new<T=uint<unknown>> (count=15)
+  ├─ task entry -> task accept_and_spawn -> task handle_client -> fn handle_client -> fn tcp_roundtrip -> fn write_buf -> fn std::bytes_from_string -> fn std::list_ptr<T=uint<unknown>> -> fn std::list_header<T=unknown> (count=15)
+  ├─ task entry -> task accept_and_spawn -> task handle_client -> fn handle_client -> fn tcp_roundtrip -> fn write_buf -> fn std::bytes_from_string -> fn std::list_set_len<T=uint<unknown>> -> fn std::list_header<T=unknown> (count=15)
+  ├─ task entry -> task accept_and_spawn -> task handle_client -> fn handle_client -> fn write_line -> io.write (count=15)
+  ├─ task entry -> task accept_and_spawn -> task handle_client -> fn handle_client -> fn write_line -> fn print_label_int (count=15)
+  ├─ task entry -> task accept_and_spawn -> task handle_client -> fn handle_client -> fn write_line -> fn std::is_ok<T=int,E=int> (count=15)
+  ├─ task entry -> task accept_and_spawn -> task handle_client -> fn handle_client -> fn write_line -> fn std::unwrap<T=int,E=int> (count=15)
+  ├─ task entry -> task accept_and_spawn -> task handle_client -> fn handle_client -> fn write_line -> fn write_buf -> fn std::bytes_free -> fn std::list_free<T=uint<unknown>> -> fn std::list_header<T=unknown> (count=15)
+  ├─ task entry -> task accept_and_spawn -> task handle_client -> fn handle_client -> fn write_line -> fn write_buf -> fn std::bytes_from_string -> fn std::list_new<T=uint<unknown>> (count=15)
+  ├─ task entry -> task accept_and_spawn -> task handle_client -> fn handle_client -> fn write_line -> fn write_buf -> fn std::bytes_from_string -> fn std::list_ptr<T=uint<unknown>> -> fn std::list_header<T=unknown> (count=15)
+  ├─ task entry -> task accept_and_spawn -> task handle_client -> fn handle_client -> fn write_line -> fn write_buf -> fn std::bytes_from_string -> fn std::list_set_len<T=uint<unknown>> -> fn std::list_header<T=unknown> (count=15)
+  ├─ task entry -> task fault_probe -> fn fault_probe -> io.accept (count=255)
+  └─ task entry -> task fault_probe -> fn fault_probe -> fn std::is_ok<T=fd,E=int> (count=256)

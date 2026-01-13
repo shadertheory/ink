@@ -4,6 +4,7 @@ const peg = @import("peg.zig");
 const peg_parser = @import("peg_parser.zig");
 const token = @import("token.zig").token;
 const spec = @import("spec.zig");
+const array_list = std.array_list.Managed;
 
 pub const mem_allocator = std.mem.Allocator;
 
@@ -36,6 +37,7 @@ pub const builder = struct {
     tokens: []const token,
     tree: *const peg_parser.parse_tree,
     source: []const u8,
+    node_registry: ?*array_list(*ink.node) = null,
     last_error: ?error_info = null,
     allow_interpolation: bool = true,
 
@@ -45,6 +47,25 @@ pub const builder = struct {
             .tokens = tokens,
             .tree = tree,
             .source = source,
+            .node_registry = null,
+            .last_error = null,
+            .allow_interpolation = true,
+        };
+    }
+
+    pub fn init_with_registry(
+        allocator: mem_allocator,
+        tokens: []const token,
+        tree: *const peg_parser.parse_tree,
+        source: []const u8,
+        registry: *array_list(*ink.node),
+    ) builder {
+        return .{
+            .allocator = allocator,
+            .tokens = tokens,
+            .tree = tree,
+            .source = source,
+            .node_registry = registry,
             .last_error = null,
             .allow_interpolation = true,
         };
@@ -247,7 +268,7 @@ pub const builder = struct {
     }
 
     fn build_expr(self: *builder, id: peg_parser.node_id) build_error!*ink.node {
-        if (!self.is_nonterminal(id, .expr)) {
+        if (!self.is_nonterminal(id, .expr) and !self.is_nonterminal(id, .expr_no_record)) {
             return self.fail(.unexpected_node, id);
         }
 
@@ -268,7 +289,9 @@ pub const builder = struct {
             if (self.is_nonterminal(child, .continue_expr)) return self.build_continue_expr(child);
             if (self.is_nonterminal(child, .yield_expr)) return self.build_yield_expr(child);
             if (self.is_nonterminal(child, .return_expr)) return self.build_return_expr(child);
-            if (self.is_nonterminal(child, .assign)) return self.build_assign(child);
+            if (self.is_nonterminal(child, .assign) or self.is_nonterminal(child, .assign_no_record)) {
+                return self.build_assign(child);
+            }
         }
         return self.fail(.unexpected_node, id);
     }
@@ -281,7 +304,10 @@ pub const builder = struct {
         }
         idx += 1;
 
-        if (idx >= expr_children.len or !self.is_nonterminal(expr_children[idx], .expr)) {
+        if (idx >= expr_children.len or
+            (!self.is_nonterminal(expr_children[idx], .expr) and
+            !self.is_nonterminal(expr_children[idx], .expr_no_record)))
+        {
             return self.fail(.unexpected_node, id);
         }
         const condition = try self.build_expr(expr_children[idx]);
@@ -399,7 +425,10 @@ pub const builder = struct {
         if (children.len < 3 or !self.is_terminal(children[0], .@"while")) {
             return self.fail(.unexpected_node, id);
         }
-        if (!self.is_nonterminal(children[1], .expr) or !self.is_nonterminal(children[2], .branch)) {
+        if ((!self.is_nonterminal(children[1], .expr) and
+            !self.is_nonterminal(children[1], .expr_no_record)) or
+            !self.is_nonterminal(children[2], .branch))
+        {
             return self.fail(.unexpected_node, id);
         }
         const condition = try self.build_expr(children[1]);
@@ -417,7 +446,11 @@ pub const builder = struct {
         }
         if (!self.is_nonterminal(children[1], .pattern)) return self.fail(.unexpected_node, id);
         if (!self.is_terminal(children[2], .in)) return self.fail(.unexpected_node, id);
-        if (!self.is_nonterminal(children[3], .expr)) return self.fail(.unexpected_node, id);
+        if (!self.is_nonterminal(children[3], .expr) and
+            !self.is_nonterminal(children[3], .expr_no_record))
+        {
+            return self.fail(.unexpected_node, id);
+        }
         if (!self.is_nonterminal(children[4], .branch)) return self.fail(.unexpected_node, id);
 
         const pattern = try self.build_pattern(children[1]);
@@ -435,7 +468,10 @@ pub const builder = struct {
         if (children.len < 3 or !self.is_terminal(children[0], .until)) {
             return self.fail(.unexpected_node, id);
         }
-        if (!self.is_nonterminal(children[1], .expr) or !self.is_nonterminal(children[2], .branch)) {
+        if ((!self.is_nonterminal(children[1], .expr) and
+            !self.is_nonterminal(children[1], .expr_no_record)) or
+            !self.is_nonterminal(children[2], .branch))
+        {
             return self.fail(.unexpected_node, id);
         }
         const condition = try self.build_expr(children[1]);
@@ -451,7 +487,10 @@ pub const builder = struct {
         if (children.len < 3 or !self.is_terminal(children[0], .repeat)) {
             return self.fail(.unexpected_node, id);
         }
-        if (!self.is_nonterminal(children[1], .expr) or !self.is_nonterminal(children[2], .branch)) {
+        if ((!self.is_nonterminal(children[1], .expr) and
+            !self.is_nonterminal(children[1], .expr_no_record)) or
+            !self.is_nonterminal(children[2], .branch))
+        {
             return self.fail(.unexpected_node, id);
         }
         const count = try self.build_expr(children[1]);
@@ -469,7 +508,11 @@ pub const builder = struct {
         }
         if (!self.is_nonterminal(children[1], .pattern)) return self.fail(.unexpected_node, id);
         if (!self.is_terminal(children[2], .in)) return self.fail(.unexpected_node, id);
-        if (!self.is_nonterminal(children[3], .expr)) return self.fail(.unexpected_node, id);
+        if (!self.is_nonterminal(children[3], .expr) and
+            !self.is_nonterminal(children[3], .expr_no_record))
+        {
+            return self.fail(.unexpected_node, id);
+        }
         if (!self.is_nonterminal(children[4], .branch)) return self.fail(.unexpected_node, id);
 
         const pattern = try self.build_pattern(children[1]);
@@ -489,7 +532,11 @@ pub const builder = struct {
         }
         if (!self.is_nonterminal(children[1], .pattern)) return self.fail(.unexpected_node, id);
         if (!self.is_terminal(children[2], .in)) return self.fail(.unexpected_node, id);
-        if (!self.is_nonterminal(children[3], .expr)) return self.fail(.unexpected_node, id);
+        if (!self.is_nonterminal(children[3], .expr) and
+            !self.is_nonterminal(children[3], .expr_no_record))
+        {
+            return self.fail(.unexpected_node, id);
+        }
         if (!self.is_nonterminal(children[4], .branch)) return self.fail(.unexpected_node, id);
 
         const pattern = try self.build_pattern(children[1]);
@@ -994,7 +1041,10 @@ pub const builder = struct {
     fn build_assign(self: *builder, id: peg_parser.node_id) build_error!*ink.node {
         const children = self.child_nodes(id);
         var idx: usize = 0;
-        if (idx >= children.len or !self.is_nonterminal(children[idx], .pipe)) {
+        if (idx >= children.len or
+            (!self.is_nonterminal(children[idx], .pipe) and
+            !self.is_nonterminal(children[idx], .pipe_no_record)))
+        {
             return self.fail(.unexpected_node, id);
         }
         const left = try self.build_pipe(children[idx]);
@@ -1002,7 +1052,10 @@ pub const builder = struct {
 
         while (idx < children.len) : (idx += 1) {
             if (self.is_assignment_op(children[idx]) or self.is_nonterminal(children[idx], .assign_op)) {
-                if (idx + 1 >= children.len or !self.is_nonterminal(children[idx + 1], .assign)) {
+                if (idx + 1 >= children.len or
+                    (!self.is_nonterminal(children[idx + 1], .assign) and
+                    !self.is_nonterminal(children[idx + 1], .assign_no_record)))
+                {
                     return self.fail(.unexpected_node, id);
                 }
                 const right = try self.build_assign(children[idx + 1]);
@@ -1021,7 +1074,10 @@ pub const builder = struct {
     fn build_pipe(self: *builder, id: peg_parser.node_id) build_error!*ink.node {
         const children = self.child_nodes(id);
         var idx: usize = 0;
-        if (idx >= children.len or !self.is_nonterminal(children[idx], .coalesce)) {
+        if (idx >= children.len or
+            (!self.is_nonterminal(children[idx], .coalesce) and
+            !self.is_nonterminal(children[idx], .coalesce_no_record)))
+        {
             return self.fail(.unexpected_node, id);
         }
         var expr = try self.build_coalesce(children[idx]);
@@ -1030,7 +1086,10 @@ pub const builder = struct {
         while (idx < children.len) : (idx += 1) {
             const child = children[idx];
             if (self.is_terminal(child, .pipe)) {
-                if (idx + 1 >= children.len or !self.is_nonterminal(children[idx + 1], .coalesce)) {
+                if (idx + 1 >= children.len or
+                    (!self.is_nonterminal(children[idx + 1], .coalesce) and
+                    !self.is_nonterminal(children[idx + 1], .coalesce_no_record)))
+                {
                     return self.fail(.unexpected_node, id);
                 }
                 const right = try self.build_coalesce(children[idx + 1]);
@@ -1049,7 +1108,10 @@ pub const builder = struct {
     fn build_coalesce(self: *builder, id: peg_parser.node_id) build_error!*ink.node {
         const children = self.child_nodes(id);
         var idx: usize = 0;
-        if (idx >= children.len or !self.is_nonterminal(children[idx], .logical_or)) {
+        if (idx >= children.len or
+            (!self.is_nonterminal(children[idx], .logical_or) and
+            !self.is_nonterminal(children[idx], .logical_or_no_record)))
+        {
             return self.fail(.unexpected_node, id);
         }
         var expr = try self.build_logical_or(children[idx]);
@@ -1057,7 +1119,10 @@ pub const builder = struct {
 
         while (idx < children.len) : (idx += 1) {
             if (self.is_terminal(children[idx], .coalesce)) {
-                if (idx + 1 >= children.len or !self.is_nonterminal(children[idx + 1], .logical_or)) {
+                if (idx + 1 >= children.len or
+                    (!self.is_nonterminal(children[idx + 1], .logical_or) and
+                    !self.is_nonterminal(children[idx + 1], .logical_or_no_record)))
+                {
                     return self.fail(.unexpected_node, id);
                 }
                 const right = try self.build_logical_or(children[idx + 1]);
@@ -1076,7 +1141,10 @@ pub const builder = struct {
     fn build_logical_or(self: *builder, id: peg_parser.node_id) build_error!*ink.node {
         const children = self.child_nodes(id);
         var idx: usize = 0;
-        if (idx >= children.len or !self.is_nonterminal(children[idx], .logical_and)) {
+        if (idx >= children.len or
+            (!self.is_nonterminal(children[idx], .logical_and) and
+            !self.is_nonterminal(children[idx], .logical_and_no_record)))
+        {
             return self.fail(.unexpected_node, id);
         }
         var expr = try self.build_logical_and(children[idx]);
@@ -1084,7 +1152,10 @@ pub const builder = struct {
 
         while (idx < children.len) : (idx += 1) {
             if (self.is_terminal(children[idx], .logical_or) or self.is_terminal(children[idx], .logical_xor)) {
-                if (idx + 1 >= children.len or !self.is_nonterminal(children[idx + 1], .logical_and)) {
+                if (idx + 1 >= children.len or
+                    (!self.is_nonterminal(children[idx + 1], .logical_and) and
+                    !self.is_nonterminal(children[idx + 1], .logical_and_no_record)))
+                {
                     return self.fail(.unexpected_node, id);
                 }
                 const right = try self.build_logical_and(children[idx + 1]);
@@ -1104,7 +1175,10 @@ pub const builder = struct {
     fn build_logical_and(self: *builder, id: peg_parser.node_id) build_error!*ink.node {
         const children = self.child_nodes(id);
         var idx: usize = 0;
-        if (idx >= children.len or !self.is_nonterminal(children[idx], .bitwise_or)) {
+        if (idx >= children.len or
+            (!self.is_nonterminal(children[idx], .bitwise_or) and
+            !self.is_nonterminal(children[idx], .bitwise_or_no_record)))
+        {
             return self.fail(.unexpected_node, id);
         }
         var expr = try self.build_bitwise_or(children[idx]);
@@ -1112,7 +1186,10 @@ pub const builder = struct {
 
         while (idx < children.len) : (idx += 1) {
             if (self.is_terminal(children[idx], .logical_and)) {
-                if (idx + 1 >= children.len or !self.is_nonterminal(children[idx + 1], .bitwise_or)) {
+                if (idx + 1 >= children.len or
+                    (!self.is_nonterminal(children[idx + 1], .bitwise_or) and
+                    !self.is_nonterminal(children[idx + 1], .bitwise_or_no_record)))
+                {
                     return self.fail(.unexpected_node, id);
                 }
                 const right = try self.build_bitwise_or(children[idx + 1]);
@@ -1131,7 +1208,10 @@ pub const builder = struct {
     fn build_bitwise_or(self: *builder, id: peg_parser.node_id) build_error!*ink.node {
         const children = self.child_nodes(id);
         var idx: usize = 0;
-        if (idx >= children.len or !self.is_nonterminal(children[idx], .bitwise_xor)) {
+        if (idx >= children.len or
+            (!self.is_nonterminal(children[idx], .bitwise_xor) and
+            !self.is_nonterminal(children[idx], .bitwise_xor_no_record)))
+        {
             return self.fail(.unexpected_node, id);
         }
         var expr = try self.build_bitwise_xor(children[idx]);
@@ -1140,7 +1220,10 @@ pub const builder = struct {
         while (idx < children.len) : (idx += 1) {
             const child = children[idx];
             if (self.is_terminal(child, .bar)) {
-                if (idx + 1 >= children.len or !self.is_nonterminal(children[idx + 1], .bitwise_xor)) {
+                if (idx + 1 >= children.len or
+                    (!self.is_nonterminal(children[idx + 1], .bitwise_xor) and
+                    !self.is_nonterminal(children[idx + 1], .bitwise_xor_no_record)))
+                {
                     return self.fail(.unexpected_node, id);
                 }
                 const right = try self.build_bitwise_xor(children[idx + 1]);
@@ -1159,7 +1242,10 @@ pub const builder = struct {
     fn build_bitwise_xor(self: *builder, id: peg_parser.node_id) build_error!*ink.node {
         const children = self.child_nodes(id);
         var idx: usize = 0;
-        if (idx >= children.len or !self.is_nonterminal(children[idx], .bitwise_and)) {
+        if (idx >= children.len or
+            (!self.is_nonterminal(children[idx], .bitwise_and) and
+            !self.is_nonterminal(children[idx], .bitwise_and_no_record)))
+        {
             return self.fail(.unexpected_node, id);
         }
         var expr = try self.build_bitwise_and(children[idx]);
@@ -1168,7 +1254,10 @@ pub const builder = struct {
         while (idx < children.len) : (idx += 1) {
             const child = children[idx];
             if (self.is_terminal(child, .caret)) {
-                if (idx + 1 >= children.len or !self.is_nonterminal(children[idx + 1], .bitwise_and)) {
+                if (idx + 1 >= children.len or
+                    (!self.is_nonterminal(children[idx + 1], .bitwise_and) and
+                    !self.is_nonterminal(children[idx + 1], .bitwise_and_no_record)))
+                {
                     return self.fail(.unexpected_node, id);
                 }
                 const right = try self.build_bitwise_and(children[idx + 1]);
@@ -1187,7 +1276,10 @@ pub const builder = struct {
     fn build_bitwise_and(self: *builder, id: peg_parser.node_id) build_error!*ink.node {
         const children = self.child_nodes(id);
         var idx: usize = 0;
-        if (idx >= children.len or !self.is_nonterminal(children[idx], .comparison)) {
+        if (idx >= children.len or
+            (!self.is_nonterminal(children[idx], .comparison) and
+            !self.is_nonterminal(children[idx], .comparison_no_record)))
+        {
             return self.fail(.unexpected_node, id);
         }
         var expr = try self.build_comparison(children[idx]);
@@ -1196,7 +1288,10 @@ pub const builder = struct {
         while (idx < children.len) : (idx += 1) {
             const child = children[idx];
             if (self.is_terminal(child, .ampersand)) {
-                if (idx + 1 >= children.len or !self.is_nonterminal(children[idx + 1], .comparison)) {
+                if (idx + 1 >= children.len or
+                    (!self.is_nonterminal(children[idx + 1], .comparison) and
+                    !self.is_nonterminal(children[idx + 1], .comparison_no_record)))
+                {
                     return self.fail(.unexpected_node, id);
                 }
                 const right = try self.build_comparison(children[idx + 1]);
@@ -1215,7 +1310,10 @@ pub const builder = struct {
     fn build_comparison(self: *builder, id: peg_parser.node_id) build_error!*ink.node {
         const children = self.child_nodes(id);
         var idx: usize = 0;
-        if (idx >= children.len or !self.is_nonterminal(children[idx], .shift)) {
+        if (idx >= children.len or
+            (!self.is_nonterminal(children[idx], .shift) and
+            !self.is_nonterminal(children[idx], .shift_no_record)))
+        {
             return self.fail(.unexpected_node, id);
         }
         var expr = try self.build_shift(children[idx]);
@@ -1224,7 +1322,10 @@ pub const builder = struct {
         while (idx < children.len) : (idx += 1) {
             const child = children[idx];
             if (self.is_comparison_op(child)) {
-                if (idx + 1 >= children.len or !self.is_nonterminal(children[idx + 1], .shift)) {
+                if (idx + 1 >= children.len or
+                    (!self.is_nonterminal(children[idx + 1], .shift) and
+                    !self.is_nonterminal(children[idx + 1], .shift_no_record)))
+                {
                     return self.fail(.unexpected_node, id);
                 }
                 const right = try self.build_shift(children[idx + 1]);
@@ -1244,7 +1345,10 @@ pub const builder = struct {
     fn build_shift(self: *builder, id: peg_parser.node_id) build_error!*ink.node {
         const children = self.child_nodes(id);
         var idx: usize = 0;
-        if (idx >= children.len or !self.is_nonterminal(children[idx], .sum)) {
+        if (idx >= children.len or
+            (!self.is_nonterminal(children[idx], .sum) and
+            !self.is_nonterminal(children[idx], .sum_no_record)))
+        {
             return self.fail(.unexpected_node, id);
         }
         var expr = try self.build_sum(children[idx]);
@@ -1253,7 +1357,10 @@ pub const builder = struct {
         while (idx < children.len) : (idx += 1) {
             const child = children[idx];
             if (self.is_terminal(child, .shift_left) or self.is_terminal(child, .shift_right)) {
-                if (idx + 1 >= children.len or !self.is_nonterminal(children[idx + 1], .sum)) {
+                if (idx + 1 >= children.len or
+                    (!self.is_nonterminal(children[idx + 1], .sum) and
+                    !self.is_nonterminal(children[idx + 1], .sum_no_record)))
+                {
                     return self.fail(.unexpected_node, id);
                 }
                 const right = try self.build_sum(children[idx + 1]);
@@ -1273,7 +1380,10 @@ pub const builder = struct {
     fn build_sum(self: *builder, id: peg_parser.node_id) build_error!*ink.node {
         const children = self.child_nodes(id);
         var idx: usize = 0;
-        if (idx >= children.len or !self.is_nonterminal(children[idx], .product)) {
+        if (idx >= children.len or
+            (!self.is_nonterminal(children[idx], .product) and
+            !self.is_nonterminal(children[idx], .product_no_record)))
+        {
             return self.fail(.unexpected_node, id);
         }
         var expr = try self.build_product(children[idx]);
@@ -1282,7 +1392,10 @@ pub const builder = struct {
         while (idx < children.len) : (idx += 1) {
             const child = children[idx];
             if (self.is_terminal(child, .plus) or self.is_terminal(child, .minus)) {
-                if (idx + 1 >= children.len or !self.is_nonterminal(children[idx + 1], .product)) {
+                if (idx + 1 >= children.len or
+                    (!self.is_nonterminal(children[idx + 1], .product) and
+                    !self.is_nonterminal(children[idx + 1], .product_no_record)))
+                {
                     return self.fail(.unexpected_node, id);
                 }
                 const right = try self.build_product(children[idx + 1]);
@@ -1302,7 +1415,10 @@ pub const builder = struct {
     fn build_product(self: *builder, id: peg_parser.node_id) build_error!*ink.node {
         const children = self.child_nodes(id);
         var idx: usize = 0;
-        if (idx >= children.len or !self.is_nonterminal(children[idx], .unary)) {
+        if (idx >= children.len or
+            (!self.is_nonterminal(children[idx], .unary) and
+            !self.is_nonterminal(children[idx], .unary_no_record)))
+        {
             return self.fail(.unexpected_node, id);
         }
         var expr = try self.build_unary(children[idx]);
@@ -1311,7 +1427,10 @@ pub const builder = struct {
         while (idx < children.len) : (idx += 1) {
             const child = children[idx];
             if (self.is_terminal(child, .asterisk) or self.is_terminal(child, .slash) or self.is_terminal(child, .percent)) {
-                if (idx + 1 >= children.len or !self.is_nonterminal(children[idx + 1], .unary)) {
+                if (idx + 1 >= children.len or
+                    (!self.is_nonterminal(children[idx + 1], .unary) and
+                    !self.is_nonterminal(children[idx + 1], .unary_no_record)))
+                {
                     return self.fail(.unexpected_node, id);
                 }
                 const right = try self.build_unary(children[idx + 1]);
@@ -1340,7 +1459,10 @@ pub const builder = struct {
                 op = .borrow_mut;
                 idx += 1;
             }
-            if (idx >= children.len or !self.is_nonterminal(children[idx], .unary)) {
+            if (idx >= children.len or
+                (!self.is_nonterminal(children[idx], .unary) and
+                !self.is_nonterminal(children[idx], .unary_no_record)))
+            {
                 return self.fail(.unexpected_node, id);
             }
             const right = try self.build_unary(children[idx]);
@@ -1356,7 +1478,10 @@ pub const builder = struct {
             self.is_terminal(first, .timeout) or self.is_terminal(first, .deadline) or self.is_terminal(first, .spawn) or
             self.is_terminal(first, .await) or self.is_terminal(first, .@"try"))
         {
-            if (children.len < 2 or !self.is_nonterminal(children[1], .unary)) {
+            if (children.len < 2 or
+                (!self.is_nonterminal(children[1], .unary) and
+                !self.is_nonterminal(children[1], .unary_no_record)))
+            {
                 return self.fail(.unexpected_node, id);
             }
             const right = try self.build_unary(children[1]);
@@ -1368,7 +1493,7 @@ pub const builder = struct {
         }
 
         for (children) |child| {
-            if (self.is_nonterminal(child, .postfix)) {
+            if (self.is_nonterminal(child, .postfix) or self.is_nonterminal(child, .postfix_no_record)) {
                 return self.build_postfix(child);
             }
         }
@@ -3180,6 +3305,9 @@ pub const builder = struct {
     fn new_node(self: *builder, data: ink.node) build_error!*ink.node {
         const n = self.allocator.create(ink.node) catch return error.out_of_memory;
         n.* = data;
+        if (self.node_registry) |list| {
+            list.append(n) catch return error.out_of_memory;
+        }
         return n;
     }
 

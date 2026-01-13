@@ -353,6 +353,7 @@ fn convert_node(allocator: mem_allocator, node: uir_core.uir) lower_error!mir {
         .duration => |value| .{ .duration = value },
         .string => |value| .{ .string = convert_string_id(value) },
         .boolean => |value| .{ .boolean = value },
+        .none => .{ .integer = 0 },
         .identifier => |value| .{ .identifier = convert_string_id(value) },
         .unary => |un| .{ .unary = .{ .op = un.op, .right = convert_id(un.right) } },
         .binary => |bin| .{ .binary = .{ .left = convert_id(bin.left), .op = bin.op, .right = convert_id(bin.right) } },

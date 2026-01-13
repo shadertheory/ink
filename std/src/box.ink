@@ -1,7 +1,7 @@
 fn box_new<T: type>(value: T) -> box<T>
 	let words = @type_words(value)
 	let ptr = alloc(words)
-	let src = &value as int
+	let src = (&value) as int
 	mut idx = 0
 	while idx < words
 		*(ptr + idx) = *(src + idx)

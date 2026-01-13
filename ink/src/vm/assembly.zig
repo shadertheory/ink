@@ -9,6 +9,7 @@ pub const int_fitting_range = std.math.IntFittingRange;
 const foreign = @import("foreign.zig");
 const inkb = @import("inkb.zig");
 const runtime = @import("../runtime/scheduler.zig");
+const trace = @import("../runtime/trace.zig");
 pub const struct_field = std.builtin.Type.StructField;
 pub const tuple = std.meta.Tuple;
 pub const tape = @import("./core.zig").machine.tape;
@@ -224,6 +225,8 @@ const vm_task = struct {
         foreign_names: []const []const u8,
         scheduler: ?*runtime.scheduler,
         lib_dir: ?[]const u8,
+        debug_checks: bool,
+        program_trace: ?*trace.ProgramTrace,
     ) !*vm_task {
         const task_ptr = try allocator.create(vm_task);
         errdefer allocator.destroy(task_ptr);
@@ -245,6 +248,8 @@ const vm_task = struct {
             scheduler,
             lib_dir,
             code,
+            debug_checks,
+            program_trace,
         );
         return task_ptr;
     }
@@ -381,6 +386,9 @@ pub fn control_operators(comptime vm: type) type {
         }
 
         fn call(machine: *vm, target_absolute: usize) void {
+            if (machine.trace) |trace_ctx| {
+                trace_ctx.note_call(machine.current_task_id, target_absolute);
+            }
             const base = if (machine.arg_base_valid) machine.arg_base else machine.current.sp;
             machine.memory.write(base, machine.current.pc + machine.last_inst_size);
             machine.memory.write(base + 1, machine.current.fp);
@@ -405,6 +413,9 @@ pub fn control_operators(comptime vm: type) type {
         }
 
         fn call_tail(machine: *vm, target_absolute: usize) void {
+            if (machine.trace) |trace_ctx| {
+                trace_ctx.note_tail_call(machine.current_task_id, target_absolute);
+            }
             jump_always(machine, target_absolute);
         }
 
@@ -433,6 +444,8 @@ pub fn control_operators(comptime vm: type) type {
                 machine.foreign_names,
                 sched,
                 machine.foreign_resolver.lib_dir,
+                machine.debug_checks,
+                machine.trace,
             ) catch {
                 machine.memory.write(machine.current.fp + dst, 0);
                 return;
@@ -462,6 +475,9 @@ pub fn control_operators(comptime vm: type) type {
                 return;
             };
             task_ptr.task_id = task_id;
+            if (machine.trace) |trace_ctx| {
+                trace_ctx.note_task_start(@intCast(task_id), @intCast(machine.current_task_id), target_absolute);
+            }
 
             if (machine.arg_base_valid) {
                 machine.current.sp = machine.arg_base;
@@ -539,6 +555,9 @@ pub fn control_operators(comptime vm: type) type {
         fn ret(machine: *vm, src: usize, dst: usize) void {
             _ = src;
             _ = dst;
+            if (machine.trace) |trace_ctx| {
+                trace_ctx.note_return(machine.current_task_id);
+            }
             const ret_pc = machine.memory.read(machine.current.fp - 2);
             const prev_fp = machine.memory.read(machine.current.fp - 1);
             if (ret_pc == 0 and prev_fp == 0) {
@@ -552,6 +571,9 @@ pub fn control_operators(comptime vm: type) type {
 
         fn ret_value(machine: *vm, src: usize, dst: usize) void {
             _ = dst;
+            if (machine.trace) |trace_ctx| {
+                trace_ctx.note_return(machine.current_task_id);
+            }
             const value = machine.memory.read(machine.current.fp + src);
             const ret_pc = machine.memory.read(machine.current.fp - 2);
             const prev_fp = machine.memory.read(machine.current.fp - 1);
@@ -818,6 +840,7 @@ pub fn assembly(comptime operation_sets: anytype, comptime formats: anytype, com
             memory: *tape,
             constants: []const u64,
             data: []const inkb.data_entry,
+            data_string_ptrs: []usize,
             code: []const u8,
             halted: bool,
             heap_top: usize,
@@ -835,6 +858,8 @@ pub fn assembly(comptime operation_sets: anytype, comptime formats: anytype, com
             arg_base: usize,
             arg_base_valid: bool,
             last_inst_size: usize,
+            debug_checks: bool,
+            trace: ?*trace.ProgramTrace,
 
             pub fn stack_push(this: *self, val: u64) void {
                 this.memory.write(this.current.sp, val);
@@ -851,13 +876,18 @@ pub fn assembly(comptime operation_sets: anytype, comptime formats: anytype, com
                 scheduler: ?*runtime.scheduler,
                 lib_dir: ?[]const u8,
                 code: []const u8,
+                debug_checks: bool,
+                program_trace: ?*trace.ProgramTrace,
             ) self {
                 const null_ptr = std.math.maxInt(usize);
+                const data_string_ptrs = allocator.alloc(usize, data.len) catch unreachable;
+                @memset(data_string_ptrs, 0);
                 return .{
                     .current = start,
                     .memory = memory,
                     .constants = constants,
                     .data = data,
+                    .data_string_ptrs = data_string_ptrs,
                     .code = code,
                     .halted = false,
                     .heap_top = memory.data.len,
@@ -875,10 +905,13 @@ pub fn assembly(comptime operation_sets: anytype, comptime formats: anytype, com
                     .arg_base = start.sp,
                     .arg_base_valid = false,
                     .last_inst_size = 0,
+                    .debug_checks = debug_checks,
+                    .trace = program_trace,
                 };
             }
 
             pub fn deinit(this: *self) void {
+                this.allocator.free(this.data_string_ptrs);
                 this.foreign_resolver.deinit();
             }
 
@@ -1117,6 +1150,8 @@ test "bytecode execute" {
         null,
         null,
         bytes,
+        false,
+        null,
     );
     _ = exe.step(bytes, 20);
 }

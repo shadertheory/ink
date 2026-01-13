@@ -11,16 +11,16 @@ comptime fn emit_helper(args: token_stream, item: token_stream) -> token_stream
 			std::error(std::span_here(), "emit_helper expects an argument")
 			std::token_stream_empty()
 		else
-			if std::token_tree_kind(arg_head) != std::token_tree_kind::token
+			if std::token_tree_kind(arg_head) != token_tree_kind::token
 				std::error(std::token_tree_span(arg_head), "emit_helper expects an identifier argument")
 				std::token_stream_empty()
 			else
 				let arg_token = std::token_tree_token(arg_head)
-				if std::token_kind(arg_token) != std::token_kind::identifier
+				if std::token_kind(arg_token) != token_kind::identifier
 					std::error(std::token_tree_span(arg_head), "emit_helper expects an identifier argument")
 					std::token_stream_empty()
 				else
-					let line = std::token_new(std::token_kind::new_line, std::span_here(), none)
+					let line = std::token_new(token_kind::new_line, std::span_here(), none)
 					let line_tree = std::token_tree_from_token(line)
 					let line_stream = std::token_stream_push(std::token_stream_empty(), line_tree)
 					let extra = std::quote("let macro_tag = 73")
@@ -34,9 +34,9 @@ comptime fn token_stream_drop_new_lines(value: token_stream) -> token_stream
 	while idx < count
 		let tree = std::token_stream_get(value, idx)
 		if tree != 0
-			if std::token_tree_kind(tree) == std::token_tree_kind::token
+			if std::token_tree_kind(tree) == token_tree_kind::token
 				let tok = std::token_tree_token(tree)
-				if std::token_kind(tok) == std::token_kind::new_line
+				if std::token_kind(tok) == token_kind::new_line
 					continue
 			out = std::token_stream_push(out, tree)
 		idx += 1
@@ -57,7 +57,7 @@ comptime fn add_tokens(left: token_stream, right: token_stream) -> token_stream
 		else
 			let next_span = std::token_tree_span(head)
 			span = next_span
-			let plus_token = std::token_new(std::token_kind::plus, span, none)
+			let plus_token = std::token_new(token_kind::plus, span, none)
 			let plus_tree = std::token_tree_from_token(plus_token)
 			let plus_stream = std::token_stream_push(std::token_stream_empty(), plus_tree)
 			let with_plus = std::token_stream_concat(clean_left, plus_stream)
@@ -73,12 +73,12 @@ comptime fn sum_pair(pair: token_stream) -> token_stream
 			std::error(std::span_here(), "sum_pair expects (a, b)")
 			std::token_stream_empty()
 		else
-			if std::token_tree_kind(head) != std::token_tree_kind::group
+			if std::token_tree_kind(head) != token_tree_kind::group
 				std::error(std::token_tree_span(head), "sum_pair expects (a, b)")
 				std::token_stream_empty()
 			else
 				let group = std::token_tree_group(head)
-				if std::token_group_delimiter(group) != std::delimiter::paren
+				if std::token_group_delimiter(group) != delimiter::paren
 					std::error(std::token_group_span(group), "sum_pair expects (a, b)")
 					std::token_stream_empty()
 				else
@@ -89,9 +89,9 @@ comptime fn sum_pair(pair: token_stream) -> token_stream
 					while idx < inner_len
 						let item = std::token_stream_get(inner, idx)
 						if item != 0
-							if std::token_tree_kind(item) == std::token_tree_kind::token
+							if std::token_tree_kind(item) == token_tree_kind::token
 								let tok = std::token_tree_token(item)
-								if std::token_kind(tok) == std::token_kind::comma
+								if std::token_kind(tok) == token_kind::comma
 									comma_index = idx
 									break
 						idx += 1
@@ -261,8 +261,8 @@ fn main() -> int
 	std::print("pair sum is {pair_sum}")
 	int2_free(pair)
 	let bytes = std::bytes_from_string("AZ")
-	let view: []int = std::slice_new(std::bytes_ptr(bytes), std::bytes_len(bytes))
-	view[0] += 1
+	let view: []u8 = std::slice_new(std::bytes_ptr(bytes), std::bytes_len(bytes))
+	view[0] += (1 as u8)
 	let first_byte = view[0]
 	std::print("slice[0] is {first_byte}")
 	std::bytes_free(bytes)

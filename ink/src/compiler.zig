@@ -11,6 +11,7 @@ const typecheck = @import("typecheck.zig");
 const mir_lower = ink.mir_lower;
 const lir_lower = ink.lir_lower;
 const macro_ctx_mod = @import("macro_context.zig");
+const validate_mod = @import("validate.zig");
 const mem_allocator = std.mem.Allocator;
 const arena_allocator = std.heap.ArenaAllocator;
 const array_list = std.array_list.Managed;
@@ -21,6 +22,7 @@ const span = src.span;
 const diagnostic = diag.diagnostic;
 const resolver = resol.resolver;
 const desugar = ink.desugar;
+const sandbox_mod = ink.sandbox;
 
 pub const compiler = struct {
     pub const source_id = src.source_id;
@@ -39,6 +41,8 @@ pub const compiler = struct {
         root_module: []const u8,
         target: target_mod.target_spec = .{ .kind = .vm },
         prelude: desugar.prelude_spec = desugar.default_prelude,
+        sandbox: ?sandbox_mod.Config = null,
+        debug_info: bool = false,
     };
 
     pub const compile_result = struct {
@@ -50,6 +54,7 @@ pub const compiler = struct {
         data: ?[]const ink.vm.inkb.data_entry = null,
         bytecode: ?[]u8 = null,
         foreigns: ?[]const []const u8 = null,
+        debug: ?ink.vm.inkb.debug_info = null,
 
         pub fn deinit(self: *compile_result, allocator: mem_allocator) void {
             allocator.free(self.diagnostics);
@@ -68,6 +73,11 @@ pub const compiler = struct {
                 for (foreigns) |name| allocator.free(name);
                 allocator.free(foreigns);
             }
+            if (self.debug) |*dbg| {
+                for (dbg.functions) |func| allocator.free(func.name);
+                allocator.free(dbg.functions);
+                self.debug = null;
+            }
         }
     };
 
@@ -83,6 +93,7 @@ pub const compiler = struct {
         arena: std.heap.ArenaAllocator,
         tokens: []const ink.token,
         nodes: []const *ink.node,
+        registry: []const *ink.node,
 
         fn deinit(self: *ast_file, allocator: mem_allocator) void {
             allocator.free(self.tokens);
@@ -112,6 +123,7 @@ pub const compiler = struct {
             for (self.foreigns) |name| allocator.free(name);
             allocator.free(self.foreigns);
             for (self.signatures) |sig| allocator.free(sig.name);
+            for (self.signatures) |sig| if (sig.impl_for) |impl_name| allocator.free(impl_name);
             allocator.free(self.signatures);
             self.label_offsets.deinit();
         }
@@ -170,6 +182,10 @@ pub const compiler = struct {
 
     const macro_expander = struct {
         const macro_error = error{OutOfMemory};
+        const arena_buf_node = struct {
+            data: usize,
+            node: std.SinglyLinkedList.Node = .{},
+        };
 
         allocator: mem_allocator,
         macro_ctx: *macro_ctx_mod.macro_context,
@@ -178,7 +194,308 @@ pub const compiler = struct {
         module_id: module_id,
         diags: *array_list(diagnostic),
         diag_messages: *array_list([]const u8),
-        macro_arenas: *array_list(arena_allocator),
+        macro_arenas: *array_list(*arena_allocator),
+        checks: ?sandbox_mod.Checks = null,
+        node_set: ?*std.AutoHashMap(usize, void) = null,
+        files: []const ast_file,
+
+        fn slice_error(
+            self: *macro_expander,
+            base: []const u8,
+            context: []const u8,
+            source_id_value: src.source_id,
+            err_span: ?span,
+        ) macro_error!void {
+            const msg = try std.fmt.allocPrint(self.allocator, "{s} ({s})", .{ base, context });
+            errdefer self.allocator.free(msg);
+            try self.diag_messages.append(msg);
+            try self.diags.append(.{
+                .danger = .@"error",
+                .message = msg,
+                .span = err_span,
+                .source_id = source_id_value,
+            });
+        }
+
+        fn arena_contains(arena: *const arena_allocator, start_addr: usize, end_addr: usize) bool {
+            var it = arena.state.buffer_list.first;
+            while (it) |node| : (it = node.next) {
+                const buf_node: *arena_buf_node = @fieldParentPtr("node", node);
+                const base = @intFromPtr(buf_node);
+                const buf_start = base + @sizeOf(arena_buf_node);
+                const buf_end = base + buf_node.data;
+                _ = end_addr;
+                if (start_addr >= buf_start and start_addr < buf_end) return true;
+            }
+            return false;
+        }
+
+        fn slice_in_known_arenas(
+            self: *macro_expander,
+            ptr_addr: usize,
+            len: usize,
+            elem_size: usize,
+        ) bool {
+            if (len == 0) return true;
+            const total_size = std.math.mul(usize, len, elem_size) catch return false;
+            const end_addr = std.math.add(usize, ptr_addr, total_size) catch return false;
+            for (self.files) |file| {
+                if (arena_contains(&file.arena, ptr_addr, end_addr)) return true;
+            }
+            for (self.macro_arenas.items) |arena| {
+                if (arena_contains(arena, ptr_addr, end_addr)) return true;
+            }
+            return false;
+        }
+
+        fn contains_node_ref(comptime T: type) bool {
+            if (T == ink.ast.node_ref) return true;
+            switch (@typeInfo(T)) {
+                .optional => |info| return contains_node_ref(info.child),
+                .pointer => |ptr| {
+                    if (ptr.size == .slice) {
+                        return contains_node_ref(ptr.child);
+                    }
+                    return false;
+                },
+                .array => |info| return contains_node_ref(info.child),
+                .@"struct" => |info| {
+                    inline for (info.fields) |field| {
+                        if (contains_node_ref(field.type)) return true;
+                    }
+                    return false;
+                },
+                .@"union" => |info| {
+                    if (info.tag_type == null) return false;
+                    inline for (info.fields) |field| {
+                        if (contains_node_ref(field.type)) return true;
+                    }
+                    return false;
+                },
+                else => return false,
+            }
+        }
+
+        fn validate_node_ref_in_arenas(
+            self: *macro_expander,
+            ref: ink.ast.node_ref,
+            source_id_value: src.source_id,
+            span_value: ?span,
+        ) bool {
+            const addr = @intFromPtr(ref);
+            if (addr == 0) {
+                self.diags.append(.{
+                    .danger = .@"error",
+                    .message = "macro expansion encountered null node reference",
+                    .span = span_value,
+                    .source_id = source_id_value,
+                }) catch {};
+                return false;
+            }
+            if (@mod(addr, @alignOf(ink.node)) != 0) {
+                self.diags.append(.{
+                    .danger = .@"error",
+                    .message = "macro expansion encountered misaligned node reference",
+                    .span = span_value,
+                    .source_id = source_id_value,
+                }) catch {};
+                return false;
+            }
+            if (!self.slice_in_known_arenas(addr, 1, @sizeOf(ink.node))) {
+                self.diags.append(.{
+                    .danger = .@"error",
+                    .message = "macro expansion encountered node reference outside arena",
+                    .span = span_value,
+                    .source_id = source_id_value,
+                }) catch {};
+                return false;
+            }
+            if (self.node_set) |set| {
+                if (!set.contains(addr)) {
+                    _ = set.put(addr, {}) catch {};
+                }
+            }
+            return true;
+        }
+
+        fn validate_node_refs_in_arenas(
+            self: *macro_expander,
+            value: anytype,
+            source_id_value: src.source_id,
+            span_value: ?span,
+        ) bool {
+            const T = @TypeOf(value);
+            if (!contains_node_ref(T)) return true;
+            if (T == ink.ast.node_ref) {
+                return self.validate_node_ref_in_arenas(value, source_id_value, span_value);
+            }
+            switch (@typeInfo(T)) {
+                .optional => |_| {
+                    if (value) |payload| {
+                        return self.validate_node_refs_in_arenas(payload, source_id_value, span_value);
+                    }
+                    return true;
+                },
+                .pointer => |ptr| {
+                    if (ptr.size == .slice) {
+                        if (!contains_node_ref(ptr.child)) return true;
+                        if (value.len > 0) {
+                            const ptr_addr = @intFromPtr(value.ptr);
+                            if (ptr_addr == 0) {
+                                self.diags.append(.{
+                                    .danger = .@"error",
+                                    .message = "macro expansion encountered null slice pointer",
+                                    .span = span_value,
+                                    .source_id = source_id_value,
+                                }) catch {};
+                                return false;
+                            }
+                            if (!self.slice_in_known_arenas(ptr_addr, value.len, @sizeOf(ptr.child))) {
+                                self.diags.append(.{
+                                    .danger = .@"error",
+                                    .message = "macro expansion encountered slice outside arena",
+                                    .span = span_value,
+                                    .source_id = source_id_value,
+                                }) catch {};
+                                return false;
+                            }
+                        }
+                        for (value) |item| {
+                            if (!self.validate_node_refs_in_arenas(item, source_id_value, span_value)) return false;
+                        }
+                        return true;
+                    }
+                    return true;
+                },
+                .@"struct" => |info| {
+                    inline for (info.fields) |field| {
+                        const field_value = @field(value, field.name);
+                        if (!self.validate_node_refs_in_arenas(field_value, source_id_value, span_value)) return false;
+                    }
+                    return true;
+                },
+                .@"union" => |info| {
+                    if (info.tag_type == null) return true;
+                    switch (value) {
+                        inline else => |payload| {
+                            return self.validate_node_refs_in_arenas(payload, source_id_value, span_value);
+                        },
+                    }
+                },
+                .array => |info| {
+                    if (contains_node_ref(info.child)) {
+                        for (value) |item| {
+                            if (!self.validate_node_refs_in_arenas(item, source_id_value, span_value)) return false;
+                        }
+                    }
+                    return true;
+                },
+                else => return true,
+            }
+        }
+
+        fn ensure_node_ptr(
+            self: *macro_expander,
+            node: *ink.node,
+            source_id_value: src.source_id,
+        ) macro_error!bool {
+            const addr = @intFromPtr(node);
+            if (addr == 0) {
+                try self.diags.append(.{
+                    .danger = .@"error",
+                    .message = "macro expansion encountered null ast node",
+                    .span = null,
+                    .source_id = source_id_value,
+                });
+                return false;
+            }
+            if (@mod(addr, @alignOf(ink.node)) != 0) {
+                try self.diags.append(.{
+                    .danger = .@"error",
+                    .message = "macro expansion encountered misaligned ast node",
+                    .span = null,
+                    .source_id = source_id_value,
+                });
+                return false;
+            }
+            if (!self.slice_in_known_arenas(addr, 1, @sizeOf(ink.node))) {
+                try self.diags.append(.{
+                    .danger = .@"error",
+                    .message = "macro expansion encountered node outside arena",
+                    .span = null,
+                    .source_id = source_id_value,
+                });
+                return false;
+            }
+            if (self.node_set) |set| {
+                if (!set.contains(addr)) {
+                    _ = set.put(addr, {}) catch {};
+                }
+            }
+            return true;
+        }
+
+        fn deref_node(
+            self: *macro_expander,
+            ref: ink.ast.node_ref,
+            source_id_value: src.source_id,
+        ) ?*ink.node {
+            const addr = @intFromPtr(ref);
+            if (addr == 0) {
+                self.diags.append(.{
+                    .danger = .@"error",
+                    .message = "macro expansion encountered null node reference",
+                    .span = null,
+                    .source_id = source_id_value,
+                }) catch {};
+                return null;
+            }
+            if (@mod(addr, @alignOf(ink.node)) != 0) {
+                self.diags.append(.{
+                    .danger = .@"error",
+                    .message = "macro expansion encountered misaligned node reference",
+                    .span = null,
+                    .source_id = source_id_value,
+                }) catch {};
+                return null;
+            }
+            if (!self.slice_in_known_arenas(addr, 1, @sizeOf(ink.node))) {
+                self.diags.append(.{
+                    .danger = .@"error",
+                    .message = "macro expansion encountered node reference outside arena",
+                    .span = null,
+                    .source_id = source_id_value,
+                }) catch {};
+                return null;
+            }
+            if (self.node_set) |set| {
+                if (!set.contains(addr)) {
+                    _ = set.put(addr, {}) catch {};
+                }
+            }
+            return ink.ast.deref(ref);
+        }
+
+        fn ensure_slice(
+            self: *macro_expander,
+            ptr_addr: usize,
+            len: usize,
+            source_id_value: src.source_id,
+            elem_size: usize,
+            context: []const u8,
+            err_span: ?span,
+        ) macro_error!bool {
+            if (len == 0) return true;
+            if (ptr_addr == 0) {
+                try self.slice_error("macro expansion encountered null slice pointer", context, source_id_value, err_span);
+                return false;
+            }
+            if (!self.slice_in_known_arenas(ptr_addr, len, elem_size)) {
+                try self.slice_error("macro expansion encountered slice outside arena", context, source_id_value, err_span);
+                return false;
+            }
+            return true;
+        }
 
         fn expand_nodes(
             self: *macro_expander,
@@ -205,6 +522,7 @@ pub const compiler = struct {
             node_allocator: mem_allocator,
             depth: usize,
         ) macro_error!void {
+            if (!try self.ensure_node_ptr(node, source_id_value)) return;
             if (node.* == .decl) {
                 return self.expand_decl_into(out, node, tokens, source_id_value, node_allocator, depth);
             }
@@ -224,6 +542,8 @@ pub const compiler = struct {
             const decl = node.decl;
             const attrs = decl_attributes(decl);
             if (attrs.len > 0) {
+                const decl_span = span{ .start = decl_where(decl).start, .end = decl_where(decl).end };
+                if (!try self.ensure_slice(@intFromPtr(attrs.ptr), attrs.len, source_id_value, @sizeOf(ink.ast.attribute), "decl.attributes", decl_span)) return;
                 if (try self.expand_attribute_macro(node, attrs, tokens, source_id_value, node_allocator, depth)) |expanded| {
                     defer self.allocator.free(expanded);
                     try out.appendSlice(expanded);
@@ -327,9 +647,43 @@ pub const compiler = struct {
                 const out_stream = try self.run_macro(&module_entry.runtime, overload.?, arg_streams_buf[0..arg_count], call_span, attr.where, source_id_value);
                 if (out_stream == null) return null;
 
+                if (self.checks) |checks| {
+                    if (checks.macro_streams) {
+                        if (self.macro_ctx.validate_stream(self.allocator, out_stream.?)) |err| {
+                            const msg = switch (err) {
+                                .invalid_stream => "macro output stream invalid",
+                                .invalid_tree => "macro output tree invalid",
+                                .invalid_token => "macro output token invalid",
+                                .invalid_group => "macro output group invalid",
+                                .cycle => "macro output stream cycle detected",
+                            };
+                            try self.diags.append(.{
+                                .danger = .@"error",
+                                .message = msg,
+                                .span = span{ .start = attr.where.start, .end = attr.where.end },
+                                .source_id = source_id_value,
+                            });
+                            return null;
+                        }
+                    }
+                }
+
                 const parsed = try self.parse_macro_program(out_stream.?, attr.where, source_id_value);
                 if (parsed == null) return null;
                 defer self.allocator.free(parsed.?.tokens);
+                if (self.checks) |checks| {
+                    if (checks.macro_ast) {
+                        const ok = try validate_mod.validate_macro_ast(
+                            self.allocator,
+                            parsed.?.nodes,
+                            parsed.?.registry,
+                            self.diags,
+                            source_id_value,
+                            span{ .start = attr.where.start, .end = attr.where.end },
+                        );
+                        if (!ok) return null;
+                    }
+                }
                 const expanded = try self.expand_nodes(
                     parsed.?.nodes,
                     parsed.?.tokens,
@@ -355,24 +709,30 @@ pub const compiler = struct {
             switch (node.decl) {
                 .function => |*func| {
                     if (func.body) |body_ref| {
-                        const body = ink.ast.deref(body_ref);
+                        const body = self.deref_node(body_ref, source_id_value) orelse return;
                         const expanded = try self.expand_expr(body, tokens, source_id_value, node_allocator, depth);
                         func.body = ink.ast.ref_opt(expanded);
                     }
                 },
                 .@"const" => |*c| {
-                    const expanded = try self.expand_expr(ink.ast.deref(c.value), tokens, source_id_value, node_allocator, depth);
+                    const value_node = self.deref_node(c.value, source_id_value) orelse return;
+                    const expanded = try self.expand_expr(value_node, tokens, source_id_value, node_allocator, depth);
                     c.value = ink.ast.ref(expanded);
                 },
                 .@"var" => |*v| {
-                    const expanded = try self.expand_expr(ink.ast.deref(v.value), tokens, source_id_value, node_allocator, depth);
+                    const value_node = self.deref_node(v.value, source_id_value) orelse return;
+                    const expanded = try self.expand_expr(value_node, tokens, source_id_value, node_allocator, depth);
                     v.value = ink.ast.ref(expanded);
                 },
                 .impl => |*impl_decl| {
                     const funcs = @constCast(impl_decl.functions);
+                    if (funcs.len > 0) {
+                        const decl_span = span{ .start = decl_where(node.decl).start, .end = decl_where(node.decl).end };
+                        if (!try self.ensure_slice(@intFromPtr(funcs.ptr), funcs.len, source_id_value, @sizeOf(ink.ast.function_decl), "impl_decl.functions", decl_span)) return;
+                    }
                     for (funcs) |*func| {
                         if (func.body) |body_ref| {
-                            const body = ink.ast.deref(body_ref);
+                            const body = self.deref_node(body_ref, source_id_value) orelse return;
                             const expanded = try self.expand_expr(body, tokens, source_id_value, node_allocator, depth);
                             func.body = ink.ast.ref_opt(expanded);
                         }
@@ -380,31 +740,42 @@ pub const compiler = struct {
                 },
                 .trait => |*trait_decl| {
                     const items = @constCast(trait_decl.items);
+                    if (items.len > 0) {
+                        const decl_span = span{ .start = decl_where(node.decl).start, .end = decl_where(node.decl).end };
+                        if (!try self.ensure_slice(@intFromPtr(items.ptr), items.len, source_id_value, @sizeOf(ink.ast.trait_item), "trait_decl.items", decl_span)) return;
+                    }
                     for (items) |*item| {
                         switch (item.*) {
                             .function => |*func| {
                                 if (func.body) |body_ref| {
-                                    const body = ink.ast.deref(body_ref);
+                                    const body = self.deref_node(body_ref, source_id_value) orelse return;
                                     const expanded = try self.expand_expr(body, tokens, source_id_value, node_allocator, depth);
                                     func.body = ink.ast.ref_opt(expanded);
                                 }
                             },
                             .assoc_type => |*assoc| {
                                 if (assoc.value) |value_ref| {
-                                    const expanded = try self.expand_expr(ink.ast.deref(value_ref), tokens, source_id_value, node_allocator, depth);
+                                    const value_node = self.deref_node(value_ref, source_id_value) orelse return;
+                                    const expanded = try self.expand_expr(value_node, tokens, source_id_value, node_allocator, depth);
                                     assoc.value = ink.ast.ref_opt(expanded);
                                 }
                             },
                         }
                     }
                     const requires = @constCast(trait_decl.requires);
+                    if (requires.len > 0) {
+                        const decl_span = span{ .start = decl_where(node.decl).start, .end = decl_where(node.decl).end };
+                        if (!try self.ensure_slice(@intFromPtr(requires.ptr), requires.len, source_id_value, @sizeOf(ink.ast.node_ref), "trait_decl.requires", decl_span)) return;
+                    }
                     for (requires) |*req_ref| {
-                        const expanded = try self.expand_expr(ink.ast.deref(req_ref.*), tokens, source_id_value, node_allocator, depth);
+                        const req_node = self.deref_node(req_ref.*, source_id_value) orelse return;
+                        const expanded = try self.expand_expr(req_node, tokens, source_id_value, node_allocator, depth);
                         req_ref.* = ink.ast.ref(expanded);
                     }
                 },
                 .type_alias => |*ty| {
-                    const expanded = try self.expand_expr(ink.ast.deref(ty.value), tokens, source_id_value, node_allocator, depth);
+                    const value_node = self.deref_node(ty.value, source_id_value) orelse return;
+                    const expanded = try self.expand_expr(value_node, tokens, source_id_value, node_allocator, depth);
                     ty.value = ink.ast.ref(expanded);
                 },
                 else => {},
@@ -419,6 +790,8 @@ pub const compiler = struct {
             node_allocator: mem_allocator,
             depth: usize,
         ) macro_error!*ink.node {
+            if (!try self.ensure_node_ptr(node, source_id_value)) return node;
+            if (!self.validate_node_refs_in_arenas(node.*, source_id_value, null)) return node;
             switch (node.*) {
                 .macro_call => |mc| {
                     if (depth >= macro_recursion_limit) {
@@ -434,121 +807,162 @@ pub const compiler = struct {
                     return expanded;
                 },
                 .unary => |*un| {
-                    const expanded = try self.expand_expr(ink.ast.deref(un.right), tokens, source_id_value, node_allocator, depth);
+                    const right = self.deref_node(un.right, source_id_value) orelse return node;
+                    const expanded = try self.expand_expr(right, tokens, source_id_value, node_allocator, depth);
                     un.right = ink.ast.ref(expanded);
                 },
                 .binary => |*bin| {
-                    const left = try self.expand_expr(ink.ast.deref(bin.left), tokens, source_id_value, node_allocator, depth);
-                    const right = try self.expand_expr(ink.ast.deref(bin.right), tokens, source_id_value, node_allocator, depth);
+                    const left_node = self.deref_node(bin.left, source_id_value) orelse return node;
+                    const right_node = self.deref_node(bin.right, source_id_value) orelse return node;
+                    const left = try self.expand_expr(left_node, tokens, source_id_value, node_allocator, depth);
+                    const right = try self.expand_expr(right_node, tokens, source_id_value, node_allocator, depth);
                     bin.left = ink.ast.ref(left);
                     bin.right = ink.ast.ref(right);
                 },
                 .if_expr => |*ife| {
-                    const cond = try self.expand_expr(ink.ast.deref(ife.condition), tokens, source_id_value, node_allocator, depth);
-                    const then_branch = try self.expand_expr(ink.ast.deref(ife.then_branch), tokens, source_id_value, node_allocator, depth);
+                    const cond_node = self.deref_node(ife.condition, source_id_value) orelse return node;
+                    const then_node = self.deref_node(ife.then_branch, source_id_value) orelse return node;
+                    const cond = try self.expand_expr(cond_node, tokens, source_id_value, node_allocator, depth);
+                    const then_branch = try self.expand_expr(then_node, tokens, source_id_value, node_allocator, depth);
                     ife.condition = ink.ast.ref(cond);
                     ife.then_branch = ink.ast.ref(then_branch);
                     if (ife.else_branch) |else_ref| {
-                        const else_node = try self.expand_expr(ink.ast.deref(else_ref), tokens, source_id_value, node_allocator, depth);
+                        const else_ptr = self.deref_node(else_ref, source_id_value) orelse return node;
+                        const else_node = try self.expand_expr(else_ptr, tokens, source_id_value, node_allocator, depth);
                         ife.else_branch = ink.ast.ref_opt(else_node);
                     }
                 },
                 .match_expr => |*me| {
-                    const target = try self.expand_expr(ink.ast.deref(me.target), tokens, source_id_value, node_allocator, depth);
+                    const target_node = self.deref_node(me.target, source_id_value) orelse return node;
+                    const target = try self.expand_expr(target_node, tokens, source_id_value, node_allocator, depth);
                     me.target = ink.ast.ref(target);
                     const arms = @constCast(me.arms);
+                    if (arms.len > 0) {
+                        if (!try self.ensure_slice(@intFromPtr(arms.ptr), arms.len, source_id_value, @sizeOf(ink.ast.match_arm), "match_expr.arms", null)) return node;
+                    }
                     for (arms) |*arm| {
-                        const pattern = try self.expand_expr(ink.ast.deref(arm.pattern), tokens, source_id_value, node_allocator, depth);
-                        const body = try self.expand_expr(ink.ast.deref(arm.body), tokens, source_id_value, node_allocator, depth);
+                        const pattern_node = self.deref_node(arm.pattern, source_id_value) orelse return node;
+                        const body_node = self.deref_node(arm.body, source_id_value) orelse return node;
+                        const pattern = try self.expand_expr(pattern_node, tokens, source_id_value, node_allocator, depth);
+                        const body = try self.expand_expr(body_node, tokens, source_id_value, node_allocator, depth);
                         arm.pattern = ink.ast.ref(pattern);
                         arm.body = ink.ast.ref(body);
                     }
                 },
                 .select_expr => |*se| {
                     const arms = @constCast(se.arms);
+                    if (arms.len > 0) {
+                        if (!try self.ensure_slice(@intFromPtr(arms.ptr), arms.len, source_id_value, @sizeOf(ink.ast.select_arm), "select_expr.arms", null)) return node;
+                    }
                     for (arms) |*arm| {
-                        const task = try self.expand_expr(ink.ast.deref(arm.task), tokens, source_id_value, node_allocator, depth);
-                        const body = try self.expand_expr(ink.ast.deref(arm.body), tokens, source_id_value, node_allocator, depth);
+                        const task_node = self.deref_node(arm.task, source_id_value) orelse return node;
+                        const body_node = self.deref_node(arm.body, source_id_value) orelse return node;
+                        const task = try self.expand_expr(task_node, tokens, source_id_value, node_allocator, depth);
+                        const body = try self.expand_expr(body_node, tokens, source_id_value, node_allocator, depth);
                         arm.task = ink.ast.ref(task);
                         arm.body = ink.ast.ref(body);
                     }
                 },
                 .with_expr => |*we| {
-                    const body = try self.expand_expr(ink.ast.deref(we.body), tokens, source_id_value, node_allocator, depth);
+                    const body_node = self.deref_node(we.body, source_id_value) orelse return node;
+                    const body = try self.expand_expr(body_node, tokens, source_id_value, node_allocator, depth);
                     we.body = ink.ast.ref(body);
                 },
                 .label_expr => |*le| {
-                    const body = try self.expand_expr(ink.ast.deref(le.body), tokens, source_id_value, node_allocator, depth);
+                    const body_node = self.deref_node(le.body, source_id_value) orelse return node;
+                    const body = try self.expand_expr(body_node, tokens, source_id_value, node_allocator, depth);
                     le.body = ink.ast.ref(body);
                 },
                 .loop_expr => |*le| {
-                    const body = try self.expand_expr(ink.ast.deref(le.body), tokens, source_id_value, node_allocator, depth);
+                    const body_node = self.deref_node(le.body, source_id_value) orelse return node;
+                    const body = try self.expand_expr(body_node, tokens, source_id_value, node_allocator, depth);
                     le.body = ink.ast.ref(body);
                 },
                 .while_expr => |*we| {
-                    const cond = try self.expand_expr(ink.ast.deref(we.condition), tokens, source_id_value, node_allocator, depth);
-                    const body = try self.expand_expr(ink.ast.deref(we.body), tokens, source_id_value, node_allocator, depth);
+                    const cond_node = self.deref_node(we.condition, source_id_value) orelse return node;
+                    const body_node = self.deref_node(we.body, source_id_value) orelse return node;
+                    const cond = try self.expand_expr(cond_node, tokens, source_id_value, node_allocator, depth);
+                    const body = try self.expand_expr(body_node, tokens, source_id_value, node_allocator, depth);
                     we.condition = ink.ast.ref(cond);
                     we.body = ink.ast.ref(body);
                 },
                 .while_in_expr => |*we| {
-                    const iter = try self.expand_expr(ink.ast.deref(we.iter), tokens, source_id_value, node_allocator, depth);
-                    const body = try self.expand_expr(ink.ast.deref(we.body), tokens, source_id_value, node_allocator, depth);
-                    const pattern = try self.expand_expr(ink.ast.deref(we.pattern), tokens, source_id_value, node_allocator, depth);
+                    const iter_node = self.deref_node(we.iter, source_id_value) orelse return node;
+                    const body_node = self.deref_node(we.body, source_id_value) orelse return node;
+                    const pattern_node = self.deref_node(we.pattern, source_id_value) orelse return node;
+                    const iter = try self.expand_expr(iter_node, tokens, source_id_value, node_allocator, depth);
+                    const body = try self.expand_expr(body_node, tokens, source_id_value, node_allocator, depth);
+                    const pattern = try self.expand_expr(pattern_node, tokens, source_id_value, node_allocator, depth);
                     we.iter = ink.ast.ref(iter);
                     we.body = ink.ast.ref(body);
                     we.pattern = ink.ast.ref(pattern);
                 },
                 .until_expr => |*ue| {
-                    const cond = try self.expand_expr(ink.ast.deref(ue.condition), tokens, source_id_value, node_allocator, depth);
-                    const body = try self.expand_expr(ink.ast.deref(ue.body), tokens, source_id_value, node_allocator, depth);
+                    const cond_node = self.deref_node(ue.condition, source_id_value) orelse return node;
+                    const body_node = self.deref_node(ue.body, source_id_value) orelse return node;
+                    const cond = try self.expand_expr(cond_node, tokens, source_id_value, node_allocator, depth);
+                    const body = try self.expand_expr(body_node, tokens, source_id_value, node_allocator, depth);
                     ue.condition = ink.ast.ref(cond);
                     ue.body = ink.ast.ref(body);
                 },
                 .repeat_expr => |*re| {
-                    const count = try self.expand_expr(ink.ast.deref(re.count), tokens, source_id_value, node_allocator, depth);
-                    const body = try self.expand_expr(ink.ast.deref(re.body), tokens, source_id_value, node_allocator, depth);
+                    const count_node = self.deref_node(re.count, source_id_value) orelse return node;
+                    const body_node = self.deref_node(re.body, source_id_value) orelse return node;
+                    const count = try self.expand_expr(count_node, tokens, source_id_value, node_allocator, depth);
+                    const body = try self.expand_expr(body_node, tokens, source_id_value, node_allocator, depth);
                     re.count = ink.ast.ref(count);
                     re.body = ink.ast.ref(body);
                 },
                 .for_expr => |*fe| {
-                    const iter = try self.expand_expr(ink.ast.deref(fe.iter), tokens, source_id_value, node_allocator, depth);
-                    const body = try self.expand_expr(ink.ast.deref(fe.body), tokens, source_id_value, node_allocator, depth);
-                    const pattern = try self.expand_expr(ink.ast.deref(fe.pattern), tokens, source_id_value, node_allocator, depth);
+                    const iter_node = self.deref_node(fe.iter, source_id_value) orelse return node;
+                    const body_node = self.deref_node(fe.body, source_id_value) orelse return node;
+                    const pattern_node = self.deref_node(fe.pattern, source_id_value) orelse return node;
+                    const iter = try self.expand_expr(iter_node, tokens, source_id_value, node_allocator, depth);
+                    const body = try self.expand_expr(body_node, tokens, source_id_value, node_allocator, depth);
+                    const pattern = try self.expand_expr(pattern_node, tokens, source_id_value, node_allocator, depth);
                     fe.iter = ink.ast.ref(iter);
                     fe.body = ink.ast.ref(body);
                     fe.pattern = ink.ast.ref(pattern);
                 },
                 .each_expr => |*ee| {
-                    const iter = try self.expand_expr(ink.ast.deref(ee.iter), tokens, source_id_value, node_allocator, depth);
-                    const body = try self.expand_expr(ink.ast.deref(ee.body), tokens, source_id_value, node_allocator, depth);
-                    const pattern = try self.expand_expr(ink.ast.deref(ee.pattern), tokens, source_id_value, node_allocator, depth);
+                    const iter_node = self.deref_node(ee.iter, source_id_value) orelse return node;
+                    const body_node = self.deref_node(ee.body, source_id_value) orelse return node;
+                    const pattern_node = self.deref_node(ee.pattern, source_id_value) orelse return node;
+                    const iter = try self.expand_expr(iter_node, tokens, source_id_value, node_allocator, depth);
+                    const body = try self.expand_expr(body_node, tokens, source_id_value, node_allocator, depth);
+                    const pattern = try self.expand_expr(pattern_node, tokens, source_id_value, node_allocator, depth);
                     ee.iter = ink.ast.ref(iter);
                     ee.body = ink.ast.ref(body);
                     ee.pattern = ink.ast.ref(pattern);
                 },
                 .break_expr => |*be| {
                     if (be.value) |val_ref| {
-                        const value = try self.expand_expr(ink.ast.deref(val_ref), tokens, source_id_value, node_allocator, depth);
+                        const value_node = self.deref_node(val_ref, source_id_value) orelse return node;
+                        const value = try self.expand_expr(value_node, tokens, source_id_value, node_allocator, depth);
                         be.value = ink.ast.ref_opt(value);
                     }
                 },
                 .yield_expr => |*ye| {
                     if (ye.value) |val_ref| {
-                        const value = try self.expand_expr(ink.ast.deref(val_ref), tokens, source_id_value, node_allocator, depth);
+                        const value_node = self.deref_node(val_ref, source_id_value) orelse return node;
+                        const value = try self.expand_expr(value_node, tokens, source_id_value, node_allocator, depth);
                         ye.value = ink.ast.ref_opt(value);
                     }
                 },
                 .atomic_expr => |*ae| {
-                    const value = try self.expand_expr(ink.ast.deref(ae.value), tokens, source_id_value, node_allocator, depth);
+                    const value_node = self.deref_node(ae.value, source_id_value) orelse return node;
+                    const value = try self.expand_expr(value_node, tokens, source_id_value, node_allocator, depth);
                     ae.value = ink.ast.ref(value);
                 },
                 .block => |*block| {
                     const items = @constCast(block.items);
+                    if (items.len > 0) {
+                        if (!try self.ensure_slice(@intFromPtr(items.ptr), items.len, source_id_value, @sizeOf(ink.ast.node_ref), "block.items", null)) return node;
+                    }
                     var item_nodes = try self.allocator.alloc(*ink.node, items.len);
                     defer self.allocator.free(item_nodes);
                     for (items, 0..) |item_ref, i| {
-                        item_nodes[i] = ink.ast.deref(item_ref);
+                        item_nodes[i] = self.deref_node(item_ref, source_id_value) orelse return node;
                     }
                     const expanded_items = try self.expand_nodes(
                         item_nodes,
@@ -562,23 +976,32 @@ pub const compiler = struct {
                 },
                 .record => |*rec| {
                     const items = @constCast(rec.items);
+                    if (items.len > 0) {
+                        if (!try self.ensure_slice(@intFromPtr(items.ptr), items.len, source_id_value, @sizeOf(ink.ast.associate), "record.items", null)) return node;
+                    }
                     for (items) |*assoc| {
                         if (assoc.value) |val_ref| {
-                            const value = try self.expand_expr(ink.ast.deref(val_ref), tokens, source_id_value, node_allocator, depth);
+                            const value_node = self.deref_node(val_ref, source_id_value) orelse return node;
+                            const value = try self.expand_expr(value_node, tokens, source_id_value, node_allocator, depth);
                             assoc.value = ink.ast.ref_opt(value);
                         }
                     }
                 },
                 .intrinsic => |*call| {
                     const args = @constCast(call.args);
+                    if (args.len > 0) {
+                        if (!try self.ensure_slice(@intFromPtr(args.ptr), args.len, source_id_value, @sizeOf(ink.ast.node_ref), "intrinsic.args", null)) return node;
+                    }
                     for (args) |*arg_ref| {
-                        const value = try self.expand_expr(ink.ast.deref(arg_ref.*), tokens, source_id_value, node_allocator, depth);
+                        const arg_node = self.deref_node(arg_ref.*, source_id_value) orelse return node;
+                        const value = try self.expand_expr(arg_node, tokens, source_id_value, node_allocator, depth);
                         arg_ref.* = ink.ast.ref(value);
                     }
                 },
                 .associate => |*assoc| {
                     if (assoc.value) |val_ref| {
-                        const value = try self.expand_expr(ink.ast.deref(val_ref), tokens, source_id_value, node_allocator, depth);
+                        const value_node = self.deref_node(val_ref, source_id_value) orelse return node;
+                        const value = try self.expand_expr(value_node, tokens, source_id_value, node_allocator, depth);
                         assoc.value = ink.ast.ref_opt(value);
                     }
                 },
@@ -599,8 +1022,8 @@ pub const compiler = struct {
         ) macro_error!*ink.node {
             _ = node_allocator;
             self.macro_ctx.reset_errors();
-            const target_node = ink.ast.deref(mc.target);
-            const target = self.resolve_macro_target(target_node) orelse {
+            const target_node = self.deref_node(mc.target, source_id_value) orelse return node;
+            const target = self.resolve_macro_target(target_node, source_id_value) orelse {
                 try self.diags.append(.{
                     .danger = .@"error",
                     .message = "unknown macro",
@@ -683,14 +1106,48 @@ pub const compiler = struct {
             const out_stream = try self.run_macro(&module_entry.runtime, overload.?, arg_streams, call_span, mc.where, source_id_value);
             if (out_stream == null) return node;
 
+            if (self.checks) |checks| {
+                if (checks.macro_streams) {
+                    if (self.macro_ctx.validate_stream(self.allocator, out_stream.?)) |err| {
+                        const msg = switch (err) {
+                            .invalid_stream => "macro output stream invalid",
+                            .invalid_tree => "macro output tree invalid",
+                            .invalid_token => "macro output token invalid",
+                            .invalid_group => "macro output group invalid",
+                            .cycle => "macro output stream cycle detected",
+                        };
+                        try self.diags.append(.{
+                            .danger = .@"error",
+                            .message = msg,
+                            .span = span{ .start = mc.where.start, .end = mc.where.end },
+                            .source_id = source_id_value,
+                        });
+                        return node;
+                    }
+                }
+            }
+
             const parsed = try self.parse_macro_expr(out_stream.?, mc.where, source_id_value);
             if (parsed == null) return node;
             defer self.allocator.free(parsed.?.tokens);
+            if (self.checks) |checks| {
+                if (checks.macro_ast) {
+                    const ok = try validate_mod.validate_macro_ast(
+                        self.allocator,
+                        &[_]*ink.node{parsed.?.node},
+                        parsed.?.registry,
+                        self.diags,
+                        source_id_value,
+                        span{ .start = mc.where.start, .end = mc.where.end },
+                    );
+                    if (!ok) return node;
+                }
+            }
             const expanded = try self.expand_expr(parsed.?.node, parsed.?.tokens, source_id_value, parsed.?.node_allocator, depth + 1);
             return expanded;
         }
 
-        fn resolve_macro_target(self: *macro_expander, node: *ink.node) ?macro_target {
+        fn resolve_macro_target(self: *macro_expander, node: *ink.node, source_id_value: src.source_id) ?macro_target {
             switch (node.*) {
                 .identifier => |id| {
                     if (self.macro_modules.getPtr(self.module_id)) |mod| {
@@ -704,8 +1161,8 @@ pub const compiler = struct {
                 },
                 .binary => |bin| {
                     if (bin.op != .scope_access) return null;
-                    const left = ink.ast.deref(bin.left);
-                    const right = ink.ast.deref(bin.right);
+                    const left = self.deref_node(bin.left, source_id_value) orelse return null;
+                    const right = self.deref_node(bin.right, source_id_value) orelse return null;
                     if (left.* != .identifier or right.* != .identifier) return null;
                     const left_id = left.identifier;
                     const right_id = right.identifier;
@@ -832,6 +1289,8 @@ pub const compiler = struct {
                 runtime.foreigns,
                 null,
                 null,
+                true,
+                null,
             );
             defer machine.deinit();
 
@@ -888,12 +1347,14 @@ pub const compiler = struct {
             node: *ink.node,
             tokens: []const ink.token,
             node_allocator: mem_allocator,
+            registry: []const *ink.node,
         };
 
         const parsed_program = struct {
             nodes: []const *ink.node,
             tokens: []const ink.token,
             node_allocator: mem_allocator,
+            registry: []const *ink.node,
         };
 
         fn parse_macro_expr(
@@ -950,7 +1411,8 @@ pub const compiler = struct {
                 return null;
             }
 
-            var builder = ink.peg_ast.builder.init(parse.arena.allocator(), tokens, &parse.tree, "");
+            var registry = std.array_list.Managed(*ink.node).init(parse.arena.allocator());
+            var builder = ink.peg_ast.builder.init_with_registry(parse.arena.allocator(), tokens, &parse.tree, "", &registry);
             const expr = builder.build_expr_root(parse.root.?) catch |err| {
                 switch (err) {
                     else => {},
@@ -978,9 +1440,23 @@ pub const compiler = struct {
                 return null;
             };
 
+            const registry_nodes = try registry.toOwnedSlice();
+            if (self.node_set) |set| {
+                for (registry_nodes) |reg_node| {
+                    _ = set.put(@intFromPtr(reg_node), {}) catch {};
+                }
+            }
             parse.tree.deinit(parse.arena.allocator());
-            try self.macro_arenas.append(parse.arena);
-            return .{ .node = expr, .tokens = tokens, .node_allocator = parse.arena.allocator() };
+            const arena_ptr = try self.allocator.create(arena_allocator);
+            errdefer self.allocator.destroy(arena_ptr);
+            arena_ptr.* = parse.arena;
+            try self.macro_arenas.append(arena_ptr);
+            return .{
+                .node = expr,
+                .tokens = tokens,
+                .node_allocator = arena_ptr.allocator(),
+                .registry = registry_nodes,
+            };
         }
 
         fn parse_macro_program(
@@ -1033,7 +1509,8 @@ pub const compiler = struct {
                 return null;
             }
 
-            var builder = ink.peg_ast.builder.init(parse.arena.allocator(), tokens, &parse.tree, "");
+            var registry = std.array_list.Managed(*ink.node).init(parse.arena.allocator());
+            var builder = ink.peg_ast.builder.init_with_registry(parse.arena.allocator(), tokens, &parse.tree, "", &registry);
             const nodes = builder.build_program(parse.root.?) catch |err| {
                 switch (err) {
                     else => {},
@@ -1061,9 +1538,23 @@ pub const compiler = struct {
                 return null;
             };
 
+            const registry_nodes = try registry.toOwnedSlice();
+            if (self.node_set) |set| {
+                for (registry_nodes) |reg_node| {
+                    _ = set.put(@intFromPtr(reg_node), {}) catch {};
+                }
+            }
             parse.tree.deinit(parse.arena.allocator());
-            try self.macro_arenas.append(parse.arena);
-            return .{ .nodes = nodes, .tokens = tokens, .node_allocator = parse.arena.allocator() };
+            const arena_ptr = try self.allocator.create(arena_allocator);
+            errdefer self.allocator.destroy(arena_ptr);
+            arena_ptr.* = parse.arena;
+            try self.macro_arenas.append(arena_ptr);
+            return .{
+                .nodes = nodes,
+                .tokens = tokens,
+                .node_allocator = arena_ptr.allocator(),
+                .registry = registry_nodes,
+            };
         }
     };
 
@@ -1139,6 +1630,11 @@ pub const compiler = struct {
             diag_messages.deinit();
         }
 
+        const validation_checks: ?sandbox_mod.Checks = if (req.sandbox) |cfg|
+            sandbox_mod.resolve_checks(cfg)
+        else
+            null;
+
         // 1) source store
         var sources_by_id = hash_map(source_id, source_file).init(allocator);
         defer sources_by_id.deinit();
@@ -1200,7 +1696,7 @@ pub const compiler = struct {
         }
 
         if (has_error(diags.items)) {
-            return finish(&diags, &diag_messages, null, null, null, null, null, false);
+            return finish(&diags, &diag_messages, req.sources, null, null, null, null, null, false);
         }
 
         // 3) parse per file + 4) build per-module node list
@@ -1213,7 +1709,8 @@ pub const compiler = struct {
         var module_import_specs = try allocator.alloc(?[]const desugar.import_decl, modules.items.len);
         var module_foreigns = try allocator.alloc([]const []const u8, modules.items.len);
         var module_arenas = try allocator.alloc(arena_allocator, modules.items.len);
-        var module_exports = try allocator.alloc(string_map(void), modules.items.len);
+        var module_value_exports = try allocator.alloc(string_map(void), modules.items.len);
+        var module_type_exports = try allocator.alloc(string_map(void), modules.items.len);
         defer {
             var i: usize = 0;
             while (i < modules.items.len) : (i += 1) {
@@ -1227,7 +1724,8 @@ pub const compiler = struct {
                 if (module_import_specs[i]) |imports| allocator.free(imports);
                 free_foreign_list(allocator, module_foreigns[i]);
                 module_arenas[i].deinit();
-                module_exports[i].deinit();
+                module_value_exports[i].deinit();
+                module_type_exports[i].deinit();
             }
             allocator.free(module_files);
             allocator.free(module_nodes);
@@ -1238,11 +1736,13 @@ pub const compiler = struct {
             allocator.free(module_import_specs);
             allocator.free(module_foreigns);
             allocator.free(module_arenas);
-            allocator.free(module_exports);
+            allocator.free(module_value_exports);
+            allocator.free(module_type_exports);
         }
 
         for (module_import_specs) |*slot| slot.* = null;
-        for (module_exports) |*exports| exports.* = string_map(void).init(allocator);
+        for (module_value_exports) |*exports| exports.* = string_map(void).init(allocator);
+        for (module_type_exports) |*exports| exports.* = string_map(void).init(allocator);
 
         for (module_arenas) |*arena| {
             arena.* = arena_allocator.init(allocator);
@@ -1291,7 +1791,8 @@ pub const compiler = struct {
                     continue;
                 }
 
-                var builder = ink.peg_ast.builder.init(parse.arena.allocator(), tokens, &parse.tree, compsrc.text);
+                var registry = std.array_list.Managed(*ink.node).init(parse.arena.allocator());
+                var builder = ink.peg_ast.builder.init_with_registry(parse.arena.allocator(), tokens, &parse.tree, compsrc.text, &registry);
                 const file_nodes = builder.build_program(parse.root.?) catch |err| {
                     std.debug.print("ast error in {s}: {s}\n", .{ compsrc.path, @errorName(err) });
                     if (builder.last_error) |info| {
@@ -1319,12 +1820,32 @@ pub const compiler = struct {
                     parse.deinit();
                     continue;
                 };
+                if (validation_checks) |checks| {
+                    if (checks.ast) {
+                        const ok = try validate_mod.validate_ast_with_registry(
+                            allocator,
+                            file_nodes,
+                            registry.items,
+                            &diags,
+                            compsrc.id,
+                            null,
+                        );
+                        if (!ok) {
+                            allocator.free(tokens);
+                            parse.deinit();
+                            continue;
+                        }
+                    }
+                }
+
+                const registry_nodes = try registry.toOwnedSlice();
 
                 try files.append(.{
                     .source_id = sid,
                     .arena = parse.arena,
                     .tokens = tokens,
                     .nodes = file_nodes,
+                    .registry = registry_nodes,
                 });
 
                 for (file_nodes) |n| {
@@ -1344,7 +1865,7 @@ pub const compiler = struct {
         }
 
         if (has_error(diags.items)) {
-            return finish(&diags, &diag_messages, null, null, null, null, null, false);
+            return finish(&diags, &diag_messages, req.sources, null, null, null, null, null, false);
         }
 
         // 4) macro expansion + final desugar per module
@@ -1373,9 +1894,12 @@ pub const compiler = struct {
             allocator.free(module_macro_infos);
         }
 
-        var macro_arenas = array_list(arena_allocator).init(allocator);
+        var macro_arenas = array_list(*arena_allocator).init(allocator);
         defer {
-            for (macro_arenas.items) |*arena| arena.deinit();
+            for (macro_arenas.items) |arena| {
+                arena.deinit();
+                allocator.destroy(arena);
+            }
             macro_arenas.deinit();
         }
 
@@ -1397,7 +1921,7 @@ pub const compiler = struct {
         }
 
         if (has_error(diags.items)) {
-            return finish(&diags, &diag_messages, null, null, null, null, null, false);
+            return finish(&diags, &diag_messages, req.sources, null, null, null, null, null, false);
         }
 
         for (modules.items, 0..) |mod, mi| {
@@ -1417,6 +1941,7 @@ pub const compiler = struct {
                 req.prelude,
                 &diags,
                 &diag_messages,
+                validation_checks,
             );
             if (runtime_opt) |runtime| {
                 var runtime_mut = runtime;
@@ -1433,13 +1958,20 @@ pub const compiler = struct {
         }
 
         if (has_error(diags.items)) {
-            return finish(&diags, &diag_messages, null, null, null, null, null, false);
+            return finish(&diags, &diag_messages, req.sources, null, null, null, null, null, false);
         }
 
         ink.vm.foreign.set_macro_context(&macro_ctx);
         defer ink.vm.foreign.set_macro_context(null);
 
         for (modules.items, 0..) |mod, mi| {
+            var node_set = std.AutoHashMap(usize, void).init(allocator);
+            defer node_set.deinit();
+            for (module_files[mi]) |file| {
+                for (file.registry) |reg_node| {
+                    _ = try node_set.put(@intFromPtr(reg_node), {});
+                }
+            }
             var expander = macro_expander{
                 .allocator = allocator,
                 .macro_ctx = &macro_ctx,
@@ -1449,6 +1981,9 @@ pub const compiler = struct {
                 .diags = &diags,
                 .diag_messages = &diag_messages,
                 .macro_arenas = &macro_arenas,
+                .checks = validation_checks,
+                .node_set = &node_set,
+                .files = module_files[mi],
             };
 
             var expanded_nodes = array_list(*ink.node).init(allocator);
@@ -1478,14 +2013,28 @@ pub const compiler = struct {
             allocator.free(module_raw_sources[mi]);
             module_raw_nodes[mi] = new_nodes;
             module_raw_sources[mi] = new_sources;
+
+            if (req.sandbox) |cfg| {
+                try sandbox_mod.validate_foreigns(module_raw_nodes[mi], module_raw_sources[mi], &diags, cfg);
+            }
+            if (validation_checks) |checks| {
+                if (checks.ast) {
+                    _ = try validate_mod.validate_ast(
+                        allocator,
+                        module_raw_nodes[mi],
+                        &diags,
+                        null,
+                        null,
+                    );
+                }
+            }
         }
 
         if (has_error(diags.items)) {
-            return finish(&diags, &diag_messages, null, null, null, null, null, false);
+            return finish(&diags, &diag_messages, req.sources, null, null, null, null, null, false);
         }
 
         for (modules.items, 0..) |mod, mi| {
-            _ = mod;
             var desugared = desugar.desugar(
                 module_arenas[mi].allocator(),
                 allocator,
@@ -1511,12 +2060,23 @@ pub const compiler = struct {
 
             module_nodes[mi] = desugared.nodes;
             module_node_sources[mi] = filtered_sources;
+            try collect_exports(&module_value_exports[mi], &module_type_exports[mi], module_nodes[mi]);
+            if (!std.mem.eql(u8, mod.name, req.root_module)) {
+                try qualify_module_nodes(
+                    allocator,
+                    module_arenas[mi].allocator(),
+                    module_nodes[mi],
+                    mod.name,
+                    &module_value_exports[mi],
+                    &module_type_exports[mi],
+                );
+            }
             module_imports[mi] = try build_module_imports(allocator, &module_names, desugared.imports, &diags);
-            module_foreigns[mi] = try collect_foreigns_from_nodes(allocator, desugared.nodes);
+            module_foreigns[mi] = try collect_foreigns_from_nodes(allocator, module_nodes[mi]);
         }
 
         if (has_error(diags.items)) {
-            return finish(&diags, &diag_messages, null, null, null, null, null, false);
+            return finish(&diags, &diag_messages, req.sources, null, null, null, null, null, false);
         }
 
         // 5) resolver
@@ -1531,22 +2091,23 @@ pub const compiler = struct {
         }
 
         if (has_error(diags.items)) {
-            return finish(&diags, &diag_messages, null, null, null, null, null, false);
+            return finish(&diags, &diag_messages, req.sources, null, null, null, null, null, false);
         }
 
-        // 6) UIR build (root module only)
+        // 6) UIR build (all modules)
         const root_id = module_names.get(req.root_module) orelse {
             try diags.append(.{ .danger = .@"error", .message = "unknown root module", .span = null });
-            return finish(&diags, &diag_messages, null, null, null, null, null, false);
+            return finish(&diags, &diag_messages, req.sources, null, null, null, null, null, false);
         };
-        const root_nodes = module_nodes[@intCast(root_id)];
-        const root_sources = module_node_sources[@intCast(root_id)];
+        const combined = try combine_module_nodes(allocator, module_nodes, module_node_sources);
+        defer allocator.free(combined.nodes);
+        defer allocator.free(combined.sources);
 
         var uir_arena = arena_allocator.init(allocator);
         defer uir_arena.deinit();
         var uir_builder = ink.uir_build.builder.init(uir_arena.allocator());
         defer uir_builder.deinit();
-        uir_builder.build_nodes_with_sources(root_nodes, root_sources) catch {
+        uir_builder.build_nodes_with_sources(combined.nodes, combined.sources) catch {
             var msg: []const u8 = "uir build error";
             if (uir_builder.last_error_node) |name| {
                 const owned = try std.fmt.allocPrint(allocator, "uir build error: unsupported node {s}", .{name});
@@ -1559,12 +2120,20 @@ pub const compiler = struct {
                 .span = uir_builder.last_error_span,
                 .source_id = uir_builder.current_source_id,
             });
-            return finish(&diags, &diag_messages, null, null, null, null, null, false);
+            return finish(&diags, &diag_messages, req.sources, null, null, null, null, null, false);
         };
         const uir_result = uir_builder.finish() catch {
             try diags.append(.{ .danger = .@"error", .message = "uir build error", .span = null });
-            return finish(&diags, &diag_messages, null, null, null, null, null, false);
+            return finish(&diags, &diag_messages, req.sources, null, null, null, null, null, false);
         };
+        if (validation_checks) |checks| {
+            if (checks.uir) {
+                const ok = try validate_mod.validate_uir(uir_result, &diags);
+                if (!ok) {
+                    return finish(&diags, &diag_messages, req.sources, null, null, null, null, null, false);
+                }
+            }
+        }
 
         // 7) typecheck (root module only)
         var type_result = typecheck.check(
@@ -1577,12 +2146,12 @@ pub const compiler = struct {
             &diags,
         ) catch {
             try diags.append(.{ .danger = .@"error", .message = "typecheck error", .span = null });
-            return finish(&diags, &diag_messages, null, null, null, null, null, false);
+            return finish(&diags, &diag_messages, req.sources, null, null, null, null, null, false);
         };
         defer type_result.deinit(allocator);
 
         if (has_error(diags.items)) {
-            return finish(&diags, &diag_messages, null, null, null, null, null, false);
+            return finish(&diags, &diag_messages, req.sources, null, null, null, null, null, false);
         }
 
         // 8) backend emit
@@ -1606,12 +2175,17 @@ pub const compiler = struct {
         for (module_imports[@intCast(root_id)]) |imp| {
             const foreigns = module_foreigns[@intCast(imp.id)];
             for (foreigns) |fname| {
-                const qualified = try qualify_name(allocator, imp.alias, fname);
+                var qualified = fname;
+                var allocated = false;
+                if (std.mem.indexOf(u8, fname, "::") == null) {
+                    qualified = try qualify_name(allocator, imp.alias, fname);
+                    allocated = true;
+                }
                 if (!foreign_set.contains(qualified)) {
                     try foreign_set.put(qualified, {});
                     try foreign_names.append(qualified);
-                    try foreign_allocated.append(qualified);
-                } else {
+                    if (allocated) try foreign_allocated.append(qualified);
+                } else if (allocated) {
                     allocator.free(qualified);
                 }
             }
@@ -1634,20 +2208,37 @@ pub const compiler = struct {
                 .message = "unsupported target backend",
                 .span = null,
             });
-            return finish(&diags, &diag_messages, null, null, null, null, foreigns, false);
+            return finish(&diags, &diag_messages, req.sources, null, null, null, null, foreigns, false);
         }
 
         var mir_arena = arena_allocator.init(allocator);
         defer mir_arena.deinit();
         const mir_result = mir_lower.lower(mir_arena.allocator(), uir_result) catch {
             try diags.append(.{ .danger = .@"error", .message = "mir lowering error", .span = null });
-            return finish(&diags, &diag_messages, null, null, null, null, foreigns, false);
+            return finish(&diags, &diag_messages, req.sources, null, null, null, null, foreigns, false);
         };
+        if (validation_checks) |checks| {
+            if (checks.mir) {
+                const ok = try validate_mod.validate_mir(mir_result, &diags);
+                if (!ok) {
+                    return finish(&diags, &diag_messages, req.sources, null, null, null, null, foreigns, false);
+                }
+            }
+        }
 
         var lower_info = lir_lower.error_info{};
         defer lower_info.deinit(allocator);
 
-        const lir_result = lir_lower.lower(
+        const collect_signatures = req.debug_info and req.target.kind == .vm;
+        var signatures = array_list(ink.lir_vm_lower.function_signature).init(allocator);
+        defer deinit_signatures(allocator, &signatures);
+
+        const lower_opts: ?ink.lir_vm_lower.lower_options = if (collect_signatures)
+            .{ .signatures = &signatures }
+        else
+            null;
+
+        const lir_result = lir_lower.lower_with_options(
             allocator,
             req.target,
             mir_result.nodes,
@@ -1656,6 +2247,7 @@ pub const compiler = struct {
             foreigns,
             type_result.types,
             &lower_info,
+            lower_opts,
         ) catch |err| {
             if (err == error.unsupported_target) {
                 try diags.append(.{
@@ -1663,7 +2255,7 @@ pub const compiler = struct {
                     .message = "unsupported target backend",
                     .span = null,
                 });
-                return finish(&diags, &diag_messages, null, null, null, null, foreigns, false);
+                return finish(&diags, &diag_messages, req.sources, null, null, null, null, foreigns, false);
             }
             const default_msg: []const u8 = switch (err) {
                 error.out_of_memory => "lir error: out_of_memory",
@@ -1705,8 +2297,18 @@ pub const compiler = struct {
                 .span = diag_span,
                 .source_id = diag_source_id,
             });
-            return finish(&diags, &diag_messages, null, null, null, null, foreigns, false);
+            return finish(&diags, &diag_messages, req.sources, null, null, null, null, foreigns, false);
         };
+        if (validation_checks) |checks| {
+            if (checks.lir) {
+                const ok = switch (lir_result) {
+                    .vm => |bundle| try validate_mod.validate_vm_program(allocator, bundle.program, foreigns.len, &diags),
+                };
+                if (!ok) {
+                    return finish(&diags, &diag_messages, req.sources, null, null, null, null, foreigns, false);
+                }
+            }
+        }
 
         const backend_req = backend.backend_request{
             .allocator = allocator,
@@ -1724,7 +2326,7 @@ pub const compiler = struct {
                     .message = "unsupported target backend",
                     .span = null,
                 });
-                return finish(&diags, &diag_messages, null, null, null, null, foreigns, false);
+                return finish(&diags, &diag_messages, req.sources, null, null, null, null, foreigns, false);
             }
             const default_msg: []const u8 = switch (err) {
                 error.OutOfMemory => "backend error: out_of_memory",
@@ -1740,13 +2342,34 @@ pub const compiler = struct {
                 .message = default_msg,
                 .span = null,
             });
-            return finish(&diags, &diag_messages, null, null, null, null, foreigns, false);
+            return finish(&diags, &diag_messages, req.sources, null, null, null, null, foreigns, false);
         };
 
         const result_foreigns = backend_result.foreigns orelse foreigns;
-        return finish(
+        var debug_info: ?ink.vm.inkb.debug_info = null;
+        if (collect_signatures) {
+            const instructions = switch (lir_result) {
+                .vm => |bundle| bundle.program.instructions,
+            };
+            debug_info = build_debug_info(allocator, instructions, signatures.items) catch |err| {
+                const msg = switch (err) {
+                    error.OutOfMemory => "debug info error: out_of_memory",
+                    error.label_not_found => "debug info error: label_not_found",
+                    else => "debug info error",
+                };
+                try diags.append(.{
+                    .danger = .@"error",
+                    .message = msg,
+                    .span = null,
+                });
+                return finish(&diags, &diag_messages, req.sources, null, null, null, null, result_foreigns, false);
+            };
+        }
+
+        var result = try finish(
             &diags,
             &diag_messages,
+            req.sources,
             backend_result.instructions,
             backend_result.constants,
             backend_result.data,
@@ -1754,6 +2377,8 @@ pub const compiler = struct {
             result_foreigns,
             true,
         );
+        result.debug = debug_info;
+        return result;
     }
 
     fn lex_all(
@@ -1772,6 +2397,19 @@ pub const compiler = struct {
                 break;
             };
             if (maybe_tok) |tok| {
+                if (tok.which == .illegal) {
+                    const msg = if (is_all_spaces(tok.what.string))
+                        "leading spaces are not allowed; use tabs for indentation"
+                    else
+                        "illegal token";
+                    try diags.append(.{
+                        .danger = .@"error",
+                        .message = msg,
+                        .span = span{ .start = tok.where.start, .end = tok.where.end },
+                        .source_id = src_id,
+                        .code = "E1000",
+                    });
+                }
                 try tokens.append(tok);
                 if (tok.which == .end_of_file) break;
             } else break;
@@ -1780,17 +2418,35 @@ pub const compiler = struct {
         return tokens.toOwnedSlice();
     }
 
-    fn collect_exports(exports: *string_map(void), nodes: []const *ink.node) !void {
+    fn is_all_spaces(text: []const u8) bool {
+        if (text.len == 0) return false;
+        for (text) |ch| {
+            if (ch != ' ') return false;
+        }
+        return true;
+    }
+
+    fn collect_exports(
+        value_exports: *string_map(void),
+        type_exports: *string_map(void),
+        nodes: []const *ink.node,
+    ) !void {
         for (nodes) |node| {
             if (node.* != .decl) continue;
             switch (node.decl) {
-                .function => |f| try add_export(exports, f.name.string),
-                .@"const" => |c| try add_export(exports, c.name.string),
-                .@"var" => |v| try add_export(exports, v.name.string),
-                .type_alias => |t| try add_export(exports, t.name.string),
-                .@"struct" => |s| try add_export(exports, s.name.string),
-                .trait => |t| try add_export(exports, t.name.string),
-                .@"enum" => |e| try add_export(exports, e.name.string),
+                .function => |f| try add_export(value_exports, f.name.string),
+                .@"const" => |c| try add_export(value_exports, c.name.string),
+                .@"var" => |v| try add_export(value_exports, v.name.string),
+                .type_alias => |t| try add_export(type_exports, t.name.string),
+                .@"struct" => |s| {
+                    try add_export(value_exports, s.name.string);
+                    try add_export(type_exports, s.name.string);
+                },
+                .trait => |t| try add_export(type_exports, t.name.string),
+                .@"enum" => |e| {
+                    try add_export(type_exports, e.name.string);
+                    try add_export(value_exports, e.name.string);
+                },
                 .import => |_| {},
                 .impl => |_| {},
             }
@@ -1801,6 +2457,551 @@ pub const compiler = struct {
         if (!exports.contains(name)) {
             try exports.put(name, {});
         }
+    }
+
+    const module_qualifier = struct {
+        const qualify_error = error{OutOfMemory};
+
+        const scope = struct {
+            values: string_map(void),
+            types: string_map(void),
+
+            fn init(allocator: mem_allocator) scope {
+                return .{
+                    .values = string_map(void).init(allocator),
+                    .types = string_map(void).init(allocator),
+                };
+            }
+
+            fn deinit(self: *scope) void {
+                self.values.deinit();
+                self.types.deinit();
+            }
+        };
+
+        allocator: mem_allocator,
+        node_allocator: mem_allocator,
+        module_name: []const u8,
+        value_exports: *const string_map(void),
+        type_exports: *const string_map(void),
+        prefixed: string_map([]const u8),
+        scopes: std.ArrayListUnmanaged(scope) = .{},
+
+        fn init(
+            allocator: mem_allocator,
+            node_allocator: mem_allocator,
+            module_name: []const u8,
+            value_exports: *const string_map(void),
+            type_exports: *const string_map(void),
+        ) module_qualifier {
+            return .{
+                .allocator = allocator,
+                .node_allocator = node_allocator,
+                .module_name = module_name,
+                .value_exports = value_exports,
+                .type_exports = type_exports,
+                .prefixed = string_map([]const u8).init(allocator),
+                .scopes = .{},
+            };
+        }
+
+        fn deinit(self: *module_qualifier) void {
+            var i: usize = self.scopes.items.len;
+            while (i > 0) : (i -= 1) {
+                self.scopes.items[i - 1].deinit();
+            }
+            self.scopes.deinit(self.allocator);
+            self.prefixed.deinit();
+        }
+
+        fn push_scope(self: *module_qualifier) qualify_error!void {
+            try self.scopes.append(self.allocator, scope.init(self.allocator));
+        }
+
+        fn pop_scope(self: *module_qualifier) void {
+            if (self.scopes.pop()) |s| {
+                var scope_val = s;
+                scope_val.deinit();
+            }
+        }
+
+        fn add_local_value(self: *module_qualifier, name: []const u8) qualify_error!void {
+            if (self.scopes.items.len == 0) try self.push_scope();
+            const idx = self.scopes.items.len - 1;
+            try self.scopes.items[idx].values.put(name, {});
+        }
+
+        fn add_local_type(self: *module_qualifier, name: []const u8) qualify_error!void {
+            if (self.scopes.items.len == 0) try self.push_scope();
+            const idx = self.scopes.items.len - 1;
+            try self.scopes.items[idx].types.put(name, {});
+        }
+
+        fn is_local_value(self: *module_qualifier, name: []const u8) bool {
+            var i: usize = self.scopes.items.len;
+            while (i > 0) : (i -= 1) {
+                if (self.scopes.items[i - 1].values.contains(name)) return true;
+            }
+            return false;
+        }
+
+        fn is_local_type(self: *module_qualifier, name: []const u8) bool {
+            var i: usize = self.scopes.items.len;
+            while (i > 0) : (i -= 1) {
+                if (self.scopes.items[i - 1].types.contains(name)) return true;
+            }
+            return false;
+        }
+
+        fn has_module_prefix(self: *module_qualifier, name: []const u8) bool {
+            if (!std.mem.startsWith(u8, name, self.module_name)) return false;
+            if (name.len < self.module_name.len + 2) return false;
+            return name[self.module_name.len] == ':' and name[self.module_name.len + 1] == ':';
+        }
+
+        fn base_name(name: []const u8) []const u8 {
+            if (std.mem.indexOf(u8, name, "::")) |idx| {
+                return name[0..idx];
+            }
+            return name;
+        }
+
+        fn is_builtin_value_name(name: []const u8) bool {
+            if (std.mem.eql(u8, name, "_") or std.mem.eql(u8, name, "*")) return true;
+            if (std.mem.eql(u8, name, "unit")) return true;
+            if (std.mem.eql(u8, name, "true")) return true;
+            if (std.mem.eql(u8, name, "false")) return true;
+            if (std.mem.eql(u8, name, "none")) return true;
+            if (std.mem.eql(u8, name, "cancel")) return true;
+            if (std.mem.eql(u8, name, "error")) return true;
+            if (std.mem.eql(u8, name, "token_tree_kind")) return true;
+            if (std.mem.eql(u8, name, "token_kind")) return true;
+            if (std.mem.eql(u8, name, "delimiter")) return true;
+            if (std.mem.startsWith(u8, name, "error::")) return true;
+            return false;
+        }
+
+        fn is_builtin_type_name(name: []const u8) bool {
+            return std.mem.eql(u8, name, "int") or std.mem.eql(u8, name, "uint") or
+                std.mem.eql(u8, name, "u8") or std.mem.eql(u8, name, "float") or std.mem.eql(u8, name, "bool") or
+                std.mem.eql(u8, name, "string") or std.mem.eql(u8, name, "token_stream") or
+                std.mem.eql(u8, name, "token_tree") or std.mem.eql(u8, name, "token") or
+                std.mem.eql(u8, name, "token_group") or std.mem.eql(u8, name, "token_kind") or
+                std.mem.eql(u8, name, "token_tree_kind") or std.mem.eql(u8, name, "delimiter") or
+                std.mem.eql(u8, name, "span") or std.mem.eql(u8, name, "symbol") or
+                std.mem.eql(u8, name, "type") or std.mem.eql(u8, name, "none") or
+                std.mem.eql(u8, name, "result") or std.mem.eql(u8, name, "error") or
+                std.mem.eql(u8, name, "task") or std.mem.eql(u8, name, "buf") or
+                std.mem.eql(u8, name, "arena") or std.mem.eql(u8, name, "union") or
+                std.mem.eql(u8, name, "intersect") or std.mem.eql(u8, name, "tuple") or
+                std.mem.eql(u8, name, "fn") or std.mem.eql(u8, name, "slice") or
+                std.mem.eql(u8, name, "array") or std.mem.eql(u8, name, "list") or
+                std.mem.eql(u8, name, "box") or std.mem.eql(u8, name, "atomic") or
+                std.mem.eql(u8, name, "duration") or std.mem.eql(u8, name, "instant") or
+                std.mem.eql(u8, name, "deadline") or std.mem.eql(u8, name, "fd") or
+                std.mem.eql(u8, name, "not") or std.mem.eql(u8, name, "send") or
+                std.mem.eql(u8, name, "sync") or std.mem.eql(u8, name, "sized");
+        }
+
+        fn prefixed_name(self: *module_qualifier, name: []const u8) qualify_error![]const u8 {
+            if (self.prefixed.get(name)) |cached| return cached;
+            const sep = "::";
+            var buf = try self.node_allocator.alloc(u8, self.module_name.len + sep.len + name.len);
+            std.mem.copyForwards(u8, buf[0..self.module_name.len], self.module_name);
+            std.mem.copyForwards(u8, buf[self.module_name.len .. self.module_name.len + sep.len], sep);
+            std.mem.copyForwards(u8, buf[self.module_name.len + sep.len ..], name);
+            try self.prefixed.put(name, buf);
+            return buf;
+        }
+
+        fn qualify_value_ident(self: *module_qualifier, id: *ink.identifier) qualify_error!void {
+            const name = id.string;
+            if (self.has_module_prefix(name)) return;
+            const base = base_name(name);
+            if (is_builtin_value_name(base)) return;
+            if (self.is_local_value(base)) return;
+            if (!self.value_exports.contains(base)) return;
+            id.string = try self.prefixed_name(name);
+        }
+
+        fn qualify_type_ident(self: *module_qualifier, id: *ink.identifier) qualify_error!void {
+            const name = id.string;
+            if (self.has_module_prefix(name)) return;
+            const base = base_name(name);
+            if (is_builtin_type_name(base)) return;
+            if (self.is_local_type(base)) return;
+            if (!self.type_exports.contains(base)) return;
+            id.string = try self.prefixed_name(name);
+        }
+
+        fn qualify_type_expr(self: *module_qualifier, ty: *ink.ast.type_expr) qualify_error!void {
+            switch (ty.*) {
+                .self => {},
+                .name => |*id| try self.qualify_type_ident(id),
+                .optional => |ref| try self.qualify_type_node(ink.ast.deref(ref)),
+                .dyn => |ref| try self.qualify_type_node(ink.ast.deref(ref)),
+                .applied => |*ap| {
+                    try self.qualify_type_ident(&ap.base);
+                    for (ap.args) |arg_ref| {
+                        try self.qualify_type_arg(ink.ast.deref(arg_ref));
+                    }
+                },
+            }
+        }
+
+        fn qualify_type_arg(self: *module_qualifier, node: *ink.node) qualify_error!void {
+            switch (node.*) {
+                .identifier => |*id| try self.qualify_type_ident(id),
+                .type => |*ty| try self.qualify_type_expr(ty),
+                else => try self.qualify_node(node, false),
+            }
+        }
+
+        fn qualify_type_node(self: *module_qualifier, node: *ink.node) qualify_error!void {
+            switch (node.*) {
+                .type => |*ty| try self.qualify_type_expr(ty),
+                else => try self.qualify_node(node, false),
+            }
+        }
+
+        fn qualify_generic_params(self: *module_qualifier, params: []const ink.ast.generic_param) qualify_error!void {
+            for (params) |param| {
+                switch (param.kind) {
+                    .type => try self.add_local_type(param.name.string),
+                    .value => try self.add_local_value(param.name.string),
+                }
+            }
+            for (params) |param| {
+                if (param.constraint) |ref| {
+                    const node = ink.ast.deref(ref);
+                    if (param.kind == .type) {
+                        try self.qualify_type_node(node);
+                    } else {
+                        try self.qualify_node(node, false);
+                    }
+                }
+                if (param.default) |ref| {
+                    const node = ink.ast.deref(ref);
+                    if (param.kind == .type) {
+                        try self.qualify_type_node(node);
+                    } else {
+                        try self.qualify_node(node, false);
+                    }
+                }
+            }
+        }
+
+        fn qualify_where_clause(self: *module_qualifier, reqs: []const ink.ast.where_req) qualify_error!void {
+            for (reqs) |req| {
+                try self.qualify_type_node(ink.ast.deref(req.constraint));
+            }
+        }
+
+        fn qualify_pattern(self: *module_qualifier, node: *ink.node) qualify_error!void {
+            switch (node.*) {
+                .identifier => |*id| {
+                    if (std.mem.eql(u8, id.string, "*") or std.mem.eql(u8, id.string, "_")) return;
+                    if (std.mem.indexOf(u8, id.string, "::") != null) {
+                        try self.qualify_value_ident(id);
+                        return;
+                    }
+                    try self.add_local_value(id.string);
+                },
+                .record => |rec| {
+                    for (rec.items) |assoc| {
+                        if (assoc.value) |ref| try self.qualify_pattern(ink.ast.deref(ref));
+                    }
+                },
+                .binary => |bin| switch (bin.op) {
+                    .call => {
+                        var current = node;
+                        var args = std.array_list.Managed(*ink.node).init(self.allocator);
+                        defer args.deinit();
+                        while (current.* == .binary and current.binary.op == .call) {
+                            const call = current.binary;
+                            args.append(ink.ast.deref(call.right)) catch return error.OutOfMemory;
+                            current = ink.ast.deref(call.left);
+                        }
+                        std.mem.reverse(*ink.node, args.items);
+                        try self.qualify_node(current, false);
+                        for (args.items) |arg| try self.qualify_pattern(arg);
+                    },
+                    .access, .scope_access => try self.qualify_node(ink.ast.deref(bin.left), false),
+                    else => {
+                        try self.qualify_pattern(ink.ast.deref(bin.left));
+                        try self.qualify_pattern(ink.ast.deref(bin.right));
+                    },
+                },
+                .unary => |un| try self.qualify_pattern(ink.ast.deref(un.right)),
+                else => try self.qualify_node(node, false),
+            }
+        }
+
+        fn qualify_function_decl(
+            self: *module_qualifier,
+            func: *ink.ast.function_decl,
+            top_level: bool,
+        ) qualify_error!void {
+            if (top_level) {
+                var name = func.name;
+                try self.qualify_value_ident(&name);
+                func.name = name;
+            }
+            try self.push_scope();
+            defer self.pop_scope();
+
+            try self.qualify_generic_params(func.generics);
+            for (func.params) |param| {
+                try self.add_local_value(param.name.string);
+            }
+            for (func.params) |param| {
+                try self.qualify_type_node(ink.ast.deref(param.ty));
+            }
+            if (func.return_type) |ref| {
+                try self.qualify_type_node(ink.ast.deref(ref));
+            }
+            try self.qualify_where_clause(func.where_clause);
+            if (func.body) |ref| {
+                try self.qualify_node(ink.ast.deref(ref), false);
+            }
+        }
+
+        fn qualify_decl(self: *module_qualifier, decl: *ink.ast.decl, top_level: bool) qualify_error!void {
+            switch (decl.*) {
+                .function => |*func| try self.qualify_function_decl(func, top_level),
+                .@"const" => |*c| {
+                    if (top_level) {
+                        var name = c.name;
+                        try self.qualify_value_ident(&name);
+                        c.name = name;
+                    } else {
+                        try self.add_local_value(c.name.string);
+                    }
+                    if (c.ty) |ref| try self.qualify_type_node(ink.ast.deref(ref));
+                    try self.qualify_node(ink.ast.deref(c.value), false);
+                },
+                .@"var" => |*v| {
+                    if (top_level) {
+                        var name = v.name;
+                        try self.qualify_value_ident(&name);
+                        v.name = name;
+                    } else {
+                        try self.add_local_value(v.name.string);
+                    }
+                    if (v.ty) |ref| try self.qualify_type_node(ink.ast.deref(ref));
+                    try self.qualify_node(ink.ast.deref(v.value), false);
+                },
+                .type_alias => |*t| {
+                    if (top_level) {
+                        var name = t.name;
+                        try self.qualify_type_ident(&name);
+                        t.name = name;
+                    } else {
+                        try self.add_local_type(t.name.string);
+                    }
+                    try self.push_scope();
+                    defer self.pop_scope();
+                    try self.qualify_generic_params(t.generics);
+                    try self.qualify_type_node(ink.ast.deref(t.value));
+                },
+                .@"struct" => |*s| {
+                    if (top_level) {
+                        var name = s.name;
+                        try self.qualify_type_ident(&name);
+                        s.name = name;
+                    } else {
+                        try self.add_local_type(s.name.string);
+                        try self.add_local_value(s.name.string);
+                    }
+                    try self.push_scope();
+                    defer self.pop_scope();
+                    try self.qualify_generic_params(s.generics);
+                    for (s.fields) |field| {
+                        try self.qualify_type_node(ink.ast.deref(field.ty));
+                    }
+                },
+                .@"enum" => |*e| {
+                    if (top_level) {
+                        var name = e.name;
+                        try self.qualify_type_ident(&name);
+                        e.name = name;
+                    } else {
+                        try self.add_local_type(e.name.string);
+                    }
+                    try self.push_scope();
+                    defer self.pop_scope();
+                    try self.qualify_generic_params(e.generics);
+                    for (e.variants) |variant| {
+                        if (variant.payload) |ref| {
+                            try self.qualify_type_node(ink.ast.deref(ref));
+                        }
+                    }
+                },
+                .trait => |*t| {
+                    if (top_level) {
+                        var name = t.name;
+                        try self.qualify_type_ident(&name);
+                        t.name = name;
+                    } else {
+                        try self.add_local_type(t.name.string);
+                    }
+                    try self.push_scope();
+                    defer self.pop_scope();
+                    try self.qualify_generic_params(t.generics);
+                    for (t.requires) |ref| {
+                        try self.qualify_type_node(ink.ast.deref(ref));
+                    }
+                    const items = @constCast(t.items);
+                    for (items) |*item| {
+                        switch (item.*) {
+                            .function => |*func| try self.qualify_function_decl(func, false),
+                            .assoc_type => |*assoc| {
+                                if (assoc.value) |ref| {
+                                    try self.qualify_type_node(ink.ast.deref(ref));
+                                }
+                            },
+                        }
+                    }
+                },
+                .@"impl" => |*im| {
+                    try self.qualify_type_ident(&im.by_trait);
+                    try self.qualify_type_ident(&im.for_struct);
+                    const functions = @constCast(im.functions);
+                    for (functions) |*func| {
+                        try self.qualify_function_decl(func, false);
+                    }
+                },
+                .import => |_| {},
+            }
+        }
+
+        fn qualify_node(self: *module_qualifier, node: *ink.node, top_level: bool) qualify_error!void {
+            switch (node.*) {
+                .integer, .float, .duration, .string => {},
+                .identifier => |*id| {
+                    if (id.owner == .ref) {
+                        try self.qualify_value_ident(id);
+                    }
+                },
+                .type => |*ty| try self.qualify_type_expr(ty),
+                .unary => |un| try self.qualify_node(ink.ast.deref(un.right), false),
+                .binary => |bin| {
+                    switch (bin.op) {
+                        .access, .scope_access => try self.qualify_node(ink.ast.deref(bin.left), false),
+                        else => {
+                            try self.qualify_node(ink.ast.deref(bin.left), false);
+                            try self.qualify_node(ink.ast.deref(bin.right), false);
+                        },
+                    }
+                },
+                .macro_call => |mc| try self.qualify_node(ink.ast.deref(mc.target), false),
+                .if_expr => |ife| {
+                    try self.qualify_node(ink.ast.deref(ife.condition), false);
+                    try self.qualify_node(ink.ast.deref(ife.then_branch), false);
+                    if (ife.else_branch) |ref| try self.qualify_node(ink.ast.deref(ref), false);
+                },
+                .match_expr => |me| {
+                    try self.qualify_node(ink.ast.deref(me.target), false);
+                    for (me.arms) |arm| {
+                        try self.push_scope();
+                        try self.qualify_pattern(ink.ast.deref(arm.pattern));
+                        try self.qualify_node(ink.ast.deref(arm.body), false);
+                        self.pop_scope();
+                    }
+                },
+                .select_expr => |se| {
+                    for (se.arms) |arm| {
+                        try self.push_scope();
+                        if (arm.name) |id| try self.add_local_value(id.string);
+                        try self.qualify_node(ink.ast.deref(arm.task), false);
+                        try self.qualify_node(ink.ast.deref(arm.body), false);
+                        self.pop_scope();
+                    }
+                },
+                .with_expr => |we| {
+                    try self.push_scope();
+                    try self.add_local_value(we.name.string);
+                    try self.qualify_node(ink.ast.deref(we.body), false);
+                    self.pop_scope();
+                },
+                .label_expr => |le| try self.qualify_node(ink.ast.deref(le.body), false),
+                .loop_expr => |le| try self.qualify_node(ink.ast.deref(le.body), false),
+                .while_expr => |we| {
+                    try self.qualify_node(ink.ast.deref(we.condition), false);
+                    try self.qualify_node(ink.ast.deref(we.body), false);
+                },
+                .while_in_expr => |we| {
+                    try self.qualify_node(ink.ast.deref(we.iter), false);
+                    try self.push_scope();
+                    try self.qualify_pattern(ink.ast.deref(we.pattern));
+                    try self.qualify_node(ink.ast.deref(we.body), false);
+                    self.pop_scope();
+                },
+                .until_expr => |ue| {
+                    try self.qualify_node(ink.ast.deref(ue.condition), false);
+                    try self.qualify_node(ink.ast.deref(ue.body), false);
+                },
+                .repeat_expr => |re| {
+                    try self.qualify_node(ink.ast.deref(re.count), false);
+                    try self.qualify_node(ink.ast.deref(re.body), false);
+                },
+                .for_expr => |fe| {
+                    try self.qualify_node(ink.ast.deref(fe.iter), false);
+                    try self.push_scope();
+                    try self.qualify_pattern(ink.ast.deref(fe.pattern));
+                    try self.qualify_node(ink.ast.deref(fe.body), false);
+                    self.pop_scope();
+                },
+                .each_expr => |ee| {
+                    try self.qualify_node(ink.ast.deref(ee.iter), false);
+                    try self.push_scope();
+                    try self.qualify_pattern(ink.ast.deref(ee.pattern));
+                    try self.qualify_node(ink.ast.deref(ee.body), false);
+                    self.pop_scope();
+                },
+                .break_expr => |be| if (be.value) |ref| try self.qualify_node(ink.ast.deref(ref), false),
+                .continue_expr => {},
+                .yield_expr => |ye| if (ye.value) |ref| try self.qualify_node(ink.ast.deref(ref), false),
+                .atomic_expr => |ae| try self.qualify_node(ink.ast.deref(ae.value), false),
+                .block => |blk| {
+                    try self.push_scope();
+                    defer self.pop_scope();
+                    for (blk.items) |ref| {
+                        const item = ink.ast.deref(ref);
+                        try self.qualify_node(item, false);
+                    }
+                },
+                .record => |rec| {
+                    for (rec.items) |assoc| {
+                        if (assoc.value) |ref| try self.qualify_node(ink.ast.deref(ref), false);
+                    }
+                },
+                .associate => |assoc| if (assoc.value) |ref| try self.qualify_node(ink.ast.deref(ref), false),
+                .intrinsic => |call| {
+                    for (call.args) |arg_ref| try self.qualify_node(ink.ast.deref(arg_ref), false);
+                },
+                .decl => |*decl| try self.qualify_decl(decl, top_level),
+            }
+        }
+
+        fn qualify_nodes(self: *module_qualifier, nodes: []const *ink.node) qualify_error!void {
+            for (nodes) |node| {
+                try self.qualify_node(node, true);
+            }
+        }
+    };
+
+    fn qualify_module_nodes(
+        allocator: mem_allocator,
+        node_allocator: mem_allocator,
+        nodes: []const *ink.node,
+        module_name: []const u8,
+        value_exports: *const string_map(void),
+        type_exports: *const string_map(void),
+    ) module_qualifier.qualify_error!void {
+        var qualifier = module_qualifier.init(allocator, node_allocator, module_name, value_exports, type_exports);
+        defer qualifier.deinit();
+        try qualifier.qualify_nodes(nodes);
     }
 
     fn has_attribute(attrs: []const ink.ast.attribute, name: []const u8) bool {
@@ -2004,6 +3205,7 @@ pub const compiler = struct {
     fn finish(
         diags: *array_list(diagnostic),
         diag_messages: *array_list([]const u8),
+        sources: []const source_file,
         instructions: ?[]const ink.exe.instruction,
         constants: ?[]const u64,
         data: ?[]const ink.vm.inkb.data_entry,
@@ -2011,6 +3213,7 @@ pub const compiler = struct {
         foreigns: ?[]const []const u8,
         ok: bool,
     ) !compile_result {
+        clamp_diagnostics(diags.items, sources);
         const diag_slice = try diags.toOwnedSlice();
         const msg_slice = try diag_messages.toOwnedSlice();
         return .{
@@ -2022,7 +3225,82 @@ pub const compiler = struct {
             .data = data,
             .bytecode = bytecode,
             .foreigns = foreigns,
+            .debug = null,
         };
+    }
+
+    fn deinit_signatures(
+        allocator: mem_allocator,
+        signatures: *array_list(ink.lir_vm_lower.function_signature),
+    ) void {
+        for (signatures.items) |sig| {
+            allocator.free(sig.name);
+            if (sig.impl_for) |impl_name| allocator.free(impl_name);
+        }
+        signatures.deinit();
+    }
+
+    fn build_debug_info(
+        allocator: mem_allocator,
+        instructions: []const ink.exe.instruction,
+        signatures: []const ink.lir_vm_lower.function_signature,
+    ) !ink.vm.inkb.debug_info {
+        var label_offsets = try ink.vm.encode.compute_label_offsets(allocator, instructions);
+        defer label_offsets.deinit();
+
+        var list = array_list(ink.vm.inkb.debug_function).init(allocator);
+        errdefer {
+            for (list.items) |func| allocator.free(func.name);
+            list.deinit();
+        }
+
+        for (signatures) |sig| {
+            const offset = label_offsets.get(sig.label) orelse continue;
+            const name = try format_debug_name(allocator, sig);
+            try list.append(.{ .entry_pc = @intCast(offset), .name = name });
+        }
+
+        const slice = try list.toOwnedSlice();
+        std.mem.sort(ink.vm.inkb.debug_function, slice, {}, debug_func_less);
+        return .{ .functions = slice };
+    }
+
+    fn format_debug_name(
+        allocator: mem_allocator,
+        sig: ink.lir_vm_lower.function_signature,
+    ) ![]const u8 {
+        if (sig.impl_for) |impl_name| {
+            return std.fmt.allocPrint(allocator, "{s}::{s}", .{ impl_name, sig.name });
+        }
+        return allocator.dupe(u8, sig.name);
+    }
+
+    fn debug_func_less(_: void, lhs: ink.vm.inkb.debug_function, rhs: ink.vm.inkb.debug_function) bool {
+        if (lhs.entry_pc == rhs.entry_pc) {
+            return std.mem.lessThan(u8, lhs.name, rhs.name);
+        }
+        return lhs.entry_pc < rhs.entry_pc;
+    }
+
+    fn clamp_diagnostics(diags: []diagnostic, sources: []const source_file) void {
+        for (diags) |*entry| {
+            const span_opt = entry.span orelse continue;
+            const src_id = entry.source_id orelse continue;
+            const len = source_length(sources, src_id) orelse continue;
+            var start = span_opt.start;
+            var end = span_opt.end;
+            if (start > len) start = len;
+            if (end > len) end = len;
+            if (start > end) start = end;
+            entry.span = span{ .start = start, .end = end };
+        }
+    }
+
+    fn source_length(sources: []const source_file, id: src.source_id) ?usize {
+        for (sources) |file| {
+            if (file.id == id) return file.text.len;
+        }
+        return null;
     }
 
     const macro_compile_nodes = struct {
@@ -2284,6 +3562,29 @@ pub const compiler = struct {
         return out.toOwnedSlice();
     }
 
+    fn combine_module_nodes(
+        allocator: mem_allocator,
+        module_nodes: []const []const *ink.node,
+        module_sources: []const []const src.source_id,
+    ) !struct { nodes: []const *ink.node, sources: []const src.source_id } {
+        var total: usize = 0;
+        for (module_nodes) |nodes| {
+            total += nodes.len;
+        }
+        var nodes_out = try allocator.alloc(*ink.node, total);
+        var sources_out = try allocator.alloc(src.source_id, total);
+        var offset: usize = 0;
+        for (module_nodes, 0..) |nodes, idx| {
+            const sources = module_sources[idx];
+            if (nodes.len > 0) {
+                std.mem.copyForwards(*ink.node, nodes_out[offset .. offset + nodes.len], nodes);
+                std.mem.copyForwards(src.source_id, sources_out[offset .. offset + nodes.len], sources);
+            }
+            offset += nodes.len;
+        }
+        return .{ .nodes = nodes_out, .sources = sources_out };
+    }
+
     fn build_module_imports(
         allocator: mem_allocator,
         module_names: *string_map(module_id),
@@ -2337,6 +3638,91 @@ pub const compiler = struct {
         allocator.free(result.sources);
     }
 
+    fn clone_ast_nodes(
+        node_allocator: mem_allocator,
+        temp_allocator: mem_allocator,
+        nodes: []const *ink.node,
+    ) ![]const *ink.node {
+        var map = std.AutoHashMap(usize, *ink.node).init(temp_allocator);
+        defer map.deinit();
+
+        const cloner = struct {
+            const clone_error = error{OutOfMemory};
+            node_allocator: mem_allocator,
+            map: *std.AutoHashMap(usize, *ink.node),
+
+            fn clone_node(self: *@This(), node: *const ink.node) clone_error!*ink.node {
+                const addr = @intFromPtr(node);
+                if (self.map.get(addr)) |existing| return existing;
+                const out = try self.node_allocator.create(ink.node);
+                try self.map.put(addr, out);
+                out.* = try self.clone_any(node.*);
+                return out;
+            }
+
+            fn clone_any(self: *@This(), value: anytype) clone_error!@TypeOf(value) {
+                const T = @TypeOf(value);
+                if (T == ink.ast.node_ref) {
+                    const cloned = try self.clone_node(ink.ast.deref(value));
+                    return ink.ast.ref(cloned);
+                }
+                switch (@typeInfo(T)) {
+                    .optional => |_| {
+                        if (value) |payload| {
+                            return try self.clone_any(payload);
+                        }
+                        return null;
+                    },
+                    .pointer => |ptr| {
+                        if (ptr.size == .slice) {
+                            if (ptr.child == u8) {
+                                return value;
+                            }
+                            const out = try self.node_allocator.alloc(ptr.child, value.len);
+                            for (value, 0..) |item, idx| {
+                                out[idx] = try self.clone_any(item);
+                            }
+                            return out;
+                        }
+                        return value;
+                    },
+                    .@"struct" => |info| {
+                        var out: T = undefined;
+                        inline for (info.fields) |field| {
+                            const field_value = @field(value, field.name);
+                            @field(out, field.name) = try self.clone_any(field_value);
+                        }
+                        return out;
+                    },
+                    .@"union" => |info| {
+                        if (info.tag_type == null) return value;
+                        switch (value) {
+                            inline else => |payload, tag| {
+                                return @unionInit(T, @tagName(tag), try self.clone_any(payload));
+                            },
+                        }
+                    },
+                    .array => |info| {
+                        var out: T = undefined;
+                        for (value, 0..) |item, idx| {
+                            out[idx] = try self.clone_any(item);
+                        }
+                        _ = info;
+                        return out;
+                    },
+                    else => return value,
+                }
+            }
+        };
+
+        var out_nodes = array_list(*ink.node).init(node_allocator);
+        var ctx = cloner{ .node_allocator = node_allocator, .map = &map };
+        for (nodes) |node| {
+            try out_nodes.append(try ctx.clone_node(node));
+        }
+        return out_nodes.toOwnedSlice();
+    }
+
     fn compile_macro_runtime(
         allocator: mem_allocator,
         nodes: []const *ink.node,
@@ -2347,6 +3733,7 @@ pub const compiler = struct {
         prelude: desugar.prelude_spec,
         diags: *array_list(diagnostic),
         diag_messages: *array_list([]const u8),
+        checks: ?sandbox_mod.Checks,
     ) !?macro_runtime {
         var foreign_names = array_list([]const u8).init(allocator);
         var foreign_allocated = array_list([]const u8).init(allocator);
@@ -2376,12 +3763,17 @@ pub const compiler = struct {
             if (dep_index >= module_foreigns.len) continue;
             const foreigns = module_foreigns[dep_index];
             for (foreigns) |fname| {
-                const qualified = try qualify_name(allocator, alias, fname);
+                var qualified = fname;
+                var allocated = false;
+                if (std.mem.indexOf(u8, fname, "::") == null) {
+                    qualified = try qualify_name(allocator, alias, fname);
+                    allocated = true;
+                }
                 if (!foreign_set.contains(qualified)) {
                     try foreign_set.put(qualified, {});
                     try foreign_names.append(qualified);
-                    try foreign_allocated.append(qualified);
-                } else {
+                    if (allocated) try foreign_allocated.append(qualified);
+                } else if (allocated) {
                     allocator.free(qualified);
                 }
             }
@@ -2390,10 +3782,11 @@ pub const compiler = struct {
         var node_arena = arena_allocator.init(allocator);
         defer node_arena.deinit();
 
+        const cloned_nodes = try clone_ast_nodes(node_arena.allocator(), allocator, nodes);
         var desugared = desugar.desugar(
             node_arena.allocator(),
             allocator,
-            nodes,
+            cloned_nodes,
             diags,
             prelude,
         ) catch {
@@ -2432,6 +3825,12 @@ pub const compiler = struct {
             try diags.append(.{ .danger = .@"error", .message = "uir build error", .span = null });
             return null;
         };
+        if (checks) |active| {
+            if (active.uir) {
+                const ok = try validate_mod.validate_uir(uir_result, diags);
+                if (!ok) return null;
+            }
+        }
 
         var type_result = typecheck.check(
             allocator,
@@ -2468,12 +3867,22 @@ pub const compiler = struct {
             allocator.free(foreigns);
             return null;
         };
+        if (checks) |active| {
+            if (active.mir) {
+                const ok = try validate_mod.validate_mir(mir_result, diags);
+                if (!ok) {
+                    for (foreigns) |name| allocator.free(name);
+                    allocator.free(foreigns);
+                    return null;
+                }
+            }
+        }
 
         var lower_info = lir_lower.error_info{};
         defer lower_info.deinit(allocator);
 
         var signatures = array_list(ink.lir_vm_lower.function_signature).init(allocator);
-        errdefer signatures.deinit();
+        errdefer deinit_signatures(allocator, &signatures);
 
         const program = ink.lir_vm_lower.lower_with_options(
             allocator,
@@ -2528,6 +3937,19 @@ pub const compiler = struct {
             allocator.free(foreigns);
             return null;
         };
+        if (checks) |active| {
+            if (active.lir) {
+                const ok = try validate_mod.validate_vm_program(allocator, program, foreigns.len, diags);
+                if (!ok) {
+                    allocator.free(program.instructions);
+                    allocator.free(program.constants);
+                    for (foreigns) |name| allocator.free(name);
+                    allocator.free(foreigns);
+                    deinit_signatures(allocator, &signatures);
+                    return null;
+                }
+            }
+        }
 
         var label_offsets = ink.vm.encode.compute_label_offsets(allocator, program.instructions) catch {
             try diags.append(.{ .danger = .@"error", .message = "macro compile error", .span = null });

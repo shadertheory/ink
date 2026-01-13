@@ -126,38 +126,38 @@ struct token_stream_cursor
 	stream: token_stream
 	index: int
 
-#[foreign] fn span_source(value: span) -> int
-#[foreign] fn span_start(value: span) -> int
-#[foreign] fn span_end(value: span) -> int
-#[foreign] fn span_join(left: span, right: span) -> span
-#[foreign] fn span_here() -> span
+#[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn span_source(value: span) -> int
+#[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn span_start(value: span) -> int
+#[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn span_end(value: span) -> int
+#[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn span_join(left: span, right: span) -> span
+#[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn span_here() -> span
 
-#[foreign] fn token_kind(value: token) -> token_kind
-#[foreign] fn token_symbol(value: token) -> ?symbol
-#[foreign] fn token_span(value: token) -> span
-#[foreign] fn token_new(kind: token_kind, span: span, symbol: ?symbol) -> token
+#[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn token_kind(value: token) -> token_kind
+#[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn token_symbol(value: token) -> ?symbol
+#[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn token_span(value: token) -> span
+#[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn token_new(kind: token_kind, span: span, symbol: ?symbol) -> token
 
-#[foreign] fn token_group_delimiter(value: token_group) -> delimiter
-#[foreign] fn token_group_stream(value: token_group) -> token_stream
-#[foreign] fn token_group_span(value: token_group) -> span
-#[foreign] fn token_group_new(delimiter: delimiter, span: span, stream: token_stream) -> token_group
+#[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn token_group_delimiter(value: token_group) -> delimiter
+#[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn token_group_stream(value: token_group) -> token_stream
+#[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn token_group_span(value: token_group) -> span
+#[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn token_group_new(delimiter: delimiter, span: span, stream: token_stream) -> token_group
 
-#[foreign] fn token_tree_kind(value: token_tree) -> token_tree_kind
-#[foreign] fn token_tree_token(value: token_tree) -> token
-#[foreign] fn token_tree_group(value: token_tree) -> token_group
-#[foreign] fn token_tree_span(value: token_tree) -> span
-#[foreign] fn token_tree_from_token(value: token) -> token_tree
-#[foreign] fn token_tree_from_group(value: token_group) -> token_tree
+#[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn token_tree_kind(value: token_tree) -> token_tree_kind
+#[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn token_tree_token(value: token_tree) -> token
+#[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn token_tree_group(value: token_tree) -> token_group
+#[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn token_tree_span(value: token_tree) -> span
+#[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn token_tree_from_token(value: token) -> token_tree
+#[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn token_tree_from_group(value: token_group) -> token_tree
 
-#[foreign] fn token_stream_len(value: token_stream) -> int
-#[foreign] fn token_stream_get(value: token_stream, index: int) -> token_tree
-#[foreign] fn token_stream_slice(value: token_stream, start: int, end: int) -> token_stream
-#[foreign] fn token_stream_concat(left: token_stream, right: token_stream) -> token_stream
-#[foreign] fn token_stream_push(value: token_stream, tree: token_tree) -> token_stream
-#[foreign] fn token_stream_empty() -> token_stream
+#[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn token_stream_len(value: token_stream) -> int
+#[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn token_stream_get(value: token_stream, index: int) -> token_tree
+#[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn token_stream_slice(value: token_stream, start: int, end: int) -> token_stream
+#[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn token_stream_concat(left: token_stream, right: token_stream) -> token_stream
+#[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn token_stream_push(value: token_stream, tree: token_tree) -> token_stream
+#[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn token_stream_empty() -> token_stream
 
-#[foreign] fn error(span: span, message: string)
-#[foreign] fn quote(value: string) -> token_stream
+#[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn error(span: span, message: string)
+#[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn quote(value: string) -> token_stream
 
 fn token_tree_value(value: token_tree) -> token_tree_value
 	if token_tree_kind(value) == token_tree_kind::token

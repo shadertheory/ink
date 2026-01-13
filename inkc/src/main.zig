@@ -602,6 +602,45 @@ fn severity_label(danger: ink.severity) []const u8 {
     };
 }
 
+fn visualColumn(line: []const u8, offset: usize, tab_width: usize) usize {
+    var col: usize = 1;
+    var i: usize = 0;
+    while (i < offset and i < line.len) : (i += 1) {
+        if (line[i] == '\t') {
+            const pad = tab_width - ((col - 1) % tab_width);
+            col += pad;
+        } else {
+            col += 1;
+        }
+    }
+    return col;
+}
+
+fn expandTabs(allocator: mem_allocator, line: []const u8, tab_width: usize) ?[]u8 {
+    var out = std.array_list.Managed(u8).init(allocator);
+    var col: usize = 1;
+    for (line) |ch| {
+        if (ch == '\t') {
+            const pad = tab_width - ((col - 1) % tab_width);
+            out.appendNTimes(' ', pad) catch {
+                out.deinit();
+                return null;
+            };
+            col += pad;
+        } else {
+            out.append(ch) catch {
+                out.deinit();
+                return null;
+            };
+            col += 1;
+        }
+    }
+    return out.toOwnedSlice() catch {
+        out.deinit();
+        return null;
+    };
+}
+
 fn find_source_by_id(sources: []const ink.compiler.source, id: ink.compiler.source_id) ?*const ink.compiler.source {
     for (sources) |*src| {
         if (src.id == id) return src;
@@ -626,23 +665,24 @@ fn find_source_for_diag(
 
 fn build_marker(
     allocator: mem_allocator,
-    start: line_info,
-    end: line_info,
+    start_col: usize,
+    end_col: usize,
+    line_len: usize,
+    same_line: bool,
 ) ?[]u8 {
-    const start_col = if (start.column == 0) 1 else start.column;
+    const start_col_safe = if (start_col == 0) 1 else start_col;
     var mark_len: usize = 1;
-    if (start.line == end.line) {
-        if (end.column > start_col) {
-            mark_len = end.column - start_col;
+    if (same_line) {
+        if (end_col > start_col_safe) {
+            mark_len = end_col - start_col_safe;
         }
     } else {
-        const line_len = if (start.line_end > start.line_start) start.line_end - start.line_start else 0;
-        if (line_len > start_col - 1) {
-            mark_len = line_len - (start_col - 1);
+        if (line_len > start_col_safe - 1) {
+            mark_len = line_len - (start_col_safe - 1);
         }
     }
     if (mark_len == 0) mark_len = 1;
-    const space_len = start_col - 1;
+    const space_len = start_col_safe - 1;
     var buf = allocator.alloc(u8, space_len + mark_len) catch return null;
     @memset(buf[0..space_len], ' ');
     buf[space_len] = '^';
@@ -659,6 +699,7 @@ fn print_diagnostics(
     fallback_id: ?ink.compiler.source_id,
     diags: []const ink.diagnostic,
 ) void {
+    const tab_width: usize = 4;
     for (diags) |diag| {
         const label = severity_label(diag.danger);
         if (diag.code) |code| {
@@ -670,9 +711,27 @@ fn print_diagnostics(
         const src = find_source_for_diag(sources, fallback_id, diag) orelse continue;
         const span = diag.span orelse continue;
 
-        const start_info = lineInfo(src.text, @min(span.start, src.text.len));
-        const end_info = lineInfo(src.text, @min(span.end, src.text.len));
+        const start_pos = @min(span.start, src.text.len);
+        const end_pos = @min(span.end, src.text.len);
+        const norm_start = @min(start_pos, end_pos);
+        const norm_end = @max(start_pos, end_pos);
+        const start_info = lineInfo(src.text, norm_start);
+        const end_info = lineInfo(src.text, norm_end);
         const line_slice = src.text[start_info.line_start..start_info.line_end];
+        const start_offset = if (norm_start >= start_info.line_start) norm_start - start_info.line_start else 0;
+        const end_offset = if (norm_end >= start_info.line_start) norm_end - start_info.line_start else 0;
+        const start_col = visualColumn(line_slice, start_offset, tab_width);
+        const end_col = if (start_info.line == end_info.line)
+            visualColumn(line_slice, end_offset, tab_width)
+        else
+            start_col;
+        var display_line = line_slice;
+        var display_owned = false;
+        if (expandTabs(allocator, line_slice, tab_width)) |expanded| {
+            display_line = expanded;
+            display_owned = true;
+        }
+        defer if (display_owned) allocator.free(display_line);
         const line_digits = digits(start_info.line);
         const pad = allocator.alloc(u8, line_digits) catch {
             writer.print("\n", .{}) catch {};
@@ -681,11 +740,11 @@ fn print_diagnostics(
         defer allocator.free(pad);
         @memset(pad, ' ');
 
-        writer.print("  --> {s}:{d}:{d}\n", .{ src.path, start_info.line, start_info.column }) catch {};
+        writer.print("  --> {s}:{d}:{d}\n", .{ src.path, start_info.line, start_col }) catch {};
         writer.print("  {s} |\n", .{pad}) catch {};
-        writer.print("  {d} | {s}\n", .{ start_info.line, line_slice }) catch {};
+        writer.print("  {d} | {s}\n", .{ start_info.line, display_line }) catch {};
 
-        if (build_marker(allocator, start_info, end_info)) |marker| {
+        if (build_marker(allocator, start_col, end_col, display_line.len, start_info.line == end_info.line)) |marker| {
             defer allocator.free(marker);
             writer.print("  {s} | {s}\n", .{ pad, marker }) catch {};
         }
@@ -713,6 +772,19 @@ fn resolve_manifest_root(allocator: mem_allocator, path: []const u8) ![]const u8
     const duped = try allocator.dupe(u8, dir);
     allocator.free(abs);
     return duped;
+}
+
+fn resolve_simulator_manifest(allocator: mem_allocator, root_dir: []const u8) ![]const u8 {
+    const sim_path = try std.fs.path.join(allocator, &.{ root_dir, "simulator.ink" });
+    if (std.fs.cwd().access(sim_path, .{})) {
+        return sim_path;
+    } else |err| switch (err) {
+        error.FileNotFound => {
+            allocator.free(sim_path);
+            return try std.fs.path.join(allocator, &.{ root_dir, "package.ink" });
+        },
+        else => return err,
+    }
 }
 
 fn resolve_output_path(
@@ -852,6 +924,10 @@ pub fn main() !void {
 
         try std.fs.cwd().makePath(std.fs.path.dirname(output_path) orelse ".");
 
+        var sandbox_cfg: ?ink.sandbox.Config = null;
+        var sim_cfg_hold: ?ink.sim.Simulator = null;
+        var debug_info_enabled = false;
+        defer if (sim_cfg_hold) |*cfg| cfg.deinit();
         if (options.profile) |profile_name| {
             const profile = find_profile(dep_graph.profiles.items, profile_name) orelse {
                 err_writer.print("error: unknown profile: {s}\n", .{profile_name}) catch {};
@@ -865,21 +941,79 @@ pub fn main() !void {
                     std.process.exit(1);
                 };
             }
+            if (profile.sandbox) |enabled| {
+                if (enabled) sandbox_cfg = .{ .level = .strict };
+            } else if (std.mem.eql(u8, profile.name, "debug")) {
+                sandbox_cfg = .{ .level = .strict };
+            }
+            if (profile.debug_info.len != 0) {
+                const enabled = parse_debug_info(profile.debug_info) orelse {
+                    err_writer.writeAll("error: invalid profile debug_info\n") catch {};
+                    err_writer.flush() catch {};
+                    std.process.exit(1);
+                };
+                debug_info_enabled = enabled;
+            } else if (std.mem.eql(u8, profile.name, "debug") or std.mem.eql(u8, profile.name, "sim")) {
+                debug_info_enabled = true;
+            }
             if (std.mem.eql(u8, profile.name, "sim")) {
-                const simulator_path = try std.fs.path.join(allocator, &.{ root_dir, "simulator.ink" });
-                defer allocator.free(simulator_path);
-                const sim_cfg = ink.sim.parse(allocator, simulator_path) catch |err| {
+                const sim_manifest_path = try resolve_simulator_manifest(allocator, root_dir);
+                defer allocator.free(sim_manifest_path);
+                const sim_manifest_name = std.fs.path.basename(sim_manifest_path);
+                sim_cfg_hold = ink.sim.parse(allocator, sim_manifest_path) catch |err| {
                     switch (err) {
-                        error.FileNotFound => err_writer.writeAll("error: simulator.ink not found\n") catch {},
-                        error.MissingSimulator => err_writer.writeAll("error: simulator.ink missing sim::simulator\n") catch {},
-                        error.MissingScenarioName => err_writer.writeAll("error: simulator.ink missing scenario name\n") catch {},
-                        error.InvalidSimulator => err_writer.writeAll("error: invalid simulator.ink format\n") catch {},
+                        error.FileNotFound => err_writer.writeAll("error: package.ink not found\n") catch {},
+                        error.MissingSimulator => err_writer.print("error: {s} missing top-level simulator config\n", .{sim_manifest_name}) catch {},
+                        error.MissingSimImport => err_writer.print("error: {s} missing import sim for simulator config\n", .{sim_manifest_name}) catch {},
+                        error.MissingScenarioName => err_writer.print("error: {s} missing simulator scenario name\n", .{sim_manifest_name}) catch {},
+                        error.InvalidSimulator => err_writer.print("error: invalid simulator config format in {s}\n", .{sim_manifest_name}) catch {},
                         else => return err,
                     }
                     err_writer.flush() catch {};
                     std.process.exit(1);
                 };
-                defer sim_cfg.deinit();
+                const sim_cfg = &sim_cfg_hold.?;
+                const checks = parse_validation_checks(sim_cfg.validation) catch {
+                    err_writer.writeAll("error: invalid simulator validation override\n") catch {};
+                    err_writer.flush() catch {};
+                    std.process.exit(1);
+                };
+                const foreigns = sim_cfg.foreigns;
+                var allow_categories: ?[]const []const u8 = null;
+                var deny_categories: ?[]const []const u8 = null;
+                var allow_foreigns: ?[]const []const u8 = null;
+                var deny_foreigns: ?[]const []const u8 = null;
+                var allow_defined = false;
+                if (foreigns) |f| {
+                    if (f.allow_categories.len != 0) {
+                        allow_categories = f.allow_categories;
+                        allow_defined = true;
+                    }
+                    if (f.allow.len != 0) {
+                        allow_foreigns = f.allow;
+                        allow_defined = true;
+                    }
+                    if (f.deny_categories.len != 0) {
+                        deny_categories = f.deny_categories;
+                    }
+                    if (f.deny.len != 0) {
+                        deny_foreigns = f.deny;
+                    }
+                    if (!allow_defined) {
+                        allow_foreigns = &.{};
+                    }
+                } else {
+                    allow_foreigns = &.{};
+                }
+                sandbox_cfg = .{
+                    .level = parse_sandbox_level(sim_cfg.validation),
+                    .checks = checks,
+                    .mode = .sim,
+                    .allow_categories = allow_categories,
+                    .deny_categories = deny_categories,
+                    .allow_foreigns = allow_foreigns,
+                    .deny_foreigns = deny_foreigns,
+                };
             }
         }
 
@@ -888,9 +1022,13 @@ pub fn main() !void {
             .modules = dep_graph.modules.items,
             .root_module = dep_graph.root_module,
             .target = target_spec,
+            .debug_info = debug_info_enabled,
         };
         if (dep_graph.prelude) |prelude| {
             request.prelude = prelude;
+        }
+        if (sandbox_cfg) |cfg| {
+            request.sandbox = cfg;
         }
 
         var result = try inkc.compile_to_inkb(allocator, request, output_path);
@@ -990,5 +1128,53 @@ fn find_profile(profiles: []const manifest.Profile, name: []const u8) ?manifest.
     for (profiles) |profile| {
         if (std.mem.eql(u8, profile.name, name)) return profile;
     }
+    return null;
+}
+
+fn parse_sandbox_level(validation: ?ink.sim.Validation) ink.sandbox.Level {
+    if (validation) |val| {
+        if (std.mem.eql(u8, val.level, "paranoid")) return .paranoid;
+        if (std.mem.eql(u8, val.level, "strict")) return .strict;
+        if (std.mem.eql(u8, val.level, "basic")) return .basic;
+    }
+    return .strict;
+}
+
+fn parse_validation_checks(validation: ?ink.sim.Validation) !?ink.sandbox.Checks {
+    const val = validation orelse return null;
+    if (val.overrides.len == 0) return null;
+
+    var checks = ink.sandbox.checks_for_level(parse_sandbox_level(validation));
+    for (val.overrides) |entry| {
+        const enabled = parse_bool_text(entry.value) orelse return error.InvalidValidationOverride;
+        if (std.mem.eql(u8, entry.key, "macro_streams")) {
+            checks.macro_streams = enabled;
+        } else if (std.mem.eql(u8, entry.key, "macro_ast")) {
+            checks.macro_ast = enabled;
+        } else if (std.mem.eql(u8, entry.key, "ast")) {
+            checks.ast = enabled;
+        } else if (std.mem.eql(u8, entry.key, "uir")) {
+            checks.uir = enabled;
+        } else if (std.mem.eql(u8, entry.key, "mir")) {
+            checks.mir = enabled;
+        } else if (std.mem.eql(u8, entry.key, "lir")) {
+            checks.lir = enabled;
+        } else {
+            return error.InvalidValidationOverride;
+        }
+    }
+
+    return checks;
+}
+
+fn parse_debug_info(raw: []const u8) ?bool {
+    if (std.mem.eql(u8, raw, "full")) return true;
+    if (std.mem.eql(u8, raw, "none")) return false;
+    return parse_bool_text(raw);
+}
+
+fn parse_bool_text(raw: []const u8) ?bool {
+    if (std.mem.eql(u8, raw, "true") or std.mem.eql(u8, raw, "1")) return true;
+    if (std.mem.eql(u8, raw, "false") or std.mem.eql(u8, raw, "0")) return false;
     return null;
 }

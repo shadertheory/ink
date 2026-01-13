@@ -6,6 +6,13 @@
 
 The call form requires a matching `foreign fn` signature in the module.
 
+## Sandbox and Sim Attributes
+Foreign functions must carry explicit permission attributes:
+- `#[sandbox(category=..., allowed)]` for sandbox validation
+- `#[sim(category=..., allowed)]` for simulator validation
+
+Both attributes share the same `category` syntax and allow/deny flags.
+
 ## Mangling
 - Symbol name: `ink_foreign_<name>`
 - `::` in the name is replaced with `_`

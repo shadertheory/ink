@@ -38,7 +38,7 @@ fn list_copy_words(dst: int, src: int, count: int)
 		idx += 1
 
 fn list_store_value<T: type>(dst: int, value: T)
-	let src = &value as int
+	let src = (&value) as int
 	let words = @type_words(value)
 	mut idx = 0
 	while idx < words

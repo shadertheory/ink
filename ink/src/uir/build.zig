@@ -242,7 +242,7 @@ pub const builder = struct {
     fn build_identifier(self: *builder, id: ink.identifier) build_error!uir_identifier {
         if (std.mem.eql(u8, id.string, "true")) return self.emit(.{ .boolean = true });
         if (std.mem.eql(u8, id.string, "false")) return self.emit(.{ .boolean = false });
-        if (std.mem.eql(u8, id.string, "none")) return self.emit(.{ .integer = 0 });
+        if (std.mem.eql(u8, id.string, "none")) return self.emit(.{ .none = {} });
         if (std.mem.eql(u8, id.string, "error::cancelled")) return self.emit(.{ .integer = 1 });
         if (std.mem.eql(u8, id.string, "error::timeout")) return self.emit(.{ .integer = 2 });
         const sid = try self.intern_string(id.string);

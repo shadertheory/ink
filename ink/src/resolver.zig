@@ -90,11 +90,12 @@ pub const resolver = struct {
         }
 
         fn declare_value(self: *context, name: []const u8, diags: *array_list(diagnostic), node: ?*const ink.node) alloc_error!void {
+            if (std.mem.eql(u8, name, "_") or std.mem.eql(u8, name, "*")) return;
             var s = &self.scopes.items[self.scopes.items.len - 1];
             if (s.values.contains(name)) {
                 try diags.append(.{
                     .danger = .@"error",
-                    .message = "duplicate  symbol",
+                    .message = "duplicate symbol",
                     .span = span_of(self, node),
                     .source_id = self.current_source_id,
                 });
@@ -293,6 +294,7 @@ pub const resolver = struct {
         try ctx.base_types.put("duration", type_flag_other);
         try ctx.base_types.put("instant", type_flag_other);
         try ctx.base_types.put("deadline", type_flag_other);
+        try ctx.base_types.put("fd", type_flag_other);
         try ctx.base_types.put("not", type_flag_other);
 
         try merge_symbols(&ctx.base_values, &ctx.base_types, state);
@@ -405,7 +407,11 @@ pub const resolver = struct {
     ) alloc_error!void {
         var itv = state.values.iterator();
         while (itv.next()) |entry| {
-            const qualified = try qualify_name(ctx, alias, entry.key_ptr.*);
+            const name = entry.key_ptr.*;
+            const qualified = if (std.mem.indexOf(u8, name, "::") != null)
+                name
+            else
+                try qualify_name(ctx, alias, name);
             if (!values.contains(qualified)) {
                 try values.put(qualified, {});
             }
@@ -413,7 +419,11 @@ pub const resolver = struct {
 
         var itt = state.types.iterator();
         while (itt.next()) |entry| {
-            const qualified = try qualify_name(ctx, alias, entry.key_ptr.*);
+            const name = entry.key_ptr.*;
+            const qualified = if (std.mem.indexOf(u8, name, "::") != null)
+                name
+            else
+                try qualify_name(ctx, alias, name);
             const incoming = entry.value_ptr.*;
             if (types.get(qualified)) |existing| {
                 const merged = merge_type_flags(existing, incoming);
@@ -586,8 +596,13 @@ pub const resolver = struct {
                         .source_id = ctx.current_source_id,
                     });
                 }
+                const allow_type_ident = std.mem.eql(u8, call.name.string, "type_words");
                 for (call.args) |arg_ref| {
-                    try resolve_node(ctx, ink.ast.deref(arg_ref), diags);
+                    const arg = ink.ast.deref(arg_ref);
+                    if (allow_type_ident and arg.* == .identifier and ctx.resolve_type(arg.identifier.string)) {
+                        continue;
+                    }
+                    try resolve_node(ctx, arg, diags);
                 }
             },
             .associate => |assoc| {
@@ -635,10 +650,68 @@ pub const resolver = struct {
             .access => {
                 try resolve_node(ctx, ink.ast.deref(bin.left), diags);
             },
+            .scope_access => {
+                if (try resolve_scope_access_chain(ctx, bin)) return;
+                const left = ink.ast.deref(bin.left);
+                const right = ink.ast.deref(bin.right);
+                if (left.* == .identifier and right.* == .identifier) {
+                    const qualified = try qualify_name(ctx, left.identifier.string, right.identifier.string);
+                    if (ctx.resolve_value(qualified) or ctx.resolve_type(qualified)) {
+                        return;
+                    }
+                }
+                try resolve_node(ctx, left, diags);
+                try resolve_node(ctx, right, diags);
+            },
             else => {
                 try resolve_node(ctx, ink.ast.deref(bin.left), diags);
                 try resolve_node(ctx, ink.ast.deref(bin.right), diags);
             },
+        }
+    }
+
+    fn resolve_scope_access_chain(ctx: *context, bin: ink.ast.binary_expr) alloc_error!bool {
+        var parts: std.ArrayListUnmanaged([]const u8) = .{};
+        defer parts.deinit(ctx.allocator);
+
+        const left = ink.ast.deref(bin.left);
+        const right = ink.ast.deref(bin.right);
+        if (!try collect_scope_access_parts(ctx.allocator, left, &parts)) return false;
+        if (right.* != .identifier) return false;
+        try parts.append(ctx.allocator, right.identifier.string);
+
+        var buf: std.ArrayListUnmanaged(u8) = .{};
+        defer buf.deinit(ctx.allocator);
+        const sep = "::";
+        for (parts.items, 0..) |part, idx| {
+            if (idx != 0) try buf.appendSlice(ctx.allocator, sep);
+            try buf.appendSlice(ctx.allocator, part);
+        }
+
+        if (ctx.resolve_value(buf.items) or ctx.resolve_type(buf.items)) return true;
+        return false;
+    }
+
+    fn collect_scope_access_parts(
+        allocator: mem_allocator,
+        node: *const ink.node,
+        parts: *std.ArrayListUnmanaged([]const u8),
+    ) alloc_error!bool {
+        switch (node.*) {
+            .identifier => |id| {
+                try parts.append(allocator, id.string);
+                return true;
+            },
+            .binary => |bin| {
+                if (bin.op != .scope_access) return false;
+                const left = ink.ast.deref(bin.left);
+                const right = ink.ast.deref(bin.right);
+                if (!try collect_scope_access_parts(allocator, left, parts)) return false;
+                if (right.* != .identifier) return false;
+                try parts.append(allocator, right.identifier.string);
+                return true;
+            },
+            else => return false,
         }
     }
 
@@ -1177,9 +1250,14 @@ pub const resolver = struct {
             });
             return;
         }
+        var msg = base_message;
+        if (ctx.diag_messages != null) {
+            msg = try std.fmt.allocPrint(ctx.allocator, "{s} '{s}'", .{ base_message, name });
+            try ctx.diag_messages.?.append(msg);
+        }
         try diags.append(.{
             .danger = .@"error",
-            .message = base_message,
+            .message = msg,
             .span = where,
             .code = code,
             .source_id = ctx.current_source_id,

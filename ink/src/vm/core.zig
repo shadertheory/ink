@@ -5,6 +5,7 @@ pub const array_list = @import("std").array_list.Managed;
 pub const bytecode = @import("./assembly.zig").bytecode;
 const runtime = @import("../runtime/scheduler.zig");
 const inkb = @import("inkb.zig");
+const trace = @import("../runtime/trace.zig");
 
 pub const machine =
     struct {
@@ -27,6 +28,8 @@ pub const machine =
             foreigns: []const []const u8,
             scheduler: ?*runtime.scheduler,
             lib_dir: ?[]const u8,
+            debug_checks: bool,
+            program_trace: ?*trace.ProgramTrace,
         ) machine {
             const state = executor.state{
                 .pc = 0,
@@ -43,7 +46,7 @@ pub const machine =
                 .data = data,
             };
             instance.memory.* = tape.init(allocator, 1024 * 1024);
-            instance.processor = executor.init(state, instance.memory, constants, data, foreigns, allocator, scheduler, lib_dir, program);
+            instance.processor = executor.init(state, instance.memory, constants, data, foreigns, allocator, scheduler, lib_dir, program, debug_checks, program_trace);
             return instance;
         }
 

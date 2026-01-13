@@ -282,6 +282,11 @@ const struct_info = struct {
     generics: []const uir_mod.uir.generic_param,
 };
 
+const enum_info = struct {
+    variants: []const uir_mod.uir.enum_variant,
+    generics: []const uir_mod.uir.generic_param,
+};
+
 const loop_scope = struct {
     label: ?[]const u8,
     result: TypeId,
@@ -302,6 +307,8 @@ const typecheck_ctx = struct {
     trait_impls: string_map(array_list([]const u8)),
     trait_neg_impls: string_map(array_list([]const u8)),
     structs: string_map(struct_info),
+    enums: string_map(enum_info),
+    type_aliases: string_map(uir_mod.uir_identifier),
     owned_type_key_slices: array_list([]const type_key),
     loop_stack: std.ArrayListUnmanaged(loop_scope),
     pending_label: ?[]const u8,
@@ -330,6 +337,8 @@ const typecheck_ctx = struct {
             .trait_impls = string_map(array_list([]const u8)).init(allocator),
             .trait_neg_impls = string_map(array_list([]const u8)).init(allocator),
             .structs = string_map(struct_info).init(allocator),
+            .enums = string_map(enum_info).init(allocator),
+            .type_aliases = string_map(uir_mod.uir_identifier).init(allocator),
             .owned_type_key_slices = array_list([]const type_key).init(allocator),
             .loop_stack = .{},
             .pending_label = null,
@@ -361,6 +370,8 @@ const typecheck_ctx = struct {
         }
         self.trait_neg_impls.deinit();
         self.structs.deinit();
+        self.enums.deinit();
+        self.type_aliases.deinit();
         for (self.owned_type_key_slices.items) |slice| {
             self.allocator.free(slice);
         }
@@ -614,6 +625,9 @@ const typecheck_ctx = struct {
                 .name => |name_id| blk: {
                     const name = self.string_value(name_id);
                     if (generics.get(name)) |var_id| break :blk var_id;
+                    if (self.type_aliases.get(name)) |alias_ref| {
+                        break :blk self.type_from_type_node(alias_ref, self_name, generics);
+                    }
                     break :blk self.types.named(name);
                 },
                 .dyn => |ref| blk: {
@@ -659,6 +673,9 @@ const typecheck_ctx = struct {
             .identifier => |ident| blk: {
                 const name = self.string_value(ident);
                 if (generics.get(name)) |var_id| break :blk var_id;
+                if (self.type_aliases.get(name)) |alias_ref| {
+                    break :blk self.type_from_type_node(alias_ref, self_name, generics);
+                }
                 break :blk self.types.named(name);
             },
             else => self.types.new_var(),
@@ -684,12 +701,14 @@ const typecheck_ctx = struct {
         generics: *string_map(TypeId),
         locals: *string_map(TypeId),
         fail: ?*call_failure,
+        out_generics: ?*string_map(TypeId),
     ) bool {
         _ = self_name;
         _ = locals;
         _ = generics;
         var local_generics = string_map(TypeId).init(self.allocator);
-        defer local_generics.deinit();
+        var keep_generics = false;
+        defer if (!keep_generics) local_generics.deinit();
         self.add_type_generic_constraints(info.decl.generics, info.decl.where_clause, &local_generics);
 
         const params = info.decl.params;
@@ -748,6 +767,10 @@ const typecheck_ctx = struct {
                 slot.* = .{ .constraint = constraint_fail };
             }
             return false;
+        }
+        if (out_generics) |out| {
+            out.* = local_generics;
+            keep_generics = true;
         }
         return true;
     }
@@ -827,6 +850,22 @@ fn collect_env(ctx: *typecheck_ctx, roots: []const uir_mod.uir_identifier) !void
                         .is_record = st.is_record,
                         .generics = st.generics,
                     }) catch return error.OutOfMemory;
+                }
+            },
+            .@"enum" => |en| {
+                const name = ctx.string_value(en.name);
+                if (!ctx.enums.contains(name)) {
+                    ctx.enums.put(name, .{
+                        .variants = en.variants,
+                        .generics = en.generics,
+                    }) catch return error.OutOfMemory;
+                }
+            },
+            .type_alias => |alias| {
+                if (alias.generics.len != 0) break;
+                const name = ctx.string_value(alias.name);
+                if (!ctx.type_aliases.contains(name)) {
+                    ctx.type_aliases.put(name, alias.value) catch return error.OutOfMemory;
                 }
             },
             .trait => |tr| {
@@ -1503,16 +1542,24 @@ fn unary_operator_method_name(op: ink.unary) ?[]const u8 {
     };
 }
 
+fn unqualified_name(name: []const u8) []const u8 {
+    if (std.mem.lastIndexOf(u8, name, "::")) |idx| {
+        return name[idx + 2 ..];
+    }
+    return name;
+}
+
 fn is_builtin_numeric(name: []const u8) bool {
-    return std.mem.eql(u8, name, "int") or std.mem.eql(u8, name, "uint") or std.mem.eql(u8, name, "float");
+    const base = unqualified_name(name);
+    return std.mem.eql(u8, base, "int") or std.mem.eql(u8, base, "uint") or std.mem.eql(u8, base, "float");
 }
 
 fn is_builtin_bool(name: []const u8) bool {
-    return std.mem.eql(u8, name, "bool");
+    return std.mem.eql(u8, unqualified_name(name), "bool");
 }
 
 fn is_builtin_string(name: []const u8) bool {
-    return std.mem.eql(u8, name, "string");
+    return std.mem.eql(u8, unqualified_name(name), "string");
 }
 
 fn is_builtin_type(name: []const u8) bool {
@@ -2068,6 +2115,104 @@ fn element_type_from_container(ctx: *typecheck_ctx, key: type_key) ?type_key {
     };
 }
 
+fn split_enum_constructor_name(name: []const u8) ?struct { enum_name: []const u8, variant_name: []const u8 } {
+    const split = std.mem.lastIndexOf(u8, name, "::") orelse return null;
+    if (split == 0 or split + 2 >= name.len) return null;
+    return .{ .enum_name = name[0..split], .variant_name = name[split + 2 ..] };
+}
+
+fn enum_return_type(
+    ctx: *typecheck_ctx,
+    enum_name: []const u8,
+    info: enum_info,
+    generics: *string_map(TypeId),
+) TypeId {
+    if (info.generics.len == 0) return ctx.types.named(enum_name);
+    const args = ctx.allocator.alloc(TypeId, info.generics.len) catch return ctx.types.new_var();
+    for (info.generics, 0..) |gen, idx| {
+        const name = ctx.string_value(gen.name);
+        if (gen.kind == .type) {
+            args[idx] = generics.get(name) orelse ctx.types.new_var();
+        } else {
+            args[idx] = ctx.types.new_var();
+        }
+    }
+    return ctx.types.applied(enum_name, args);
+}
+
+fn infer_enum_constructor(
+    ctx: *typecheck_ctx,
+    name: []const u8,
+    arg_types: []const TypeId,
+    call_id: uir_mod.uir_identifier,
+) ?TypeId {
+    const split = split_enum_constructor_name(name) orelse return null;
+    const info = ctx.enums.get(split.enum_name) orelse return null;
+
+    var payload: ?uir_mod.uir_identifier = null;
+    var found = false;
+    for (info.variants) |variant| {
+        if (std.mem.eql(u8, ctx.string_value(variant.name), split.variant_name)) {
+            payload = variant.payload;
+            found = true;
+            break;
+        }
+    }
+    if (!found) return null;
+
+    var local_generics = string_map(TypeId).init(ctx.allocator);
+    defer local_generics.deinit();
+    ctx.add_type_generic_constraints(info.generics, &[_]uir_mod.uir.function_decl.where_req{}, &local_generics);
+
+    const return_ty = enum_return_type(ctx, split.enum_name, info, &local_generics);
+    const expected_args: usize = if (payload != null) 1 else 0;
+    if (arg_types.len != expected_args) {
+        report_call_failure(
+            ctx,
+            name,
+            arg_types,
+            null,
+            call_id,
+            .{ .arity = .{ .expected = expected_args, .found = arg_types.len } },
+            &[_]usize{},
+        );
+        return return_ty;
+    }
+
+    if (payload) |payload_id| {
+        const payload_ty = ctx.type_from_type_node(payload_id, split.enum_name, &local_generics);
+        if (!ctx.types.unify(payload_ty, arg_types[0])) {
+            const expected_key = ctx.to_type_key(payload_ty);
+            const actual_key = ctx.to_type_key(arg_types[0]);
+            report_call_failure(
+                ctx,
+                name,
+                arg_types,
+                null,
+                call_id,
+                .{ .arg_mismatch = .{ .index = 0, .expected = expected_key, .actual = actual_key } },
+                &[_]usize{},
+            );
+            return return_ty;
+        }
+    }
+
+    var constraint_fail: constraint_failure = undefined;
+    if (!constraints_ok(ctx, &local_generics, &constraint_fail)) {
+        report_call_failure(
+            ctx,
+            name,
+            arg_types,
+            null,
+            call_id,
+            .{ .constraint = constraint_fail },
+            &[_]usize{},
+        );
+    }
+
+    return return_ty;
+}
+
 fn infer_call_base(ctx: *typecheck_ctx, base_id: uir_mod.uir_identifier) ?struct { name: []const u8, receiver: ?uir_mod.uir_identifier } {
     const node = ctx.nodes[@intCast(base_id.idx)];
     return switch (node) {
@@ -2117,19 +2262,17 @@ fn infer_call(ctx: *typecheck_ctx, id: uir_mod.uir_identifier, self_name: ?[]con
 
     const arg_ids = args_buf[0..arg_count];
     if (infer_call_base(ctx, base_id)) |base| {
-        if (base.receiver) |recv| {
-            const recv_type = ctx.infer_expr(recv, self_name, generics, locals, null);
-            const arg_types = ctx.allocator.alloc(TypeId, arg_count) catch return ctx.types.new_var();
-            defer ctx.allocator.free(arg_types);
-            for (arg_ids, 0..) |arg, idx2| {
-                arg_types[idx2] = ctx.infer_expr(arg, self_name, generics, locals, null);
-            }
-            return resolve_method_call(ctx, recv_type, base.name, arg_types, self_name, generics, locals, id);
-        }
         const arg_types = ctx.allocator.alloc(TypeId, arg_count) catch return ctx.types.new_var();
         defer ctx.allocator.free(arg_types);
         for (arg_ids, 0..) |arg, idx2| {
             arg_types[idx2] = ctx.infer_expr(arg, self_name, generics, locals, null);
+        }
+        if (base.receiver == null) {
+            if (infer_enum_constructor(ctx, base.name, arg_types, id)) |enum_ty| return enum_ty;
+        }
+        if (base.receiver) |recv| {
+            const recv_type = ctx.infer_expr(recv, self_name, generics, locals, null);
+            return resolve_method_call(ctx, recv_type, base.name, arg_types, self_name, generics, locals, id);
         }
         return resolve_overload(ctx, base.name, arg_types, self_name, generics, locals, id, null);
     }
@@ -2202,7 +2345,8 @@ fn infer_operator(
             }
             break :blk false;
         };
-        const call_id = if (left_non_builtin) id else null;
+        const optional_method = op == .equal or op == .not_equal;
+        const call_id = if (left_non_builtin and !optional_method) id else null;
         const method_ty = resolve_method_call(ctx, left_inner, method, &.{right_inner}, self_name, generics, locals, call_id);
         if (ctx.types.types.items[ctx.types.resolve(method_ty)] != .tvar) {
             return if (has_atomic) wrap_atomic(ctx, method_ty) else method_ty;
@@ -2587,6 +2731,7 @@ fn infer_node(ctx: *typecheck_ctx, id: uir_mod.uir_identifier, self_name: ?[]con
         .float => ctx.types.named("float"),
         .duration => ctx.types.named("duration"),
         .boolean => ctx.types.named("bool"),
+        .none => ctx.types.applied("optional", &.{ctx.types.new_var()}),
         .string => ctx.types.named("string"),
         .identifier => |ident| {
             const name = ctx.string_value(ident);
@@ -2810,7 +2955,7 @@ fn resolve_overload(
     for (group.items, 0..) |info, idx| {
         const checkpoint = ctx.types.checkpoint();
         var fail: call_failure = undefined;
-        if (!ctx.try_unify_call(info, arg_types, self_name, generics, locals, &fail)) {
+        if (!ctx.try_unify_call(info, arg_types, self_name, generics, locals, &fail, null)) {
             switch (fail) {
                 .constraint => |con| {
                     if (constraint_fail == null) constraint_fail = con;
@@ -2854,8 +2999,12 @@ fn resolve_overload(
         }
         return ctx.types.new_var();
     }
-    _ = ctx.try_unify_call(group.items[best_idx.?], arg_types, self_name, generics, locals, null);
-    return ctx.return_type_for(group.items[best_idx.?], self_name, generics);
+    var local_generics: string_map(TypeId) = undefined;
+    if (!ctx.try_unify_call(group.items[best_idx.?], arg_types, self_name, generics, locals, null, &local_generics)) {
+        return ctx.types.new_var();
+    }
+    defer local_generics.deinit();
+    return ctx.return_type_for(group.items[best_idx.?], self_name, &local_generics);
 }
 
 fn report_ambiguous_method(
@@ -3320,9 +3469,10 @@ fn auto_trait_satisfied(
     visited_traits: *array_list([]const u8),
     visited_types: *string_map(void),
 ) bool {
-    if (std.mem.eql(u8, trait_name, "sized")) return auto_trait_sized(ctx, ty, visited_traits, visited_types);
-    if (std.mem.eql(u8, trait_name, "send")) return auto_trait_send(ctx, ty, visited_traits, visited_types);
-    if (std.mem.eql(u8, trait_name, "sync")) return auto_trait_sync(ctx, ty, visited_traits, visited_types);
+    const base = unqualified_name(trait_name);
+    if (std.mem.eql(u8, base, "sized")) return auto_trait_sized(ctx, ty, visited_traits, visited_types);
+    if (std.mem.eql(u8, base, "send")) return auto_trait_send(ctx, ty, visited_traits, visited_types);
+    if (std.mem.eql(u8, base, "sync")) return auto_trait_sync(ctx, ty, visited_traits, visited_types);
     return auto_trait_structural(ctx, ty, trait_name, visited_traits, visited_types);
 }
 
@@ -3334,7 +3484,8 @@ fn type_satisfies_trait(
     visited_types: *string_map(void),
 ) bool {
     if (ty == .unknown) return true;
-    if (std.mem.eql(u8, trait_name, "print_to")) {
+    const trait_base = unqualified_name(trait_name);
+    if (std.mem.eql(u8, trait_base, "print_to")) {
         if (type_key_base_name(ty)) |base_name| {
             if (is_builtin_type(base_name)) return true;
         }

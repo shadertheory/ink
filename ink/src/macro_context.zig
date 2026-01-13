@@ -191,6 +191,26 @@ pub const macro_context = struct {
         self.failed = false;
     }
 
+    pub const stream_validation_error = enum {
+        invalid_stream,
+        invalid_tree,
+        invalid_token,
+        invalid_group,
+        cycle,
+    };
+
+    pub fn validate_stream(
+        self: *macro_context,
+        allocator: std.mem.Allocator,
+        stream_id: u32,
+    ) ?stream_validation_error {
+        var stream_state = std.AutoHashMap(u32, u8).init(allocator);
+        defer stream_state.deinit();
+        var group_state = std.AutoHashMap(u32, u8).init(allocator);
+        defer group_state.deinit();
+        return self.validate_stream_inner(stream_id, &stream_state, &group_state);
+    }
+
     pub fn push_call_site(self: *macro_context, span_id: u32) void {
         self.call_sites.append(self.allocator, span_id) catch {};
     }
@@ -912,6 +932,52 @@ pub const macro_context = struct {
                 try out.append(.{ .which = .dedent, .where = end_loc, .what = .{ .string = "", .owner = .ref, .where = end_loc } });
             },
         }
+    }
+
+    fn validate_stream_inner(
+        self: *macro_context,
+        stream_id: u32,
+        stream_state: *std.AutoHashMap(u32, u8),
+        group_state: *std.AutoHashMap(u32, u8),
+    ) ?stream_validation_error {
+        if (stream_id == 0 or stream_id > self.streams.items.len) return .invalid_stream;
+        const state = stream_state.get(stream_id) orelse 0;
+        if (state == 1) return .cycle;
+        if (state == 2) return null;
+        stream_state.put(stream_id, 1) catch return .invalid_stream;
+        const stream = self.streams.items[stream_id - 1];
+        for (stream.items) |tree_id| {
+            if (tree_id == 0 or tree_id > self.trees.items.len) return .invalid_tree;
+            const info = self.trees.items[tree_id - 1];
+            switch (info) {
+                .token => |tok_id| {
+                    if (tok_id == 0 or tok_id > self.tokens.items.len) return .invalid_token;
+                },
+                .group => |grp_id| {
+                    if (grp_id == 0 or grp_id > self.groups.items.len) return .invalid_group;
+                    if (self.validate_group_inner(grp_id, stream_state, group_state)) |err| return err;
+                },
+            }
+        }
+        stream_state.put(stream_id, 2) catch {};
+        return null;
+    }
+
+    fn validate_group_inner(
+        self: *macro_context,
+        group_id: u32,
+        stream_state: *std.AutoHashMap(u32, u8),
+        group_state: *std.AutoHashMap(u32, u8),
+    ) ?stream_validation_error {
+        if (group_id == 0 or group_id > self.groups.items.len) return .invalid_group;
+        const state = group_state.get(group_id) orelse 0;
+        if (state == 1) return .cycle;
+        if (state == 2) return null;
+        group_state.put(group_id, 1) catch return .invalid_group;
+        const grp = self.groups.items[group_id - 1];
+        if (self.validate_stream_inner(grp.stream, stream_state, group_state)) |err| return err;
+        group_state.put(group_id, 2) catch {};
+        return null;
     }
 
 };

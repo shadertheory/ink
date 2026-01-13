@@ -1,0 +1,25 @@
+sim report: 1 runs
+runs:
+run chaos: scenario=chaos seed=7277622673076160841 events=35
+  snapshot dir: .ink/snapshots
+  faults:
+    none: 32
+    drop: 1
+    delay: 2
+  fault events (3): #21 drop, #23 delay, #24 delay
+  snapshots: 35
+    first: .ink/snapshots/chaos-h200d6rpq8g4kmxm.inksnapshot
+    last:  .ink/snapshots/chaos-4apuhrcnm3bmlesk.inksnapshot
+  replay: quill sim --manifest simulator.ink --scenario chaos --replay .ink/snapshots/chaos-4apuhrcnm3bmlesk.inksnapshot
+scenario chaos: runs=1 events=35
+  none: 32
+  drop: 1
+  delay: 2
+aggregate: events=35
+  none: 32
+  drop: 1
+  delay: 2
+fault path tree (fault events only):
+drop 1
+  delay 1
+    delay 1

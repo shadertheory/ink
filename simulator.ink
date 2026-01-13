@@ -4,6 +4,8 @@ fn simulator()
 	sim::simulator
 		seed = 0
 		concurrency = "half"
+		foreigns = sim::foreigns
+			allow_categories = "mem io time task macro"
 		snapshots = sim::snapshots
 			steps = 1
 			mode = "full+delta"

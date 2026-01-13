@@ -1,0 +1,50 @@
+import sim
+
+fn simulator()
+	sim::simulator
+		seed = 7
+		concurrency = "half"
+		foreigns = sim::foreigns
+			allow_categories = "mem io time task macro"
+		report = sim::report
+			text = "sim-report.txt"
+			json = "sim-report.json"
+			tree = true
+			per_scenario = true
+			aggregate = true
+		validation = sim::validation
+			level = "strict"
+		scenario = sim::scenario
+			name = "default"
+			components = sim::components
+				tcp = "mock"
+				udp = "mock"
+				fs = "mock"
+				clock = "sim"
+				rng = "sim"
+				alloc = "sim"
+				scheduler = "sim"
+			faults = sim::faults
+		snapshots = sim::snapshots
+			steps = 1
+			mode = "full+delta"
+			compress = "zstd"
+		scenario = sim::scenario
+			name = "chaos"
+			compose = "default"
+			faults = sim::faults
+				tcp_drop = 0.05
+				io_error = 0.02
+				oom = 0.005
+				fault = sim::fault
+					kind = "delay"
+					component = "tcp"
+					probability = 0.05
+					delay_ns = 1000000
+		scenario = sim::scenario
+			name = "sweep"
+			compose = "default"
+			sweep = sim::sweep
+				mode = "grid"
+				faults.tcp_drop = "0 0.02 0.1"
+				components.fs = "mock real"
