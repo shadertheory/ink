@@ -1,4 +1,4 @@
-fn bytes_new(capacity: int) -> bytes
+fn bytes_new(capacity: i64) -> bytes
 	list_new(capacity)
 
 fn bytes_from_string(value: string) -> bytes
@@ -19,14 +19,36 @@ fn bytes_from_string(value: string) -> bytes
 fn bytes_free(value: bytes)
 	list_free(value)
 
-fn bytes_len(value: bytes) -> int
+fn bytes_len(value: bytes) -> i64
 	list_len(value)
 
-fn bytes_cap(value: bytes) -> int
+fn bytes_cap(value: bytes) -> i64
 	list_cap(value)
 
-fn bytes_ptr(value: bytes) -> int
+fn bytes_ptr(value: bytes) -> i64
 	list_ptr(value)
 
-fn bytes_set_len(value: bytes, len: int)
+fn bytes_set_len(value: bytes, len: i64)
 	list_set_len(value, len)
+
+impl indexable for bytes
+	fn index<I: int>(this, idx: I) -> i64
+		let idx_i = idx as i64
+		let len = bytes_len(this)
+		if idx_i < 0
+			0
+		else if idx_i >= len
+			0
+		else
+			let ptr = bytes_ptr(this)
+			*(ptr + idx_i)
+	fn index_set<I: int>(this, idx: I, value: i64)
+		let idx_i = idx as i64
+		let len = bytes_len(this)
+		if idx_i < 0
+			0
+		else if idx_i >= len
+			0
+		else
+			let ptr = bytes_ptr(this)
+			*(ptr + idx_i) = value & 255

@@ -16,6 +16,9 @@ Comparison
 Logical
 - `and` `or` `xor` `not`
 
+Range
+- `..` `..=`
+
 Indexing
 - `[]`
 
@@ -49,6 +52,10 @@ Binary
 - `x >= y` -> `x.ge(y)`
 - `x[y]` -> `x.index(y)`
 
+Range
+- `x .. y` -> `range { start = x, end = y, inclusive = false }`
+- `x ..= y` -> `range { start = x, end = y, inclusive = true }`
+
 Index assignment
 - `x[y] = v` -> `x.index_set(y, v)` for non-slice types
   - compound forms use `index` + `index_set` under the hood
@@ -58,6 +65,7 @@ Index assignment
 - Builtin types (`int`, `float`, `bool`, `string`) use VM operators where available.
 - If the left operand is `dyn Trait` or a non-builtin type with a matching method name, the operator dispatches to the method.
 - For dynamic trait objects, the method is invoked through the trait vtable.
+- Range operators are syntax sugar for the intrinsic `range` constructor and do not dispatch.
 
 ## Assignment Ops
 

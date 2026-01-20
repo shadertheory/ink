@@ -55,6 +55,7 @@ const Type = union(enum) {
 const TypeVar = struct {
     binding: ?TypeId = null,
     constraints: std.ArrayListUnmanaged(trait_constraint) = .{},
+    numeric_literal: bool = false,
 };
 
 const Change = union(enum) {
@@ -94,6 +95,12 @@ const type_ctx = struct {
     fn new_var(self: *type_ctx) TypeId {
         const id: TypeId = @intCast(self.types.items.len);
         self.types.append(.{ .tvar = .{} }) catch unreachable;
+        return id;
+    }
+
+    fn new_numeric_literal(self: *type_ctx) TypeId {
+        const id: TypeId = @intCast(self.types.items.len);
+        self.types.append(.{ .tvar = .{ .numeric_literal = true } }) catch unreachable;
         return id;
     }
 
@@ -200,11 +207,33 @@ const type_ctx = struct {
         const a_node = self.types.items[a];
         const b_node = self.types.items[b];
         if (a_node == .tvar) {
+            if (a_node.tvar.numeric_literal) {
+                switch (b_node) {
+                    .name => if (!is_builtin_numeric(b_node.name)) return false,
+                    .tvar => {
+                        if (!b_node.tvar.numeric_literal) {
+                            self.types.items[b].tvar.numeric_literal = true;
+                        }
+                    },
+                    else => return false,
+                }
+            }
             if (self.occurs(a, b)) return false;
             self.bind_var(a, b);
             return true;
         }
         if (b_node == .tvar) {
+            if (b_node.tvar.numeric_literal) {
+                switch (a_node) {
+                    .name => if (!is_builtin_numeric(a_node.name)) return false,
+                    .tvar => {
+                        if (!a_node.tvar.numeric_literal) {
+                            self.types.items[a].tvar.numeric_literal = true;
+                        }
+                    },
+                    else => return false,
+                }
+            }
             if (self.occurs(b, a)) return false;
             self.bind_var(b, a);
             return true;
@@ -285,6 +314,7 @@ const struct_info = struct {
 const enum_info = struct {
     variants: []const uir_mod.uir.enum_variant,
     generics: []const uir_mod.uir.generic_param,
+    is_flag: bool,
 };
 
 const loop_scope = struct {
@@ -310,6 +340,7 @@ const typecheck_ctx = struct {
     enums: string_map(enum_info),
     type_aliases: string_map(uir_mod.uir_identifier),
     owned_type_key_slices: array_list([]const type_key),
+    owned_type_names: std.ArrayListUnmanaged([]const u8) = .{},
     loop_stack: std.ArrayListUnmanaged(loop_scope),
     pending_label: ?[]const u8,
 
@@ -340,6 +371,7 @@ const typecheck_ctx = struct {
             .enums = string_map(enum_info).init(allocator),
             .type_aliases = string_map(uir_mod.uir_identifier).init(allocator),
             .owned_type_key_slices = array_list([]const type_key).init(allocator),
+            .owned_type_names = .{},
             .loop_stack = .{},
             .pending_label = null,
         };
@@ -376,6 +408,10 @@ const typecheck_ctx = struct {
             self.allocator.free(slice);
         }
         self.owned_type_key_slices.deinit();
+        for (self.owned_type_names.items) |name| {
+            self.allocator.free(name);
+        }
+        self.owned_type_names.deinit(self.allocator);
         self.loop_stack.deinit(self.allocator);
     }
 
@@ -387,6 +423,14 @@ const typecheck_ctx = struct {
         const idx: usize = @intCast(id.idx);
         if (idx >= self.spans.len) return null;
         return self.spans[idx];
+    }
+
+    fn int_type_name(self: *typecheck_ctx, signed: bool, bits: i64) ?[]const u8 {
+        if (bits < 1 or bits > 512) return null;
+        const prefix: u8 = if (signed) 'i' else 'u';
+        const name = std.fmt.allocPrint(self.allocator, "{c}{d}", .{ prefix, bits }) catch return null;
+        self.owned_type_names.append(self.allocator, name) catch return null;
+        return name;
     }
 
     fn source_for_node(self: *typecheck_ctx, id: uir_mod.uir_identifier) ?source.source_id {
@@ -463,7 +507,19 @@ const typecheck_ctx = struct {
         return switch (node) {
             .type => |ty| switch (ty) {
                 .name => |name_id| self.string_value(name_id),
-                .applied => |ap| self.string_value(ap.base),
+                .applied => |ap| blk: {
+                    const base = self.string_value(ap.base);
+                    if ((std.mem.eql(u8, base, "int") or std.mem.eql(u8, base, "uint")) and ap.args.len == 1) {
+                        const arg_node = self.nodes[@intCast(ap.args[0].idx)];
+                        if (arg_node == .integer) {
+                            const signed = std.mem.eql(u8, base, "int");
+                            if (self.int_type_name(signed, arg_node.integer)) |name| {
+                                break :blk name;
+                            }
+                        }
+                    }
+                    break :blk base;
+                },
                 else => null,
             },
             .identifier => |ident| self.string_value(ident),
@@ -662,12 +718,22 @@ const typecheck_ctx = struct {
                     break :blk self.types.applied("optional", &.{inner});
                 },
                 .applied => |ap| blk: {
+                    const base_name = self.string_value(ap.base);
+                    if ((std.mem.eql(u8, base_name, "uint") or std.mem.eql(u8, base_name, "int")) and ap.args.len == 1) {
+                        const arg_node = self.nodes[@intCast(ap.args[0].idx)];
+                        if (arg_node == .integer) {
+                            const signed = std.mem.eql(u8, base_name, "int");
+                            if (self.int_type_name(signed, arg_node.integer)) |name| {
+                                break :blk self.types.named(name);
+                            }
+                        }
+                    }
                     var args = self.allocator.alloc(TypeId, ap.args.len) catch return self.types.new_var();
                     defer self.allocator.free(args);
                     for (ap.args, 0..) |arg, idx| {
                         args[idx] = self.type_from_type_node(arg, self_name, generics);
                     }
-                    break :blk self.types.applied(self.string_value(ap.base), args);
+                    break :blk self.types.applied(base_name, args);
                 },
             },
             .identifier => |ident| blk: {
@@ -676,6 +742,9 @@ const typecheck_ctx = struct {
                 if (self.type_aliases.get(name)) |alias_ref| {
                     break :blk self.type_from_type_node(alias_ref, self_name, generics);
                 }
+                const base = ink.lang_spec.unqualified_name(name);
+                if (std.mem.eql(u8, base, "int")) break :blk self.types.named(ink.lang_spec.default_signed_int_name);
+                if (std.mem.eql(u8, base, "uint")) break :blk self.types.named(ink.lang_spec.default_unsigned_int_name);
                 break :blk self.types.named(name);
             },
             else => self.types.new_var(),
@@ -858,6 +927,7 @@ fn collect_env(ctx: *typecheck_ctx, roots: []const uir_mod.uir_identifier) !void
                     ctx.enums.put(name, .{
                         .variants = en.variants,
                         .generics = en.generics,
+                        .is_flag = en.is_flag,
                     }) catch return error.OutOfMemory;
                 }
             },
@@ -901,12 +971,13 @@ fn collect_env(ctx: *typecheck_ctx, roots: []const uir_mod.uir_identifier) !void
             .impl => |impl| {
                 const trait_name = ctx.string_value(impl.by_trait);
                 const type_name = ctx.string_value(impl.for_struct);
+                const is_inherent = std.mem.eql(u8, trait_name, ink.lang_spec.inherent_impl_trait_name);
                 if (!impl.negative) {
                     for (impl.functions) |func| {
                         try ctx.add_function(func, type_name);
                     }
                 }
-                if (ctx.traits.contains(trait_name)) {
+                if (!is_inherent and ctx.traits.contains(trait_name)) {
                     if (impl.negative) {
                         var list = ctx.trait_neg_impls.getPtr(trait_name);
                         if (list == null) {
@@ -934,7 +1005,7 @@ fn collect_env(ctx: *typecheck_ctx, roots: []const uir_mod.uir_identifier) !void
 }
 
 fn add_builtin_traits(ctx: *typecheck_ctx) void {
-    const builtin_names = [_][]const u8{ "send", "sync", "sized" };
+    const builtin_names = [_][]const u8{ "send", "sync", "sized", "int", "uint" };
     for (builtin_names) |name| {
         if (ctx.traits.contains(name)) continue;
         const methods = ctx.allocator.alloc(trait_method, 0) catch return;
@@ -1543,15 +1614,11 @@ fn unary_operator_method_name(op: ink.unary) ?[]const u8 {
 }
 
 fn unqualified_name(name: []const u8) []const u8 {
-    if (std.mem.lastIndexOf(u8, name, "::")) |idx| {
-        return name[idx + 2 ..];
-    }
-    return name;
+    return ink.lang_spec.unqualified_name(name);
 }
 
 fn is_builtin_numeric(name: []const u8) bool {
-    const base = unqualified_name(name);
-    return std.mem.eql(u8, base, "int") or std.mem.eql(u8, base, "uint") or std.mem.eql(u8, base, "float");
+    return ink.lang_spec.is_builtin_numeric_type_name(name);
 }
 
 fn is_builtin_bool(name: []const u8) bool {
@@ -1672,6 +1739,22 @@ fn is_numeric_key(key: type_key) bool {
     };
 }
 
+fn is_int_type_key(key: type_key) bool {
+    const base = type_key_base_name(key) orelse return false;
+    return ink.lang_spec.is_int_type_name(base);
+}
+
+fn is_uint_type_key(key: type_key) bool {
+    const base = type_key_base_name(key) orelse return false;
+    return ink.lang_spec.is_unsigned_int_type_name(base);
+}
+
+fn is_flag_type_key(ctx: *typecheck_ctx, key: type_key) bool {
+    const base = type_key_base_name(key) orelse return false;
+    if (ctx.enums.get(base)) |info| return info.is_flag;
+    return false;
+}
+
 fn report_type_mismatch(
     ctx: *typecheck_ctx,
     message: []const u8,
@@ -1784,6 +1867,14 @@ fn report_unknown_call(
         .span = ctx.span_for_node(call_id),
         .source_id = ctx.source_for_node(call_id),
     }) catch {};
+}
+
+fn allow_unknown_method(ctx: *typecheck_ctx, receiver: ?TypeId, self_name: ?[]const u8) bool {
+    if (receiver == null or self_name == null) return false;
+    if (ctx.type_name_from_type_id(receiver.?)) |recv_name| {
+        return std.mem.eql(u8, recv_name, self_name.?);
+    }
+    return false;
 }
 
 fn append_trait_requirements(
@@ -1964,6 +2055,7 @@ fn check_trait_impls(ctx: *typecheck_ctx, roots: []const uir_mod.uir_identifier)
         if (impl.negative) continue;
 
         const trait_name = ctx.string_value(impl.by_trait);
+        if (std.mem.eql(u8, trait_name, ink.lang_spec.inherent_impl_trait_name)) continue;
         const type_name = ctx.string_value(impl.for_struct);
         const info = ctx.traits.get(trait_name) orelse continue;
 
@@ -2006,7 +2098,18 @@ fn ensure_bool(ctx: *typecheck_ctx, ty: TypeId, span_id: uir_mod.uir_identifier)
 fn ensure_numeric(ctx: *typecheck_ctx, ty: TypeId, span_id: uir_mod.uir_identifier) void {
     const key = ctx.to_type_key(ty);
     if (key == .unknown) {
-        _ = ctx.types.unify(ty, ctx.types.named("int"));
+        _ = ctx.types.unify(ty, ctx.types.named(ink.lang_spec.default_unsigned_int_name));
+        return;
+    }
+    if (!is_numeric_key(key)) {
+        report_expected_kind(ctx, "numeric type", key, span_id);
+    }
+}
+
+fn ensure_numeric_signed(ctx: *typecheck_ctx, ty: TypeId, span_id: uir_mod.uir_identifier) void {
+    const key = ctx.to_type_key(ty);
+    if (key == .unknown) {
+        _ = ctx.types.unify(ty, ctx.types.named(ink.lang_spec.default_signed_int_name));
         return;
     }
     if (!is_numeric_key(key)) {
@@ -2100,6 +2203,12 @@ fn is_unit_expr(ctx: *typecheck_ctx, id: uir_mod.uir_identifier) bool {
 fn element_type_from_container(ctx: *typecheck_ctx, key: type_key) ?type_key {
     _ = ctx;
     return switch (key) {
+        .name => |name| blk: {
+            if (std.mem.eql(u8, name, "string")) {
+                break :blk .{ .name = "char" };
+            }
+            break :blk null;
+        },
         .applied => |ap| blk: {
             if (std.mem.eql(u8, ap.base, "slice")) {
                 if (ap.args.len < 1) break :blk null;
@@ -2211,6 +2320,34 @@ fn infer_enum_constructor(
     }
 
     return return_ty;
+}
+
+fn infer_enum_variant_value(
+    ctx: *typecheck_ctx,
+    name: []const u8,
+) ?TypeId {
+    const split = split_enum_constructor_name(name) orelse return null;
+    const info = ctx.enums.get(split.enum_name) orelse return null;
+
+    var payload: ?uir_mod.uir_identifier = null;
+    var found = false;
+    for (info.variants) |variant| {
+        if (std.mem.eql(u8, ctx.string_value(variant.name), split.variant_name)) {
+            payload = variant.payload;
+            found = true;
+            break;
+        }
+    }
+    if (!found) return null;
+
+    if (!info.is_flag and payload != null) {
+        return null;
+    }
+
+    var local_generics = string_map(TypeId).init(ctx.allocator);
+    defer local_generics.deinit();
+    ctx.add_type_generic_constraints(info.generics, &[_]uir_mod.uir.function_decl.where_req{}, &local_generics);
+    return enum_return_type(ctx, split.enum_name, info, &local_generics);
 }
 
 fn infer_call_base(ctx: *typecheck_ctx, base_id: uir_mod.uir_identifier) ?struct { name: []const u8, receiver: ?uir_mod.uir_identifier } {
@@ -2338,7 +2475,7 @@ fn infer_operator(
         const left_key = ctx.to_type_key(left_inner);
         const left_base = type_key_base_name(left_key);
         const left_non_builtin = blk: {
-            if (left_key != .unknown) break :blk left_base != null and !is_builtin_type(left_base.?);
+            if (left_key != .unknown) break :blk left_base != null and !is_builtin_type(left_base.?) and !is_flag_type_key(ctx, left_key);
             const resolved = ctx.types.resolve(left_inner);
             if (ctx.types.types.items[resolved] == .tvar and ctx.types.types.items[resolved].tvar.constraints.items.len > 0) {
                 break :blk true;
@@ -2391,6 +2528,41 @@ fn infer_operator(
             ensure_bool(ctx, right_inner, right_id);
             const out = ctx.types.named("bool");
             return if (has_atomic) wrap_atomic(ctx, out) else out;
+        },
+        .bit_and, .bit_or, .bit_xor => {
+            const left_key = ctx.to_type_key(left_inner);
+            const right_key = ctx.to_type_key(right_inner);
+            const left_flag = is_flag_type_key(ctx, left_key);
+            const right_flag = is_flag_type_key(ctx, right_key);
+            if (left_flag or right_flag) {
+                if (!ctx.types.unify(left_inner, right_inner) and left_key != .unknown and right_key != .unknown) {
+                    report_type_mismatch(ctx, "bitwise operator type mismatch", left_key, right_key, id);
+                }
+                const out = if (left_flag) left_inner else right_inner;
+                return if (has_atomic) wrap_atomic(ctx, out) else out;
+            }
+            ensure_numeric(ctx, left_inner, left_id);
+            ensure_numeric(ctx, right_inner, right_id);
+            if (!ctx.types.unify(left_inner, right_inner) and left_key != .unknown and right_key != .unknown) {
+                report_type_mismatch(ctx, "operator type mismatch", left_key, right_key, id);
+            }
+            return if (has_atomic) wrap_atomic(ctx, left_inner) else left_inner;
+        },
+        .shl, .shr => {
+            const left_key = ctx.to_type_key(left_inner);
+            const right_key = ctx.to_type_key(right_inner);
+            if (is_flag_type_key(ctx, left_key)) {
+                if (right_key != .unknown and !is_numeric_key(right_key)) {
+                    report_type_mismatch(ctx, "shift requires numeric right operand", left_key, right_key, right_id);
+                }
+                return if (has_atomic) wrap_atomic(ctx, left_inner) else left_inner;
+            }
+            ensure_numeric(ctx, left_inner, left_id);
+            ensure_numeric(ctx, right_inner, right_id);
+            if (!ctx.types.unify(left_inner, right_inner) and left_key != .unknown and right_key != .unknown) {
+                report_type_mismatch(ctx, "operator type mismatch", left_key, right_key, id);
+            }
+            return if (has_atomic) wrap_atomic(ctx, left_inner) else left_inner;
         },
         else => {
             ensure_numeric(ctx, left_inner, left_id);
@@ -2447,12 +2619,12 @@ fn infer_unary(ctx: *typecheck_ctx, un: uir_unary, self_name: ?[]const u8, gener
             if (node == .applied and std.mem.eql(u8, node.applied.base, "box") and node.applied.args.len >= 1) {
                 return node.applied.args[0];
             }
-            return ctx.types.named("int");
+            return ctx.types.named(ink.lang_spec.default_signed_int_name);
         },
         .box => return ctx.types.applied("box", &.{right}),
         .sleep => {
             ensure_deadline_source(ctx, right, un.right);
-            return ctx.types.applied("result", &.{ ctx.types.named("int"), ctx.types.named("io_error") });
+            return ctx.types.applied("result", &.{ ctx.types.named(ink.lang_spec.default_signed_int_name), ctx.types.named("io_error") });
         },
         .timeout => {
             ensure_duration(ctx, right, un.right);
@@ -2512,12 +2684,24 @@ fn infer_unary(ctx: *typecheck_ctx, un: uir_unary, self_name: ?[]const u8, gener
             ensure_bool(ctx, right, un.right);
             return ctx.types.named("bool");
         },
-        .bit_not, .neg => {
+        .bit_not => {
             if (atomic_inner_type(ctx, right)) |inner| {
-                ensure_numeric(ctx, inner, un.right);
+                if (!is_flag_type_key(ctx, ctx.to_type_key(inner))) {
+                    ensure_numeric(ctx, inner, un.right);
+                }
                 return wrap_atomic(ctx, inner);
             }
-            ensure_numeric(ctx, right, un.right);
+            if (!is_flag_type_key(ctx, ctx.to_type_key(right))) {
+                ensure_numeric(ctx, right, un.right);
+            }
+            return right;
+        },
+        .neg => {
+            if (atomic_inner_type(ctx, right)) |inner| {
+                ensure_numeric_signed(ctx, inner, un.right);
+                return wrap_atomic(ctx, inner);
+            }
+            ensure_numeric_signed(ctx, right, un.right);
             return right;
         },
         .ret => {
@@ -2673,13 +2857,13 @@ fn infer_intrinsic(ctx: *typecheck_ctx, call: uir_intrinsic, self_name: ?[]const
     for (call.args) |arg| {
         _ = ctx.infer_expr(arg, self_name, generics, locals, null);
     }
-    if (std.mem.eql(u8, name, "alloc")) return ctx.types.named("int");
+    if (std.mem.eql(u8, name, "alloc")) return ctx.types.named(ink.lang_spec.default_signed_int_name);
     if (std.mem.eql(u8, name, "free")) return ctx.types.named("unit");
-    if (std.mem.eql(u8, name, "deref")) return ctx.types.named("int");
-    if (std.mem.eql(u8, name, "type_words")) return ctx.types.named("int");
+    if (std.mem.eql(u8, name, "deref")) return ctx.types.named(ink.lang_spec.default_signed_int_name);
+    if (std.mem.eql(u8, name, "type_words")) return ctx.types.named(ink.lang_spec.default_signed_int_name);
     if (std.mem.eql(u8, name, "store")) return ctx.types.named("unit");
-    if (std.mem.eql(u8, name, "result_ok")) return ctx.types.named("int");
-    if (std.mem.eql(u8, name, "result_err")) return ctx.types.named("int");
+    if (std.mem.eql(u8, name, "result_ok")) return ctx.types.named(ink.lang_spec.default_signed_int_name);
+    if (std.mem.eql(u8, name, "result_err")) return ctx.types.named(ink.lang_spec.default_signed_int_name);
     if (std.mem.eql(u8, name, "result_is_ok")) return ctx.types.named("bool");
     if (std.mem.eql(u8, name, "result_unwrap")) return ctx.types.new_var();
     if (std.mem.eql(u8, name, "result_unwrap_err")) return ctx.types.new_var();
@@ -2727,7 +2911,8 @@ fn infer_decl_node(ctx: *typecheck_ctx, node: uir_mod.uir, self_name: ?[]const u
 fn infer_node(ctx: *typecheck_ctx, id: uir_mod.uir_identifier, self_name: ?[]const u8, generics: *string_map(TypeId), locals: *string_map(TypeId), return_type: ?TypeId) TypeId {
     const node = ctx.nodes[@intCast(id.idx)];
     return switch (node) {
-        .integer => ctx.types.named("int"),
+        .integer => ctx.types.new_numeric_literal(),
+        .character => ctx.types.named("char"),
         .float => ctx.types.named("float"),
         .duration => ctx.types.named("duration"),
         .boolean => ctx.types.named("bool"),
@@ -2736,6 +2921,7 @@ fn infer_node(ctx: *typecheck_ctx, id: uir_mod.uir_identifier, self_name: ?[]con
         .identifier => |ident| {
             const name = ctx.string_value(ident);
             if (locals.get(name)) |ty| return ty;
+            if (infer_enum_variant_value(ctx, name)) |enum_ty| return enum_ty;
             return ctx.types.new_var();
         },
         .unary => |un| infer_unary(ctx, un, self_name, generics, locals, return_type),
@@ -3117,11 +3303,13 @@ fn resolve_method_call(
             }
             if (found) |ret| return ret;
             if (call_id) |id| {
-                var call_args = std.array_list.Managed(TypeId).init(ctx.allocator);
-                defer call_args.deinit();
-                call_args.append(recv_type) catch {};
-                for (arg_types) |arg| call_args.append(arg) catch {};
-                report_unknown_call(ctx, name, call_args.items, recv_type, id);
+                if (!allow_unknown_method(ctx, recv_type, self_name)) {
+                    var call_args = std.array_list.Managed(TypeId).init(ctx.allocator);
+                    defer call_args.deinit();
+                    call_args.append(recv_type) catch {};
+                    for (arg_types) |arg| call_args.append(arg) catch {};
+                    report_unknown_call(ctx, name, call_args.items, recv_type, id);
+                }
             }
             return ctx.types.new_var();
         },
@@ -3136,11 +3324,13 @@ fn resolve_method_call(
                 }
             }
             if (call_id) |id| {
-                var call_args = std.array_list.Managed(TypeId).init(ctx.allocator);
-                defer call_args.deinit();
-                call_args.append(recv_type) catch {};
-                for (arg_types) |arg| call_args.append(arg) catch {};
-                report_unknown_call(ctx, name, call_args.items, recv_type, id);
+                if (!allow_unknown_method(ctx, recv_type, self_name)) {
+                    var call_args = std.array_list.Managed(TypeId).init(ctx.allocator);
+                    defer call_args.deinit();
+                    call_args.append(recv_type) catch {};
+                    for (arg_types) |arg| call_args.append(arg) catch {};
+                    report_unknown_call(ctx, name, call_args.items, recv_type, id);
+                }
             }
             return ctx.types.new_var();
         },
@@ -3157,11 +3347,13 @@ fn resolve_method_call(
                         }
                     }
                     if (call_id) |id| {
-                        var call_args = std.array_list.Managed(TypeId).init(ctx.allocator);
-                        defer call_args.deinit();
-                        call_args.append(recv_type) catch {};
-                        for (arg_types) |arg| call_args.append(arg) catch {};
-                        report_unknown_call(ctx, name, call_args.items, recv_type, id);
+                        if (!allow_unknown_method(ctx, recv_type, self_name)) {
+                            var call_args = std.array_list.Managed(TypeId).init(ctx.allocator);
+                            defer call_args.deinit();
+                            call_args.append(recv_type) catch {};
+                            for (arg_types) |arg| call_args.append(arg) catch {};
+                            report_unknown_call(ctx, name, call_args.items, recv_type, id);
+                        }
                     }
                     return ctx.types.new_var();
                 }
@@ -3179,11 +3371,13 @@ fn resolve_method_call(
                     }
                 }
                 if (call_id) |id| {
-                    var call_args = std.array_list.Managed(TypeId).init(ctx.allocator);
-                    defer call_args.deinit();
-                    call_args.append(recv_type) catch {};
-                    for (arg_types) |arg| call_args.append(arg) catch {};
-                    report_unknown_call(ctx, name, call_args.items, recv_type, id);
+                    if (!allow_unknown_method(ctx, recv_type, self_name)) {
+                        var call_args = std.array_list.Managed(TypeId).init(ctx.allocator);
+                        defer call_args.deinit();
+                        call_args.append(recv_type) catch {};
+                        for (arg_types) |arg| call_args.append(arg) catch {};
+                        report_unknown_call(ctx, name, call_args.items, recv_type, id);
+                    }
                 }
                 return ctx.types.new_var();
             }
@@ -3470,6 +3664,8 @@ fn auto_trait_satisfied(
     visited_types: *string_map(void),
 ) bool {
     const base = unqualified_name(trait_name);
+    if (std.mem.eql(u8, base, "int")) return is_int_type_key(ty);
+    if (std.mem.eql(u8, base, "uint")) return is_uint_type_key(ty);
     if (std.mem.eql(u8, base, "sized")) return auto_trait_sized(ctx, ty, visited_traits, visited_types);
     if (std.mem.eql(u8, base, "send")) return auto_trait_send(ctx, ty, visited_traits, visited_types);
     if (std.mem.eql(u8, base, "sync")) return auto_trait_sync(ctx, ty, visited_traits, visited_types);

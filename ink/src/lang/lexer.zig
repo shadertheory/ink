@@ -45,7 +45,7 @@ pub const lexer = struct {
             .head = 0,
             .tail = 0,
             .indent = undefined,
-            .cursor = undefined,
+            .cursor = 0,
             .dedent = 0,
             .line_start = true,
         };
@@ -109,6 +109,9 @@ pub const lexer = struct {
         }
 
         self.line_start = true;
+        if (self.current == spec.whitespace.newline or self.current == spec.eof_char) {
+            return self.delineate_from(.new_line, start);
+        }
         const current_depth = self.indent[self.cursor - 1];
 
         if (tab_count > current_depth) {
@@ -196,6 +199,102 @@ pub const lexer = struct {
         return self.delineate_from(.label, start);
     }
 
+    fn match_char_token(self: *lexer) ?token {
+        if (self.current != '\'') return null;
+        const start_quote = self.head;
+        const start = self.head + 1;
+        if (self.tail >= self.source.len) {
+            self.read_char();
+            return self.delineate_from(.illegal, start_quote);
+        }
+
+        const first = self.source[self.tail];
+        if (first == spec.whitespace.newline) {
+            self.read_char();
+            return self.delineate_from(.illegal, start_quote);
+        }
+
+        var end_idx: usize = 0;
+        if (first == '\\') {
+            const esc_idx = self.tail + 1;
+            if (esc_idx >= self.source.len) {
+                self.read_char();
+                return self.delineate_from(.illegal, start_quote);
+            }
+            const esc = self.source[esc_idx];
+            switch (esc) {
+                'x' => {
+                    if (esc_idx + 2 >= self.source.len) {
+                        self.read_char();
+                        return self.delineate_from(.illegal, start_quote);
+                    }
+                    if (!is_hex_digit(self.source[esc_idx + 1]) or !is_hex_digit(self.source[esc_idx + 2])) {
+                        self.read_char();
+                        return self.delineate_from(.illegal, start_quote);
+                    }
+                    end_idx = esc_idx + 3;
+                },
+                'u' => {
+                    if (esc_idx + 1 >= self.source.len) {
+                        self.read_char();
+                        return self.delineate_from(.illegal, start_quote);
+                    }
+                    if (self.source[esc_idx + 1] == '{') {
+                        var i: usize = esc_idx + 2;
+                        var digits: usize = 0;
+                        while (i < self.source.len and self.source[i] != '}') : (i += 1) {
+                            if (!is_hex_digit(self.source[i])) {
+                                self.read_char();
+                                return self.delineate_from(.illegal, start_quote);
+                            }
+                            digits += 1;
+                        }
+                        if (i >= self.source.len or digits == 0) {
+                            self.read_char();
+                            return self.delineate_from(.illegal, start_quote);
+                        }
+                        end_idx = i + 1;
+                    } else {
+                        if (esc_idx + 4 >= self.source.len) {
+                            self.read_char();
+                            return self.delineate_from(.illegal, start_quote);
+                        }
+                        if (!is_hex_digit(self.source[esc_idx + 1]) or !is_hex_digit(self.source[esc_idx + 2]) or
+                            !is_hex_digit(self.source[esc_idx + 3]) or !is_hex_digit(self.source[esc_idx + 4]))
+                        {
+                            self.read_char();
+                            return self.delineate_from(.illegal, start_quote);
+                        }
+                        end_idx = esc_idx + 5;
+                    }
+                },
+                'n', 'r', 't', '0', '\\', '\'', '"' => end_idx = esc_idx + 1,
+                else => {
+                    self.read_char();
+                    return self.delineate_from(.illegal, start_quote);
+                },
+            }
+            if (end_idx >= self.source.len or self.source[end_idx] != '\'') {
+                self.read_char();
+                return self.delineate_from(.illegal, start_quote);
+            }
+        } else {
+            end_idx = self.tail + 1;
+            if (end_idx >= self.source.len or self.source[end_idx] != '\'') {
+                if (is_identifier_start(first)) return null;
+                self.read_char();
+                return self.delineate_from(.illegal, start_quote);
+            }
+        }
+
+        while (self.head < end_idx) {
+            self.read_char();
+        }
+        self.read_char();
+        const where = location{ .start = start, .end = end_idx };
+        return token{ .which = .character, .where = where, .what = self.delineate_source_slice(where) };
+    }
+
     fn match_string_token(self: *lexer) ?token {
         if (self.current != '"') return null;
         const start_quote = self.head;
@@ -259,6 +358,17 @@ pub const lexer = struct {
 
     fn match_end_of_file(self: *lexer) ?token {
         if (self.current == spec.eof_char) {
+            if (self.cursor > 1) {
+                var pops: u8 = 0;
+                while (self.cursor > 1) {
+                    self.pop();
+                    pops += 1;
+                }
+                if (pops > 1) {
+                    self.dedent = pops - 1;
+                }
+                return self.delineate(.dedent);
+            }
             return self.delineate(.end_of_file);
         }
         return null;
@@ -280,6 +390,13 @@ pub const lexer = struct {
         return std.mem.indexOfScalar(u8, spec.identifier_continue, c) != null;
     }
 
+    fn is_hex_digit(c: u8) bool {
+        if (c >= '0' and c <= '9') return true;
+        if (c >= 'a' and c <= 'f') return true;
+        if (c >= 'A' and c <= 'F') return true;
+        return false;
+    }
+
     pub fn next(self: *lexer) !?token {
         if (self.dedent > 0) {
             self.dedent -= 1;
@@ -297,6 +414,10 @@ pub const lexer = struct {
         if (self.match_string_token()) |string| {
             self.line_start = false;
             return string;
+        }
+        if (self.match_char_token()) |char_tok| {
+            self.line_start = false;
+            return char_tok;
         }
         if (self.match_label_token()) |label| {
             self.line_start = false;

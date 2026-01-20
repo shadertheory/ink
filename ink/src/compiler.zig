@@ -94,11 +94,38 @@ pub const compiler = struct {
         tokens: []const ink.token,
         nodes: []const *ink.node,
         registry: []const *ink.node,
+        owns_tokens: bool = true,
+        owns_arena: bool = true,
+        owns_nodes: bool = false,
 
         fn deinit(self: *ast_file, allocator: mem_allocator) void {
-            allocator.free(self.tokens);
-            self.arena.deinit();
+            if (self.owns_nodes) {
+                allocator.free(self.nodes);
+            }
+            if (self.owns_tokens) {
+                allocator.free(self.tokens);
+            }
+            if (self.owns_arena) {
+                self.arena.deinit();
+            }
         }
+    };
+
+    const implicit_import = struct {
+        module: []const u8,
+        alias: ?[]const u8 = null,
+        where: ink.location,
+        source_id: source_id,
+    };
+
+    const module_build = struct {
+        name: []const u8,
+        sources: []const source_id,
+        dep_names: []const []const u8,
+        nodes: []const *ink.node,
+        node_sources: []const source_id,
+        files: []ast_file,
+        implicit_imports: []const implicit_import,
     };
 
     const macro_overload = struct {
@@ -197,7 +224,7 @@ pub const compiler = struct {
         macro_arenas: *array_list(*arena_allocator),
         checks: ?sandbox_mod.Checks = null,
         node_set: ?*std.AutoHashMap(usize, void) = null,
-        files: []const ast_file,
+        files: []ast_file,
 
         fn slice_error(
             self: *macro_expander,
@@ -1566,9 +1593,11 @@ pub const compiler = struct {
             .@"enum" => |e| e.attributes,
             .impl => |i| i.attributes,
             .import => |i| i.attributes,
+            .mod => |m| m.attributes,
             .type_alias => |t| t.attributes,
             .@"const" => |c| c.attributes,
             .@"var" => |v| v.attributes,
+            .bind => |b| b.attributes,
         };
     }
 
@@ -1580,10 +1609,175 @@ pub const compiler = struct {
             .@"enum" => |e| e.where,
             .impl => |i| i.where,
             .import => |i| i.where,
+            .mod => |m| m.where,
             .type_alias => |t| t.where,
             .@"const" => |c| c.where,
             .@"var" => |v| v.where,
+            .bind => |b| b.where,
         };
+    }
+
+    fn span_from_location(loc: ink.location) span {
+        return .{ .start = loc.start, .end = loc.end };
+    }
+
+    fn find_file_by_source(files: []ast_file, sid: source_id) ?*ast_file {
+        for (files) |*file| {
+            if (file.source_id == sid) return file;
+        }
+        return null;
+    }
+
+    fn make_import_node(
+        node_allocator: mem_allocator,
+        module_name: []const u8,
+        alias: ?[]const u8,
+        where: ink.location,
+    ) mem_allocator.Error!*ink.node {
+        const node = try node_allocator.create(ink.node);
+        const module_ident = ink.identifier{ .string = module_name, .owner = .ref, .where = where };
+        const alias_id: ?ink.identifier = if (alias) |name| .{ .string = name, .owner = .ref, .where = where } else null;
+        node.* = .{ .decl = .{ .import = .{
+            .attributes = &[_]ink.ast.attribute{},
+            .module = module_ident,
+            .item = null,
+            .alias = alias_id,
+            .where = where,
+        } } };
+        return node;
+    }
+
+    fn extract_inline_modules(
+        allocator: mem_allocator,
+        module_name_set: *string_map(void),
+        nodes: []const *ink.node,
+        node_sources: []const source_id,
+        files: []ast_file,
+        diags: *array_list(diagnostic),
+        out_inline: *array_list(module_build),
+        out_imports: *array_list(implicit_import),
+    ) mem_allocator.Error!struct { nodes: []const *ink.node, sources: []const source_id } {
+        _ = out_imports;
+
+        for (files) |*file| {
+            const node_alloc = if (file.owns_arena) file.arena.allocator() else allocator;
+            var file_nodes = std.array_list.Managed(*ink.node).init(node_alloc);
+            for (file.nodes) |node| {
+                if (node.* == .decl and node.decl == .mod) continue;
+                file_nodes.append(node) catch return error.OutOfMemory;
+            }
+            const new_nodes = file_nodes.toOwnedSlice() catch return error.OutOfMemory;
+            if (file.owns_nodes) {
+                allocator.free(file.nodes);
+            }
+            file.nodes = new_nodes;
+            file.owns_nodes = !file.owns_arena;
+        }
+
+        var filtered_nodes = array_list(*ink.node).init(allocator);
+        errdefer filtered_nodes.deinit();
+        var filtered_sources = array_list(source_id).init(allocator);
+        errdefer filtered_sources.deinit();
+
+        for (nodes, 0..) |node, idx| {
+            if (node.* == .decl and node.decl == .mod) {
+                const mod_decl = node.decl.mod;
+                const mod_name = mod_decl.name.string;
+                const sid: ?source_id = if (idx < node_sources.len) node_sources[idx] else null;
+                if (module_name_set.contains(mod_name)) {
+                    try diags.append(.{
+                        .danger = .@"error",
+                        .message = "duplicate module name",
+                        .span = span_from_location(mod_decl.where),
+                        .source_id = sid,
+                    });
+                    continue;
+                }
+                try module_name_set.put(mod_name, {});
+
+                const items_len = mod_decl.items.len;
+                var item_nodes: []const *ink.node = &.{};
+                var item_sources: []const source_id = &.{};
+                var inline_files: []ast_file = &.{};
+
+                if (items_len > 0) {
+                    var nodes_buf = try allocator.alloc(*ink.node, items_len);
+                    for (mod_decl.items, 0..) |item_ref, j| {
+                        nodes_buf[j] = ink.ast.deref(item_ref);
+                    }
+                    item_nodes = nodes_buf;
+
+                    if (sid) |src_id| {
+                        const sources_buf = try allocator.alloc(source_id, items_len);
+                        for (sources_buf) |*slot| slot.* = src_id;
+                        item_sources = sources_buf;
+
+                        const base_file = find_file_by_source(files, src_id);
+                        if (base_file == null) {
+                            try diags.append(.{
+                                .danger = .@"error",
+                                .message = "inline module source not found",
+                                .span = span_from_location(mod_decl.where),
+                                .source_id = src_id,
+                            });
+                            allocator.free(nodes_buf);
+                            allocator.free(sources_buf);
+                            continue;
+                        }
+
+                        inline_files = try allocator.alloc(ast_file, 1);
+                        const file_nodes_buf = try allocator.alloc(*ink.node, items_len);
+                        std.mem.copyForwards(*ink.node, file_nodes_buf, item_nodes);
+                        inline_files[0] = .{
+                            .source_id = base_file.?.source_id,
+                            .arena = base_file.?.arena,
+                            .tokens = base_file.?.tokens,
+                            .nodes = file_nodes_buf,
+                            .registry = base_file.?.registry,
+                            .owns_tokens = false,
+                            .owns_arena = false,
+                            .owns_nodes = true,
+                        };
+                    } else {
+                        allocator.free(nodes_buf);
+                        continue;
+                    }
+                }
+
+                try out_inline.append(.{
+                    .name = mod_name,
+                    .sources = &.{},
+                    .dep_names = &.{},
+                    .nodes = item_nodes,
+                    .node_sources = item_sources,
+                    .files = inline_files,
+                    .implicit_imports = &.{},
+                });
+                continue;
+            }
+
+            filtered_nodes.append(node) catch return error.OutOfMemory;
+            if (idx < node_sources.len) {
+                filtered_sources.append(node_sources[idx]) catch return error.OutOfMemory;
+            }
+        }
+
+        return .{
+            .nodes = try filtered_nodes.toOwnedSlice(),
+            .sources = try filtered_sources.toOwnedSlice(),
+        };
+    }
+
+    fn cleanup_module_builds(allocator: mem_allocator, builds: []module_build) void {
+        for (builds) |*build| {
+            if (build.nodes.len != 0) allocator.free(build.nodes);
+            if (build.node_sources.len != 0) allocator.free(build.node_sources);
+            if (build.implicit_imports.len != 0) allocator.free(build.implicit_imports);
+            if (build.files.len != 0) {
+                for (build.files) |*file| file.deinit(allocator);
+                allocator.free(build.files);
+            }
+        }
     }
 
     fn tree_is_newline(ctx: *macro_ctx_mod.macro_context, tree_id: u32) bool {
@@ -1651,122 +1845,27 @@ pub const compiler = struct {
             }
         }
 
-        // 2) module graph
-        var module_names = string_map(module_id).init(allocator);
-        defer module_names.deinit();
+        // 2) parse per file + collect inline modules
+        var module_builds = array_list(module_build).init(allocator);
+        errdefer module_builds.deinit();
+        var cleanup_builds = true;
+        errdefer if (cleanup_builds) cleanup_module_builds(allocator, module_builds.items);
 
-        var modules = array_list(module).init(allocator);
-        defer {
-            for (modules.items) |mod| allocator.free(mod.deps);
-            modules.deinit();
-        }
-
-        for (req.modules, 0..) |spec, idx| {
-            if (module_names.contains(spec.name)) {
-                try diags.append(.{ .danger = .@"error", .message = "duplicate module name", .span = null });
-                continue;
-            }
-            const id: module_id = @intCast(idx);
-            try module_names.put(spec.name, id);
-            try modules.append(.{
-                .id = id,
-                .name = spec.name,
-                .sources = spec.sources,
-                .deps = &[_]module_id{},
-            });
-        }
-
-        // resolve deps + validate sources
-        for (req.modules, 0..) |spec, idx| {
-            var deps = try allocator.alloc(module_id, spec.deps.len);
-            for (spec.deps, 0..) |dep_name, j| {
-                if (module_names.get(dep_name)) |dep_id| {
-                    deps[j] = dep_id;
-                } else {
-                    try diags.append(.{ .danger = .@"error", .message = "unknown module dependency", .span = null });
-                    deps[j] = 0;
-                }
-            }
-            for (spec.sources) |sid| {
-                if (!sources_by_id.contains(sid)) {
-                    try diags.append(.{ .danger = .@"error", .message = "unknown source id", .span = null });
-                }
-            }
-            modules.items[idx].deps = deps;
-        }
-
-        if (has_error(diags.items)) {
-            return finish(&diags, &diag_messages, req.sources, null, null, null, null, null, false);
-        }
-
-        // 3) parse per file + 4) build per-module node list
-        var module_nodes = try allocator.alloc([]const *ink.node, modules.items.len);
-        var module_node_sources = try allocator.alloc([]const src.source_id, modules.items.len);
-        var module_raw_nodes = try allocator.alloc([]const *ink.node, modules.items.len);
-        var module_raw_sources = try allocator.alloc([]const src.source_id, modules.items.len);
-        var module_files = try allocator.alloc([]ast_file, modules.items.len);
-        var module_imports = try allocator.alloc([]const resolver.module_import, modules.items.len);
-        var module_import_specs = try allocator.alloc(?[]const desugar.import_decl, modules.items.len);
-        var module_foreigns = try allocator.alloc([]const []const u8, modules.items.len);
-        var module_arenas = try allocator.alloc(arena_allocator, modules.items.len);
-        var module_value_exports = try allocator.alloc(string_map(void), modules.items.len);
-        var module_type_exports = try allocator.alloc(string_map(void), modules.items.len);
-        defer {
-            var i: usize = 0;
-            while (i < modules.items.len) : (i += 1) {
-                for (module_files[i]) |*file| file.deinit(allocator);
-                allocator.free(module_files[i]);
-                allocator.free(module_nodes[i]);
-                allocator.free(module_node_sources[i]);
-                allocator.free(module_raw_nodes[i]);
-                allocator.free(module_raw_sources[i]);
-                allocator.free(module_imports[i]);
-                if (module_import_specs[i]) |imports| allocator.free(imports);
-                free_foreign_list(allocator, module_foreigns[i]);
-                module_arenas[i].deinit();
-                module_value_exports[i].deinit();
-                module_type_exports[i].deinit();
-            }
-            allocator.free(module_files);
-            allocator.free(module_nodes);
-            allocator.free(module_node_sources);
-            allocator.free(module_raw_nodes);
-            allocator.free(module_raw_sources);
-            allocator.free(module_imports);
-            allocator.free(module_import_specs);
-            allocator.free(module_foreigns);
-            allocator.free(module_arenas);
-            allocator.free(module_value_exports);
-            allocator.free(module_type_exports);
-        }
-
-        for (module_import_specs) |*slot| slot.* = null;
-        for (module_value_exports) |*exports| exports.* = string_map(void).init(allocator);
-        for (module_type_exports) |*exports| exports.* = string_map(void).init(allocator);
-
-        for (module_arenas) |*arena| {
-            arena.* = arena_allocator.init(allocator);
-        }
-
-        for (module_nodes) |*slot| slot.* = try allocator.alloc(*ink.node, 0);
-        for (module_node_sources) |*slot| slot.* = try allocator.alloc(src.source_id, 0);
-        for (module_raw_nodes) |*slot| slot.* = try allocator.alloc(*ink.node, 0);
-        for (module_raw_sources) |*slot| slot.* = try allocator.alloc(src.source_id, 0);
-        for (module_imports) |*slot| slot.* = try allocator.alloc(resolver.module_import, 0);
-        for (module_foreigns) |*slot| slot.* = try allocator.alloc([]const u8, 0);
-
-        for (modules.items, 0..) |mod, mi| {
+        for (req.modules) |spec| {
             var files = array_list(ast_file).init(allocator);
             errdefer files.deinit();
 
             var nodes = array_list(*ink.node).init(allocator);
             errdefer nodes.deinit();
 
-            var node_sources = array_list(src.source_id).init(allocator);
+            var node_sources = array_list(source_id).init(allocator);
             errdefer node_sources.deinit();
 
-            for (mod.sources) |sid| {
-                const compsrc = sources_by_id.get(sid).?;
+            for (spec.sources) |sid| {
+                const compsrc = sources_by_id.get(sid) orelse {
+                    try diags.append(.{ .danger = .@"error", .message = "unknown source id", .span = null });
+                    continue;
+                };
 
                 const tokens = try lex_all(allocator, compsrc.text, &diags, compsrc.id);
                 var parse = try ink.peg_parser.parse(allocator, tokens);
@@ -1846,6 +1945,8 @@ pub const compiler = struct {
                     .tokens = tokens,
                     .nodes = file_nodes,
                     .registry = registry_nodes,
+                    .owns_tokens = true,
+                    .owns_arena = true,
                 });
 
                 for (file_nodes) |n| {
@@ -1854,15 +1955,206 @@ pub const compiler = struct {
                 }
             }
 
-            module_files[mi] = try files.toOwnedSlice();
-
-            const raw_nodes = try nodes.toOwnedSlice();
-            const raw_sources = try node_sources.toOwnedSlice();
-            allocator.free(module_raw_nodes[mi]);
-            allocator.free(module_raw_sources[mi]);
-            module_raw_nodes[mi] = raw_nodes;
-            module_raw_sources[mi] = raw_sources;
+            try module_builds.append(.{
+                .name = spec.name,
+                .sources = spec.sources,
+                .dep_names = spec.deps,
+                .nodes = try nodes.toOwnedSlice(),
+                .node_sources = try node_sources.toOwnedSlice(),
+                .files = try files.toOwnedSlice(),
+                .implicit_imports = &.{},
+            });
         }
+
+        if (has_error(diags.items)) {
+            return finish(&diags, &diag_messages, req.sources, null, null, null, null, null, false);
+        }
+
+        var module_name_set = string_map(void).init(allocator);
+        defer module_name_set.deinit();
+        for (req.modules) |spec| {
+            if (module_name_set.contains(spec.name)) {
+                try diags.append(.{ .danger = .@"error", .message = "duplicate module name", .span = null });
+            } else {
+                try module_name_set.put(spec.name, {});
+            }
+        }
+
+        var build_index: usize = 0;
+        while (build_index < module_builds.items.len) : (build_index += 1) {
+            var implicit = array_list(implicit_import).init(allocator);
+            errdefer implicit.deinit();
+            var inline_mods = array_list(module_build).init(allocator);
+            errdefer inline_mods.deinit();
+
+            const filtered = try extract_inline_modules(
+                allocator,
+                &module_name_set,
+                module_builds.items[build_index].nodes,
+                module_builds.items[build_index].node_sources,
+                module_builds.items[build_index].files,
+                &diags,
+                &inline_mods,
+                &implicit,
+            );
+
+            allocator.free(module_builds.items[build_index].nodes);
+            allocator.free(module_builds.items[build_index].node_sources);
+            module_builds.items[build_index].nodes = filtered.nodes;
+            module_builds.items[build_index].node_sources = filtered.sources;
+            module_builds.items[build_index].implicit_imports = try implicit.toOwnedSlice();
+            implicit.deinit();
+
+            if (inline_mods.items.len != 0) {
+                try module_builds.appendSlice(inline_mods.items);
+            }
+            inline_mods.deinit();
+        }
+
+        if (has_error(diags.items)) {
+            return finish(&diags, &diag_messages, req.sources, null, null, null, null, null, false);
+        }
+
+        // 3) module graph (after inline)
+        var module_names = string_map(module_id).init(allocator);
+        defer module_names.deinit();
+
+        var modules = array_list(module).init(allocator);
+        defer {
+            for (modules.items) |mod| allocator.free(mod.deps);
+            modules.deinit();
+        }
+
+        for (module_builds.items, 0..) |build, idx| {
+            const id: module_id = @intCast(idx);
+            if (module_names.contains(build.name)) {
+                try diags.append(.{ .danger = .@"error", .message = "duplicate module name", .span = null });
+            } else {
+                try module_names.put(build.name, id);
+            }
+            try modules.append(.{
+                .id = id,
+                .name = build.name,
+                .sources = build.sources,
+                .deps = &[_]module_id{},
+            });
+        }
+
+        // resolve deps
+        for (module_builds.items, 0..) |build, idx| {
+            var deps = try allocator.alloc(module_id, build.dep_names.len);
+            for (build.dep_names, 0..) |dep_name, j| {
+                if (module_names.get(dep_name)) |dep_id| {
+                    deps[j] = dep_id;
+                } else {
+                    try diags.append(.{ .danger = .@"error", .message = "unknown module dependency", .span = null });
+                    deps[j] = 0;
+                }
+            }
+            modules.items[idx].deps = deps;
+        }
+
+        if (has_error(diags.items)) {
+            return finish(&diags, &diag_messages, req.sources, null, null, null, null, null, false);
+        }
+
+        // 4) allocate module arrays + fill per-module node list
+        var module_nodes = try allocator.alloc([]const *ink.node, modules.items.len);
+        var module_node_sources = try allocator.alloc([]const src.source_id, modules.items.len);
+        var module_raw_nodes = try allocator.alloc([]const *ink.node, modules.items.len);
+        var module_raw_sources = try allocator.alloc([]const src.source_id, modules.items.len);
+        var module_files = try allocator.alloc([]ast_file, modules.items.len);
+        var module_imports = try allocator.alloc([]const resolver.module_import, modules.items.len);
+        var module_import_specs = try allocator.alloc(?[]const desugar.import_decl, modules.items.len);
+        var module_foreigns = try allocator.alloc([]const []const u8, modules.items.len);
+        var module_arenas = try allocator.alloc(arena_allocator, modules.items.len);
+        var module_value_exports = try allocator.alloc(string_map(void), modules.items.len);
+        var module_type_exports = try allocator.alloc(string_map(void), modules.items.len);
+        defer {
+            var i: usize = 0;
+            while (i < modules.items.len) : (i += 1) {
+                for (module_files[i]) |*file| file.deinit(allocator);
+                allocator.free(module_files[i]);
+                allocator.free(module_nodes[i]);
+                allocator.free(module_node_sources[i]);
+                allocator.free(module_raw_nodes[i]);
+                allocator.free(module_raw_sources[i]);
+                allocator.free(module_imports[i]);
+                if (module_import_specs[i]) |imports| allocator.free(imports);
+                free_foreign_list(allocator, module_foreigns[i]);
+                module_arenas[i].deinit();
+                module_value_exports[i].deinit();
+                module_type_exports[i].deinit();
+            }
+            allocator.free(module_files);
+            allocator.free(module_nodes);
+            allocator.free(module_node_sources);
+            allocator.free(module_raw_nodes);
+            allocator.free(module_raw_sources);
+            allocator.free(module_imports);
+            allocator.free(module_import_specs);
+            allocator.free(module_foreigns);
+            allocator.free(module_arenas);
+            allocator.free(module_value_exports);
+            allocator.free(module_type_exports);
+        }
+
+        for (module_import_specs) |*slot| slot.* = null;
+        for (module_value_exports) |*exports| exports.* = string_map(void).init(allocator);
+        for (module_type_exports) |*exports| exports.* = string_map(void).init(allocator);
+
+        for (module_arenas) |*arena| {
+            arena.* = arena_allocator.init(allocator);
+        }
+
+        for (module_nodes) |*slot| slot.* = try allocator.alloc(*ink.node, 0);
+        for (module_node_sources) |*slot| slot.* = try allocator.alloc(src.source_id, 0);
+        for (module_raw_nodes) |*slot| slot.* = try allocator.alloc(*ink.node, 0);
+        for (module_raw_sources) |*slot| slot.* = try allocator.alloc(src.source_id, 0);
+        for (module_imports) |*slot| slot.* = try allocator.alloc(resolver.module_import, 0);
+        for (module_foreigns) |*slot| slot.* = try allocator.alloc([]const u8, 0);
+
+        for (module_builds.items, 0..) |*build, mi| {
+            module_files[mi] = build.files;
+
+            const base_nodes = build.nodes;
+            const base_sources = build.node_sources;
+            if (build.implicit_imports.len == 0) {
+                allocator.free(module_raw_nodes[mi]);
+                allocator.free(module_raw_sources[mi]);
+                module_raw_nodes[mi] = base_nodes;
+                module_raw_sources[mi] = base_sources;
+            } else {
+                const import_count = build.implicit_imports.len;
+                const total = import_count + base_nodes.len;
+                var combined_nodes = try allocator.alloc(*ink.node, total);
+                var combined_sources = try allocator.alloc(src.source_id, total);
+
+                for (build.implicit_imports, 0..) |imp, i| {
+                    combined_nodes[i] = try make_import_node(module_arenas[mi].allocator(), imp.module, imp.alias, imp.where);
+                    combined_sources[i] = imp.source_id;
+                }
+                if (base_nodes.len != 0) {
+                    std.mem.copyForwards(*ink.node, combined_nodes[import_count .. import_count + base_nodes.len], base_nodes);
+                    std.mem.copyForwards(src.source_id, combined_sources[import_count .. import_count + base_sources.len], base_sources);
+                }
+                allocator.free(module_raw_nodes[mi]);
+                allocator.free(module_raw_sources[mi]);
+                module_raw_nodes[mi] = combined_nodes;
+                module_raw_sources[mi] = combined_sources;
+                if (base_nodes.len != 0) allocator.free(base_nodes);
+                if (base_sources.len != 0) allocator.free(base_sources);
+            }
+
+            build.files = &.{};
+            build.nodes = &.{};
+            build.node_sources = &.{};
+            if (build.implicit_imports.len != 0) allocator.free(build.implicit_imports);
+            build.implicit_imports = &.{};
+        }
+
+        cleanup_builds = false;
+        module_builds.deinit();
 
         if (has_error(diags.items)) {
             return finish(&diags, &diag_messages, req.sources, null, null, null, null, null, false);
@@ -2084,7 +2376,7 @@ pub const compiler = struct {
         defer res.deinit();
 
         for (modules.items, 0..) |mod, mi| {
-            try res.add_module(mod.id, module_imports[mi], module_nodes[mi], &diags);
+            try res.add_module(mod.id, mod.name, module_imports[mi], module_nodes[mi], &diags);
         }
         for (modules.items, 0..) |mod, mi| {
             try res.resolve_module(mod.id, module_nodes[mi], module_node_sources[mi], &diags);
@@ -2447,7 +2739,9 @@ pub const compiler = struct {
                     try add_export(type_exports, e.name.string);
                     try add_export(value_exports, e.name.string);
                 },
+                .bind => |_| {},
                 .import => |_| {},
+                .mod => |_| {},
                 .impl => |_| {},
             }
         }
@@ -2484,6 +2778,8 @@ pub const compiler = struct {
         module_name: []const u8,
         value_exports: *const string_map(void),
         type_exports: *const string_map(void),
+        declared_values: string_map(void),
+        declared_types: string_map(void),
         prefixed: string_map([]const u8),
         scopes: std.ArrayListUnmanaged(scope) = .{},
 
@@ -2500,6 +2796,8 @@ pub const compiler = struct {
                 .module_name = module_name,
                 .value_exports = value_exports,
                 .type_exports = type_exports,
+                .declared_values = string_map(void).init(allocator),
+                .declared_types = string_map(void).init(allocator),
                 .prefixed = string_map([]const u8).init(allocator),
                 .scopes = .{},
             };
@@ -2511,6 +2809,8 @@ pub const compiler = struct {
                 self.scopes.items[i - 1].deinit();
             }
             self.scopes.deinit(self.allocator);
+            self.declared_values.deinit();
+            self.declared_types.deinit();
             self.prefixed.deinit();
         }
 
@@ -2572,6 +2872,8 @@ pub const compiler = struct {
             if (std.mem.eql(u8, name, "true")) return true;
             if (std.mem.eql(u8, name, "false")) return true;
             if (std.mem.eql(u8, name, "none")) return true;
+            if (std.mem.eql(u8, name, "undefined")) return true;
+            if (std.mem.eql(u8, name, "range")) return true;
             if (std.mem.eql(u8, name, "cancel")) return true;
             if (std.mem.eql(u8, name, "error")) return true;
             if (std.mem.eql(u8, name, "token_tree_kind")) return true;
@@ -2582,25 +2884,51 @@ pub const compiler = struct {
         }
 
         fn is_builtin_type_name(name: []const u8) bool {
-            return std.mem.eql(u8, name, "int") or std.mem.eql(u8, name, "uint") or
-                std.mem.eql(u8, name, "u8") or std.mem.eql(u8, name, "float") or std.mem.eql(u8, name, "bool") or
-                std.mem.eql(u8, name, "string") or std.mem.eql(u8, name, "token_stream") or
-                std.mem.eql(u8, name, "token_tree") or std.mem.eql(u8, name, "token") or
-                std.mem.eql(u8, name, "token_group") or std.mem.eql(u8, name, "token_kind") or
-                std.mem.eql(u8, name, "token_tree_kind") or std.mem.eql(u8, name, "delimiter") or
-                std.mem.eql(u8, name, "span") or std.mem.eql(u8, name, "symbol") or
-                std.mem.eql(u8, name, "type") or std.mem.eql(u8, name, "none") or
-                std.mem.eql(u8, name, "result") or std.mem.eql(u8, name, "error") or
-                std.mem.eql(u8, name, "task") or std.mem.eql(u8, name, "buf") or
-                std.mem.eql(u8, name, "arena") or std.mem.eql(u8, name, "union") or
-                std.mem.eql(u8, name, "intersect") or std.mem.eql(u8, name, "tuple") or
-                std.mem.eql(u8, name, "fn") or std.mem.eql(u8, name, "slice") or
-                std.mem.eql(u8, name, "array") or std.mem.eql(u8, name, "list") or
-                std.mem.eql(u8, name, "box") or std.mem.eql(u8, name, "atomic") or
-                std.mem.eql(u8, name, "duration") or std.mem.eql(u8, name, "instant") or
-                std.mem.eql(u8, name, "deadline") or std.mem.eql(u8, name, "fd") or
-                std.mem.eql(u8, name, "not") or std.mem.eql(u8, name, "send") or
-                std.mem.eql(u8, name, "sync") or std.mem.eql(u8, name, "sized");
+            const base = lang_spec.unqualified_name(name);
+            if (lang_spec.is_builtin_type_name(base)) return true;
+            return std.mem.eql(u8, base, "token_stream") or
+                std.mem.eql(u8, base, "token_tree") or std.mem.eql(u8, base, "token") or
+                std.mem.eql(u8, base, "token_group") or std.mem.eql(u8, base, "token_kind") or
+                std.mem.eql(u8, base, "token_tree_kind") or std.mem.eql(u8, base, "delimiter") or
+                std.mem.eql(u8, base, "span") or std.mem.eql(u8, base, "symbol") or
+                std.mem.eql(u8, base, "type") or std.mem.eql(u8, base, "none") or
+                std.mem.eql(u8, base, "result") or std.mem.eql(u8, base, "error") or
+                std.mem.eql(u8, base, "lexer_error") or
+                std.mem.eql(u8, base, "task") or std.mem.eql(u8, base, "buf") or
+                std.mem.eql(u8, base, "arena") or std.mem.eql(u8, base, "union") or
+                std.mem.eql(u8, base, "intersect") or std.mem.eql(u8, base, "tuple") or
+                std.mem.eql(u8, base, "fn") or std.mem.eql(u8, base, "slice") or
+                std.mem.eql(u8, base, "array") or std.mem.eql(u8, base, "list") or
+                std.mem.eql(u8, base, "box") or std.mem.eql(u8, base, "atomic") or
+                std.mem.eql(u8, base, "duration") or std.mem.eql(u8, base, "instant") or
+                std.mem.eql(u8, base, "deadline") or std.mem.eql(u8, base, "fd") or
+                std.mem.eql(u8, base, "not") or std.mem.eql(u8, base, "send") or
+                std.mem.eql(u8, base, "sync") or std.mem.eql(u8, base, "sized");
+        }
+
+        fn collect_declared(self: *module_qualifier, nodes: []const *ink.node) qualify_error!void {
+            for (nodes) |node| {
+                if (node.* != .decl) continue;
+                switch (node.decl) {
+                    .function => |f| try self.declared_values.put(f.name.string, {}),
+                    .@"const" => |c| try self.declared_values.put(c.name.string, {}),
+                    .@"var" => |v| try self.declared_values.put(v.name.string, {}),
+                    .type_alias => |t| try self.declared_types.put(t.name.string, {}),
+                    .@"struct" => |s| {
+                        try self.declared_types.put(s.name.string, {});
+                        try self.declared_values.put(s.name.string, {});
+                    },
+                    .trait => |t| try self.declared_types.put(t.name.string, {}),
+                    .@"enum" => |e| {
+                        try self.declared_types.put(e.name.string, {});
+                        try self.declared_values.put(e.name.string, {});
+                    },
+                    .bind => |_| {},
+                    .import => |_| {},
+                    .mod => |_| {},
+                    .impl => |_| {},
+                }
+            }
         }
 
         fn prefixed_name(self: *module_qualifier, name: []const u8) qualify_error![]const u8 {
@@ -2618,9 +2946,13 @@ pub const compiler = struct {
             const name = id.string;
             if (self.has_module_prefix(name)) return;
             const base = base_name(name);
-            if (is_builtin_value_name(base)) return;
+            if (std.mem.indexOf(u8, name, "::") != null and std.mem.eql(u8, base, "error")) {
+                return;
+            }
+            const is_declared = self.value_exports.contains(base) or self.declared_values.contains(base);
+            if (is_builtin_value_name(base) and !is_declared) return;
             if (self.is_local_value(base)) return;
-            if (!self.value_exports.contains(base)) return;
+            if (!is_declared) return;
             id.string = try self.prefixed_name(name);
         }
 
@@ -2630,7 +2962,15 @@ pub const compiler = struct {
             const base = base_name(name);
             if (is_builtin_type_name(base)) return;
             if (self.is_local_type(base)) return;
-            if (!self.type_exports.contains(base)) return;
+            if (!self.type_exports.contains(base) and !self.declared_types.contains(base)) return;
+            id.string = try self.prefixed_name(name);
+        }
+
+        fn qualify_type_decl_ident(self: *module_qualifier, id: *ink.identifier) qualify_error!void {
+            const name = id.string;
+            if (self.has_module_prefix(name)) return;
+            const base = base_name(name);
+            if (self.is_local_type(base)) return;
             id.string = try self.prefixed_name(name);
         }
 
@@ -2794,7 +3134,7 @@ pub const compiler = struct {
                 .type_alias => |*t| {
                     if (top_level) {
                         var name = t.name;
-                        try self.qualify_type_ident(&name);
+                        try self.qualify_type_decl_ident(&name);
                         t.name = name;
                     } else {
                         try self.add_local_type(t.name.string);
@@ -2807,7 +3147,7 @@ pub const compiler = struct {
                 .@"struct" => |*s| {
                     if (top_level) {
                         var name = s.name;
-                        try self.qualify_type_ident(&name);
+                        try self.qualify_type_decl_ident(&name);
                         s.name = name;
                     } else {
                         try self.add_local_type(s.name.string);
@@ -2823,7 +3163,7 @@ pub const compiler = struct {
                 .@"enum" => |*e| {
                     if (top_level) {
                         var name = e.name;
-                        try self.qualify_type_ident(&name);
+                        try self.qualify_type_decl_ident(&name);
                         e.name = name;
                     } else {
                         try self.add_local_type(e.name.string);
@@ -2840,7 +3180,7 @@ pub const compiler = struct {
                 .trait => |*t| {
                     if (top_level) {
                         var name = t.name;
-                        try self.qualify_type_ident(&name);
+                        try self.qualify_type_decl_ident(&name);
                         t.name = name;
                     } else {
                         try self.add_local_type(t.name.string);
@@ -2864,20 +3204,34 @@ pub const compiler = struct {
                     }
                 },
                 .@"impl" => |*im| {
-                    try self.qualify_type_ident(&im.by_trait);
+                    if (!std.mem.eql(u8, im.by_trait.string, lang_spec.inherent_impl_trait_name)) {
+                        try self.qualify_type_ident(&im.by_trait);
+                    }
                     try self.qualify_type_ident(&im.for_struct);
                     const functions = @constCast(im.functions);
                     for (functions) |*func| {
                         try self.qualify_function_decl(func, false);
                     }
                 },
+                .bind => |*b| {
+                    var type_name = b.type_name;
+                    try self.qualify_type_ident(&type_name);
+                    b.type_name = type_name;
+                    try self.qualify_node(ink.ast.deref(b.value), false);
+                    if (!top_level) {
+                        for (b.fields) |field| {
+                            try self.add_local_value(field.string);
+                        }
+                    }
+                },
                 .import => |_| {},
+                .mod => |_| {},
             }
         }
 
         fn qualify_node(self: *module_qualifier, node: *ink.node, top_level: bool) qualify_error!void {
             switch (node.*) {
-                .integer, .float, .duration, .string => {},
+                .integer, .character, .float, .duration, .string => {},
                 .identifier => |*id| {
                     if (id.owner == .ref) {
                         try self.qualify_value_ident(id);
@@ -2985,6 +3339,7 @@ pub const compiler = struct {
         }
 
         fn qualify_nodes(self: *module_qualifier, nodes: []const *ink.node) qualify_error!void {
+            try self.collect_declared(nodes);
             for (nodes) |node| {
                 try self.qualify_node(node, true);
             }
@@ -4178,6 +4533,7 @@ pub const compiler = struct {
             .empty_block => try writer.writeAll("empty block"),
             .multiple_statements => try writer.writeAll("expected a single statement"),
             .string_literal => try writer.writeAll("invalid string interpolation"),
+            .invalid_char_literal => try writer.writeAll("invalid character literal"),
             .invalid_duration_literal => try writer.writeAll("invalid duration literal"),
         }
 

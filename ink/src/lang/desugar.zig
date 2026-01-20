@@ -47,6 +47,11 @@ const desugarer = struct {
         name: []const u8,
         where: ink.location,
     };
+    const bind_entry = struct {
+        name: []const u8,
+        base: ?*ink.node,
+        where: ink.location,
+    };
 
     node_allocator: mem_allocator,
     allocator: mem_allocator,
@@ -59,6 +64,8 @@ const desugarer = struct {
     origin: origin_map,
     operator_unary: std.AutoHashMap(ink.unary, operator_target),
     operator_binary: std.AutoHashMap(ink.binary, operator_target),
+    binds: array_list(bind_entry),
+    bind_disable: usize,
     with_counter: usize,
     prelude: prelude_spec,
 
@@ -80,6 +87,8 @@ const desugarer = struct {
             .origin = origin_map.init(allocator),
             .operator_unary = std.AutoHashMap(ink.unary, operator_target).init(allocator),
             .operator_binary = std.AutoHashMap(ink.binary, operator_target).init(allocator),
+            .binds = array_list(bind_entry).init(allocator),
+            .bind_disable = 0,
             .with_counter = 0,
             .prelude = prelude,
         };
@@ -93,11 +102,57 @@ const desugarer = struct {
         self.scope_map.deinit();
         self.operator_unary.deinit();
         self.operator_binary.deinit();
+        self.binds.deinit();
     }
 
     fn add_error(self: *desugarer, message: []const u8, where: ?ink.location) desugar_error!void {
         const span = if (where) |loc| source.span{ .start = loc.start, .end = loc.end } else null;
         try self.diags.append(.{ .danger = .@"error", .message = message, .span = span });
+    }
+
+    fn push_bind_alias(self: *desugarer, name: ink.identifier, base: *ink.node) desugar_error!void {
+        try self.binds.append(.{ .name = name.string, .base = base, .where = name.where });
+    }
+
+    fn push_bind_shadow(self: *desugarer, name: []const u8, where: ink.location) desugar_error!void {
+        try self.binds.append(.{ .name = name, .base = null, .where = where });
+    }
+
+    fn lookup_bind(self: *desugarer, name: []const u8) ?*ink.node {
+        var idx = self.binds.items.len;
+        while (idx > 0) {
+            idx -= 1;
+            const entry = self.binds.items[idx];
+            if (!std.mem.eql(u8, entry.name, name)) continue;
+            return entry.base;
+        }
+        return null;
+    }
+
+    fn has_bind_entry(self: *desugarer, name: []const u8) bool {
+        var idx = self.binds.items.len;
+        while (idx > 0) {
+            idx -= 1;
+            const entry = self.binds.items[idx];
+            if (std.mem.eql(u8, entry.name, name)) return true;
+        }
+        return false;
+    }
+
+    fn bind_base(self: *desugarer, node: *ink.node) ?*ink.node {
+        _ = self;
+        var current = node;
+        while (current.* == .unary and (current.unary.op == .borrow or current.unary.op == .borrow_mut or current.unary.op == .ref or current.unary.op == .ref_mut)) {
+            current = ink.ast.deref(current.unary.right);
+        }
+        return switch (current.*) {
+            .identifier => current,
+            .binary => |bin| switch (bin.op) {
+                .access, .index => current,
+                else => null,
+            },
+            else => null,
+        };
     }
 
     fn add_import(self: *desugarer, imp: ink.ast.import_decl) desugar_error!void {
@@ -331,6 +386,10 @@ const desugarer = struct {
             if (import_decl_from(node)) |_| {
                 continue;
             }
+            if (node.* == .decl and node.decl == .bind) {
+                try self.add_error("bind only allowed in blocks", node.decl.bind.where);
+                continue;
+            }
             try out.append(try self.desugar_node(node));
         }
         return out.toOwnedSlice();
@@ -338,16 +397,26 @@ const desugarer = struct {
 
     fn desugar_node(self: *desugarer, node: *ink.node) desugar_error!*ink.node {
         switch (node.*) {
-            .integer, .float, .duration, .string => return node,
+            .integer, .character, .float, .duration, .string => return node,
             .identifier => |id| {
-                if (id.owner == .ref) {
-                    if (self.symbol_imports.get(id.string)) |sym| {
-                        const qualified = try self.qualify_imported_symbol(sym);
-                        node.* = .{ .identifier = .{
-                            .string = qualified,
-                            .owner = id.owner,
-                            .where = id.where,
-                        } };
+                if (id.owner == .ref and self.bind_disable == 0) {
+                    if (self.lookup_bind(id.string)) |base| {
+                        const field = try self.new_identifier(node, id.string, id.where);
+                        return self.new_node(node, .{ .binary = .{
+                            .left = ink.ast.ref(base),
+                            .op = .access,
+                            .right = ink.ast.ref(field),
+                        } });
+                    }
+                    if (!self.has_bind_entry(id.string)) {
+                        if (self.symbol_imports.get(id.string)) |sym| {
+                            const qualified = try self.qualify_imported_symbol(sym);
+                            node.* = .{ .identifier = .{
+                                .string = qualified,
+                                .owner = id.owner,
+                                .where = id.where,
+                            } };
+                        }
                     }
                 }
                 return node;
@@ -380,7 +449,14 @@ const desugarer = struct {
                     return self.desugar_scope_access(node, left, right);
                 }
                 const left = try self.desugar_node(ink.ast.deref(bin.left));
-                const right = try self.desugar_node(ink.ast.deref(bin.right));
+                const right = blk: {
+                    if (bin.op == .access) {
+                        self.bind_disable += 1;
+                        defer self.bind_disable -= 1;
+                        break :blk try self.desugar_node(ink.ast.deref(bin.right));
+                    }
+                    break :blk try self.desugar_node(ink.ast.deref(bin.right));
+                };
                 if (self.operator_binary.get(bin.op)) |target| {
                     const loc = node_location(left);
                     const base = try self.new_identifier(node, target.name, loc);
@@ -437,9 +513,12 @@ const desugarer = struct {
                 return node;
             },
             .while_in_expr => |we| {
-                const pattern = try self.desugar_node(ink.ast.deref(we.pattern));
+                const pattern = try self.desugar_pattern_node(ink.ast.deref(we.pattern));
                 const iter = try self.desugar_node(ink.ast.deref(we.iter));
+                const bind_start = self.binds.items.len;
+                try self.shadow_pattern_names(pattern);
                 const body = try self.desugar_node(ink.ast.deref(we.body));
+                self.binds.items.len = bind_start;
                 node.* = .{ .while_in_expr = .{
                     .pattern = ink.ast.ref(pattern),
                     .iter = ink.ast.ref(iter),
@@ -466,9 +545,12 @@ const desugarer = struct {
                 return node;
             },
             .for_expr => |fe| {
-                const pattern = try self.desugar_node(ink.ast.deref(fe.pattern));
+                const pattern = try self.desugar_pattern_node(ink.ast.deref(fe.pattern));
                 const iter = try self.desugar_node(ink.ast.deref(fe.iter));
+                const bind_start = self.binds.items.len;
+                try self.shadow_pattern_names(pattern);
                 const body = try self.desugar_node(ink.ast.deref(fe.body));
+                self.binds.items.len = bind_start;
                 node.* = .{ .for_expr = .{
                     .pattern = ink.ast.ref(pattern),
                     .iter = ink.ast.ref(iter),
@@ -477,9 +559,12 @@ const desugarer = struct {
                 return node;
             },
             .each_expr => |ee| {
-                const pattern = try self.desugar_node(ink.ast.deref(ee.pattern));
+                const pattern = try self.desugar_pattern_node(ink.ast.deref(ee.pattern));
                 const iter = try self.desugar_node(ink.ast.deref(ee.iter));
+                const bind_start = self.binds.items.len;
+                try self.shadow_pattern_names(pattern);
                 const body = try self.desugar_node(ink.ast.deref(ee.body));
+                self.binds.items.len = bind_start;
                 node.* = .{ .each_expr = .{
                     .pattern = ink.ast.ref(pattern),
                     .iter = ink.ast.ref(iter),
@@ -508,8 +593,11 @@ const desugarer = struct {
                 const target = try self.desugar_node(ink.ast.deref(me.target));
                 const arms = @constCast(me.arms);
                 for (arms) |*arm| {
-                    const pattern = ink.ast.deref(arm.pattern);
+                    const pattern = try self.desugar_pattern_node(ink.ast.deref(arm.pattern));
+                    const bind_start = self.binds.items.len;
+                    try self.shadow_pattern_names(pattern);
                     const body = try self.desugar_node(ink.ast.deref(arm.body));
+                    self.binds.items.len = bind_start;
                     arm.* = .{ .pattern = ink.ast.ref(pattern), .body = ink.ast.ref(body) };
                 }
                 node.* = .{ .match_expr = .{
@@ -522,7 +610,14 @@ const desugarer = struct {
                 const arms = @constCast(sel.arms);
                 for (arms) |*arm| {
                     const task = try self.desugar_node(ink.ast.deref(arm.task));
+                    const bind_start = self.binds.items.len;
+                    if (arm.name) |name| {
+                        if (!std.mem.eql(u8, name.string, "_")) {
+                            try self.push_bind_shadow(name.string, name.where);
+                        }
+                    }
                     const body = try self.desugar_node(ink.ast.deref(arm.body));
+                    self.binds.items.len = bind_start;
                     arm.* = .{
                         .name = arm.name,
                         .task = ink.ast.ref(task),
@@ -579,6 +674,72 @@ const desugarer = struct {
         }
     }
 
+    fn desugar_pattern_node(self: *desugarer, node: *ink.node) desugar_error!*ink.node {
+        self.bind_disable += 1;
+        defer self.bind_disable -= 1;
+        return self.desugar_node(node);
+    }
+
+    fn shadow_pattern_names(self: *desugarer, node: *const ink.node) desugar_error!void {
+        switch (node.*) {
+            .identifier => |id| {
+                if (std.mem.eql(u8, id.string, "*")) return;
+                try self.push_bind_shadow(id.string, id.where);
+            },
+            .record => |rec| {
+                for (rec.items) |assoc| {
+                    if (assoc.value) |ref| try self.shadow_pattern_names(ink.ast.deref(ref));
+                }
+            },
+            .binary => |bin| switch (bin.op) {
+                .call => try self.shadow_pattern_call(node),
+                .access, .scope_access => {},
+                else => {
+                    try self.shadow_pattern_names(ink.ast.deref(bin.left));
+                    try self.shadow_pattern_names(ink.ast.deref(bin.right));
+                },
+            },
+            .unary => |un| try self.shadow_pattern_names(ink.ast.deref(un.right)),
+            else => {},
+        }
+    }
+
+    fn shadow_pattern_call(self: *desugarer, node: *const ink.node) desugar_error!void {
+        var current = node;
+        while (current.* == .binary and current.binary.op == .call) {
+            const call = current.binary;
+            try self.shadow_pattern_names(ink.ast.deref(call.right));
+            current = ink.ast.deref(call.left);
+        }
+    }
+
+    fn apply_bind_decl(self: *desugarer, decl: ink.ast.bind_decl) desugar_error!void {
+        const value = try self.desugar_node(ink.ast.deref(decl.value));
+        const base = self.bind_base(value) orelse {
+            try self.add_error("bind target must be a place expression", decl.where);
+            return;
+        };
+        for (decl.fields) |field| {
+            try self.push_bind_alias(field, base);
+        }
+    }
+
+    fn shadow_decl(self: *desugarer, decl: ink.ast.decl) desugar_error!void {
+        switch (decl) {
+            .function => |f| try self.push_bind_shadow(f.name.string, f.name.where),
+            .@"struct" => |s| try self.push_bind_shadow(s.name.string, s.name.where),
+            .trait => |t| try self.push_bind_shadow(t.name.string, t.name.where),
+            .@"enum" => |e| try self.push_bind_shadow(e.name.string, e.name.where),
+            .mod => |m| try self.push_bind_shadow(m.name.string, m.name.where),
+            .type_alias => |t| try self.push_bind_shadow(t.name.string, t.name.where),
+            .@"const" => |c| try self.push_bind_shadow(c.name.string, c.name.where),
+            .@"var" => |v| try self.push_bind_shadow(v.name.string, v.name.where),
+            .bind => {},
+            .import => |_| {},
+            .impl => {},
+        }
+    }
+
     fn desugar_node_refs(
         self: *desugarer,
         refs: []const ink.ast.node_ref,
@@ -604,6 +765,9 @@ const desugarer = struct {
     }
 
     fn desugar_block(self: *desugarer, blk: ink.ast.block_expr) desugar_error!ink.ast.block_expr {
+        const bind_start = self.binds.items.len;
+        defer self.binds.items.len = bind_start;
+
         var items = array_list(*ink.node).init(self.node_allocator);
         for (blk.items) |item_ref| {
             const item = ink.ast.deref(item_ref);
@@ -611,14 +775,27 @@ const desugarer = struct {
                 try self.add_error("import only allowed at top level", imp.module.where);
                 continue;
             }
-            try items.append(try self.desugar_node(item));
+            if (item.* == .decl and item.decl == .bind) {
+                try self.apply_bind_decl(item.decl.bind);
+                continue;
+            }
+            const desugared = try self.desugar_node(item);
+            try items.append(desugared);
+            if (desugared.* == .decl) {
+                try self.shadow_decl(desugared.decl);
+            }
         }
         const slice = try items.toOwnedSlice();
         return .{ .items = ink.ast.ref_slice(slice) };
     }
 
     fn desugar_with_expr(self: *desugarer, origin_node: *ink.node, we: ink.ast.with_expr) desugar_error!*ink.node {
+        const bind_start = self.binds.items.len;
+        if (!std.mem.eql(u8, we.name.string, "_")) {
+            try self.push_bind_shadow(we.name.string, we.name.where);
+        }
         const body = try self.desugar_node(ink.ast.deref(we.body));
+        self.binds.items.len = bind_start;
         const std_alias = self.module_map.get("std") orelse blk: {
             try self.add_error("with arena requires import std", we.name.where);
             break :blk "std";
@@ -700,17 +877,15 @@ const desugarer = struct {
         _ = self;
         if (id.string.len < 2) return null;
         const prefix = id.string[0];
-        if (prefix != 'i' and prefix != 'u' and prefix != 'b') return null;
+        if (prefix != 'b') return null;
         const digits = id.string[1..];
         var i: usize = 0;
         while (i < digits.len) : (i += 1) {
             if (digits[i] < '0' or digits[i] > '9') return null;
         }
         const bits = std.fmt.parseInt(i64, digits, 10) catch return null;
-        if (bits <= 0) return null;
+        if (bits <= 0 or bits > 512) return null;
         const base = switch (prefix) {
-            'i' => "int",
-            'u' => "uint",
             'b' => "uint",
             else => return null,
         };
@@ -748,9 +923,11 @@ const desugarer = struct {
             .@"enum" => |e| .{ .@"enum" = try self.desugar_enum_decl(e) },
             .impl => |im| .{ .impl = try self.desugar_impl_decl(im) },
             .import => |imp| .{ .import = try self.desugar_import_decl(imp) },
+            .mod => |m| .{ .mod = m },
             .type_alias => |t| .{ .type_alias = try self.desugar_type_alias_decl(t) },
             .@"const" => |c| .{ .@"const" = try self.desugar_const_decl(c) },
             .@"var" => |v| .{ .@"var" = try self.desugar_var_decl(v) },
+            .bind => |b| .{ .bind = b },
         };
     }
 
@@ -941,6 +1118,7 @@ const desugarer = struct {
         return .{
             .attributes = attributes,
             .name = e.name,
+            .is_flag = e.is_flag,
             .generics = generics,
             .variants = variants,
             .where = e.where,
@@ -956,6 +1134,7 @@ const desugarer = struct {
 
         return .{
             .attributes = attributes,
+            .is_public = im.is_public,
             .negative = im.negative,
             .by_trait = im.by_trait,
             .for_struct = im.for_struct,

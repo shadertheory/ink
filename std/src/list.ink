@@ -1,28 +1,28 @@
-fn list_header<T: type>(value: list<T>) -> int
-	value as int
+fn list_header<T: type>(value: list<T>) -> i64
+	value as i64
 
-fn list_ptr<T: type>(value: list<T>) -> int
+fn list_ptr<T: type>(value: list<T>) -> i64
 	let header = list_header(value)
 	if header == 0
 		0
 	else
 		*header
 
-fn list_len<T: type>(value: list<T>) -> int
+fn list_len<T: type>(value: list<T>) -> i64
 	let header = list_header(value)
 	if header == 0
 		0
 	else
 		*(header + 1)
 
-fn list_cap<T: type>(value: list<T>) -> int
+fn list_cap<T: type>(value: list<T>) -> i64
 	let header = list_header(value)
 	if header == 0
 		0
 	else
 		*(header + 2)
 
-fn list_set_len<T: type>(value: list<T>, len: int)
+fn list_set_len<T: type>(value: list<T>, len: i64)
 	let header = list_header(value)
 	if header == 0
 		0
@@ -31,21 +31,21 @@ fn list_set_len<T: type>(value: list<T>, len: int)
 		if len <= cap
 			*(header + 1) = len
 
-fn list_copy_words(dst: int, src: int, count: int)
+fn list_copy_words(dst: i64, src: i64, count: i64)
 	mut idx = 0
 	while idx < count
 		*(dst + idx) = *(src + idx)
 		idx += 1
 
-fn list_store_value<T: type>(dst: int, value: T)
-	let src = (&value) as int
+fn list_store_value<T: type>(dst: i64, value: T)
+	let src = (&value) as i64
 	let words = @type_words(value)
 	mut idx = 0
 	while idx < words
 		*(dst + idx) = *(src + idx)
 		idx += 1
 
-fn list_new<T: type>(capacity: int) -> list<T>
+fn list_new<T: type>(capacity: i64) -> list<T>
 	let stride = @type_words(T)
 	mut data_words = capacity * stride
 	if data_words == 0
@@ -66,7 +66,7 @@ fn list_free<T: type>(value: list<T>)
 		free(data_ptr)
 		free(header)
 
-fn list_reserve<T: type>(value: list<T>, capacity: int) -> list<T>
+fn list_reserve<T: type>(value: list<T>, capacity: i64) -> list<T>
 	let header = list_header(value)
 	if header == 0
 		list_new(capacity)

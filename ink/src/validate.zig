@@ -142,9 +142,11 @@ fn decl_where(decl: ink.ast.decl) ink.location {
         .@"enum" => |e| e.where,
         .impl => |i| i.where,
         .import => |i| i.where,
+        .mod => |m| m.where,
         .type_alias => |t| t.where,
         .@"const" => |c| c.where,
         .@"var" => |v| v.where,
+        .bind => |b| b.where,
     };
 }
 
@@ -153,6 +155,7 @@ fn span_for_node_shallow(node: *const ink.node) ?source.span {
         .identifier => |id| span_from_location(id.where),
         .string => |str| span_from_location(str.where),
         .integer => |value| span_from_location(value.where),
+        .character => |value| span_from_location(value.where),
         .float => |value| span_from_location(value.where),
         .duration => |value| span_from_location(value.where),
         .macro_call => |mc| span_from_location(mc.where),

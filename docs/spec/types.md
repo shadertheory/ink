@@ -10,6 +10,13 @@ Current architecture (from `ink/src`)
 - Decls already exist for `sum`, `enum`, `struct`, `trait`, `concept`, and `impl`.
 - Resolver only checks names; no full type checker yet.
 
+Intrinsic types (runtime)
+- `range<T>` is a builtin generic type representing a bounded range over `T`.
+- The canonical surface constructor is the range operators:
+  - `a .. b` (half-open) -> `range { start = a, end = b, inclusive = false }`
+  - `a ..= b` (inclusive) -> `range { start = a, end = b, inclusive = true }`
+- Open-ended ranges are not in scope yet.
+
 Phase I: Add syntax, desugar to existing AST
 1) Type alias
 - New decl: `type Name<...> = TypeExpr`

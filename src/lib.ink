@@ -107,7 +107,7 @@ comptime fn sum_pair(pair: token_stream) -> token_stream
 						else
 							add_tokens(left, right)
 
-comptime fn pow_int(base: int, exp: int) -> int
+comptime fn pow_int(base: i64, exp: i64) -> i64
 	mut result = 1
 	mut idx = 0
 	while idx < exp
@@ -115,7 +115,7 @@ comptime fn pow_int(base: int, exp: int) -> int
 		idx += 1
 	result
 
-comptime fn triangular(n: int) -> int
+comptime fn triangular(n: i64) -> i64
 	mut acc = 0
 	mut i = 1
 	while i <= n
@@ -123,7 +123,7 @@ comptime fn triangular(n: int) -> int
 		i += 1
 	acc
 
-comptime fn gcd_int(a: int, b: int) -> int
+comptime fn gcd_int(a: i64, b: i64) -> i64
 	mut x = a
 	mut y = b
 	while y != 0
@@ -145,19 +145,19 @@ trait adder<T: type>
 	fn add(self: T, other: T) -> T
 
 trait indexable
-	fn index(self, idx: int) -> int
-	fn index_set(self, idx: int, value: int)
+	fn index<I: int>(self, idx: I) -> i64
+	fn index_set<I: int>(self, idx: I, value: i64)
 
 #[record]
 struct point
-	x: int
-	y: int
+	x: i64
+	y: i64
 
 #[record]
 struct int2
-	ptr: int
+	ptr: i64
 
-#[repr(int)]
+#[repr(i64)]
 enum maybe<T: type>
 	none
 	some(T)
@@ -165,12 +165,12 @@ enum maybe<T: type>
 #[emit_helper(tag)]
 let macro_anchor = 1
 
-impl show for int
+impl show for i64
 	fn show(this) -> string
-		"int"
+		"i64"
 
-impl adder for int
-	fn add(this, other: int) -> int
+impl adder for i64
+	fn add(this, other: i64) -> i64
 		this + other
 
 impl adder for point
@@ -188,12 +188,12 @@ impl show for point
 		this
 
 impl indexable for int2
-	fn index(this, idx: int) -> int
-		std::deref(this.ptr + idx)
-	fn index_set(this, idx: int, value: int)
-		std::store(this.ptr + idx, value)
+	fn index<I: int>(this, idx: I) -> i64
+		std::deref(this.ptr + (idx as i64))
+	fn index_set<I: int>(this, idx: I, value: i64)
+		std::store(this.ptr + (idx as i64), value)
 
-fn int2_new(a: int, b: int) -> int2
+fn int2_new(a: i64, b: i64) -> int2
 	let ptr = std::alloc(2)
 	*ptr = 2
 	*(ptr + 1) = 3
@@ -210,7 +210,7 @@ fn add_and_label<T: type>(a: T, b: T) -> string where T: numeric
 	let total = a + b
 	total.show()
 
-fn main() -> int
+fn main() -> i64
 	let p1 = point
 		x = 3
 		y = 4

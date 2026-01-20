@@ -1091,7 +1091,9 @@ fn builtin_string_set_len(machine: anytype, debug_checks: bool) void {
 
 fn builtin_string_from_int(machine: anytype, debug_checks: bool) void {
     var buf: [64]u8 = undefined;
-    const text = std.fmt.bufPrint(&buf, "{d}", .{read_arg(machine, 1)}) catch return;
+    const raw = read_arg(machine, 1);
+    const value: i64 = @bitCast(raw);
+    const text = std.fmt.bufPrint(&buf, "{d}", .{value}) catch return;
     const ptr = string_alloc(machine, text.len, debug_checks) orelse return;
     const info = string_info(machine, @intCast(ptr), debug_checks) orelse return;
     std.mem.copyForwards(u8, info.payload[0..text.len], text);

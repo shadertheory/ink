@@ -15,6 +15,7 @@ pub const record_literal = struct {
 
 pub const uir = union(enum) {
     integer: i64,
+    character: i64,
     float: f64,
     duration: i64,
     string: string_identifier,
@@ -146,6 +147,7 @@ pub const uir = union(enum) {
 
     pub const enum_decl = struct {
         name: string_identifier,
+        is_flag: bool,
         generics: []const generic_param,
         variants: []const enum_variant,
     };

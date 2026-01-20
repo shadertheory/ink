@@ -1,0 +1,11 @@
+.{
+    .name = .inkui,
+    .version = "0.0.1",
+    .minimum_zig_version = "0.15.2",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+    .fingerprint = 0xab5d129ff559cb2c,
+}

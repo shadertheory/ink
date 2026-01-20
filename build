@@ -1,0 +1,1 @@
+cd quill && zig build && cd ../ && cd inkx && zig build && cd ../ && cd inkvm && zig build && cd ../ && cd inkd && zig build && cd ../

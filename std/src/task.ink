@@ -1,4 +1,4 @@
-type timeout = int
+type timeout = i64
 
 #[foreign] #[sandbox(category=task, allowed)] #[sim(category=task, allowed)] fn cancelled() -> bool
 #[foreign] #[sandbox(category=time, allowed)] #[sim(category=time, allowed)] fn timeout(duration: duration) -> deadline
@@ -13,7 +13,7 @@ fn deadline(value: duration) -> deadline
 fn cancel<T: type>(task: task<T>)
 	0
 
-fn sleep_task(duration: duration) -> result<int, io_error>
+fn sleep_task(duration: duration) -> result<i64, io_error>
 	sleep(duration)
 
 fn timeout<T: type>(duration: duration, task: task<T>) -> result<T, timeout>

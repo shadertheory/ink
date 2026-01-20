@@ -1,9 +1,9 @@
-type symbol = int
-type span = int
-type token = int
-type token_group = int
-type token_tree = int
-type token_stream = int
+type symbol = i64
+type span = i64
+type token = i64
+type token_group = i64
+type token_tree = i64
+type token_stream = i64
 
 enum delimiter
 	paren
@@ -15,6 +15,7 @@ enum token_kind
 	identifier
 	label
 	string
+	character
 	number
 	comma
 	colon
@@ -86,6 +87,7 @@ enum token_kind
 	equal
 	not_equal
 	enum
+	flag
 	type
 	arrow
 	question
@@ -124,11 +126,11 @@ enum token_tree_value
 #[record]
 struct token_stream_cursor
 	stream: token_stream
-	index: int
+	index: i64
 
-#[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn span_source(value: span) -> int
-#[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn span_start(value: span) -> int
-#[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn span_end(value: span) -> int
+#[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn span_source(value: span) -> i64
+#[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn span_start(value: span) -> i64
+#[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn span_end(value: span) -> i64
 #[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn span_join(left: span, right: span) -> span
 #[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn span_here() -> span
 
@@ -149,9 +151,9 @@ struct token_stream_cursor
 #[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn token_tree_from_token(value: token) -> token_tree
 #[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn token_tree_from_group(value: token_group) -> token_tree
 
-#[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn token_stream_len(value: token_stream) -> int
-#[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn token_stream_get(value: token_stream, index: int) -> token_tree
-#[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn token_stream_slice(value: token_stream, start: int, end: int) -> token_stream
+#[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn token_stream_len(value: token_stream) -> i64
+#[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn token_stream_get(value: token_stream, index: i64) -> token_tree
+#[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn token_stream_slice(value: token_stream, start: i64, end: i64) -> token_stream
 #[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn token_stream_concat(left: token_stream, right: token_stream) -> token_stream
 #[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn token_stream_push(value: token_stream, tree: token_tree) -> token_stream
 #[foreign] #[sandbox(category=macro, allowed)] #[sim(category=macro, allowed)] fn token_stream_empty() -> token_stream
@@ -184,7 +186,7 @@ fn token_stream_cursor_next(value: token_stream_cursor) -> token_stream_cursor
 		stream = value.stream
 		index = value.index + 1
 
-fn token_stream_cursor_len(value: token_stream_cursor) -> int
+fn token_stream_cursor_len(value: token_stream_cursor) -> i64
 	token_stream_len(value.stream)
 
 fn token_stream_cursor_is_end(value: token_stream_cursor) -> bool

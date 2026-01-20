@@ -25,10 +25,11 @@ const semantic_token_type = enum(u32) {
     string,
     operator,
     boolean,
+    macro,
 };
 
 const semantic_tokens_legend_json =
-    "{\"tokenTypes\":[\"namespace\",\"type\",\"function\",\"variable\",\"property\",\"keyword\",\"number\",\"string\",\"operator\",\"boolean\"],\"tokenModifiers\":[]}";
+    "{\"tokenTypes\":[\"namespace\",\"type\",\"function\",\"variable\",\"property\",\"keyword\",\"number\",\"string\",\"operator\",\"boolean\",\"macro\"],\"tokenModifiers\":[]}";
 
 const completion_item = struct {
     label: []const u8,
@@ -1019,7 +1020,7 @@ fn build_semantic_tokens_data(
         const next_kind = next_significant_kind(tokens, idx + 1);
         var used_semantic_map = false;
         const type_index = blk: {
-            if (tok.which == .identifier and semantic_map_ptr != null) {
+            if (semantic_map_ptr != null) {
                 if (semantic_map_ptr.?.get(tok.where.start)) |entry| {
                     if (entry.end == tok.where.end) {
                         used_semantic_map = true;
@@ -1027,7 +1028,7 @@ fn build_semantic_tokens_data(
                     }
                 }
             }
-            break :blk semantic_token_type_for(tok.which, prev_kind, next_kind) orelse {
+            break :blk semantic_token_type_for_token(tok, prev_kind, next_kind) orelse {
                 if (is_significant_token(tok.which)) prev_kind = tok.which;
                 continue;
             };
@@ -1194,7 +1195,7 @@ fn emit_inline_expr_tokens(
 
     while (true) {
         const next_kind = if (next) |next_tok| next_tok.which else null;
-        const kind = semantic_token_type_for(current.which, prev_kind, next_kind) orelse {
+        const kind = semantic_token_type_for_token(current, prev_kind, next_kind) orelse {
             if (is_significant_token(current.which)) prev_kind = current.which;
             if (next) |next_tok| {
                 current = next_tok;
@@ -1302,7 +1303,7 @@ fn collect_semantic_spans(map: *std.AutoHashMap(usize, semantic_span), nodes: []
 
 fn collect_node_spans(map: *std.AutoHashMap(usize, semantic_span), node: *const ink.node) semantic_error!void {
     switch (node.*) {
-        .integer, .float, .duration, .string => {},
+        .integer, .character, .float, .duration, .string => {},
         .identifier => {},
         .unary => |un| try collect_node_spans(map, ink.ast.deref(un.right)),
         .binary => |bin| {
@@ -1466,7 +1467,9 @@ fn collect_decl_spans(map: *std.AutoHashMap(usize, semantic_span), decl: ink.ast
             }
         },
         .impl => |im| {
-            try record_ident(map, im.by_trait, .type);
+            if (!std.mem.eql(u8, im.by_trait.string, lang_spec.inherent_impl_trait_name)) {
+                try record_ident(map, im.by_trait, .type);
+            }
             try record_ident(map, im.for_struct, .type);
             for (im.functions) |func| try collect_decl_spans(map, .{ .function = func });
         },
@@ -1474,6 +1477,10 @@ fn collect_decl_spans(map: *std.AutoHashMap(usize, semantic_span), decl: ink.ast
             try record_ident(map, imp.module, .namespace);
             if (imp.item) |item| try record_ident(map, item, .namespace);
             if (imp.alias) |alias| try record_ident(map, alias, .namespace);
+        },
+        .mod => |m| {
+            try record_ident(map, m.name, .namespace);
+            for (m.items) |item| try collect_node_spans(map, ink.ast.deref(item));
         },
         .type_alias => |t| {
             try record_ident(map, t.name, .type);
@@ -1492,6 +1499,13 @@ fn collect_decl_spans(map: *std.AutoHashMap(usize, semantic_span), decl: ink.ast
             try record_ident(map, v.name, .variable);
             if (v.ty) |ref| try collect_node_spans(map, ink.ast.deref(ref));
             try collect_node_spans(map, ink.ast.deref(v.value));
+        },
+        .bind => |b| {
+            try record_ident(map, b.type_name, .type);
+            for (b.fields) |field| {
+                try record_ident(map, field, .variable);
+            }
+            try collect_node_spans(map, ink.ast.deref(b.value));
         },
     }
 }
@@ -1581,7 +1595,7 @@ fn semantic_token_type_for(
                 return switch (prev_kind) {
                     .function => .function,
                     .@"struct", .trait, .@"enum", .type, .dyn => .type,
-                    .import, .from => .namespace,
+                    .import, .from, .mod => .namespace,
                     .dot, .question_dot => .property,
                     .double_colon => .namespace,
                     .colon, .arrow, .as => .type,
@@ -1592,12 +1606,31 @@ fn semantic_token_type_for(
             return .variable;
         },
         .number => return .number,
+        .character => return .number,
         .string => return .string,
         .logical_true, .logical_false => return .boolean,
-        .function, .constant, .variable, .mut, .expr_if, .expr_else, .expr_match, .expr_select, .case, .detached, .stmt_return, .spawn, .await, .@"try", .logical_or, .logical_and, .logical_xor, .logical_not, .in, .trait, .impl, .as, .import, .from, .dynamic, .@"for", .@"struct", .where, .@"comptime", .self, .this, .type, .@"enum", .requires, .dyn => return .keyword,
+        .function, .constant, .variable, .mut, .expr_if, .expr_else, .expr_match, .expr_select, .case, .detached, .stmt_return, .spawn, .await, .@"try", .logical_or, .logical_and, .logical_xor, .logical_not, .in, .trait, .impl, .@"pub", .as, .import, .from, .dynamic, .@"for", .@"struct", .where, .@"comptime", .self, .this, .type, .@"enum", .flag, .requires, .dyn, .mod => return .keyword,
         .plus, .minus, .asterisk, .slash, .assign, .pipe, .coalesce, .double_colon, .dot, .question_dot, .less_than, .greater_than, .less_or_equal, .greater_or_equal, .equal, .not_equal, .arrow, .paren_left, .paren_right, .bracket_left, .bracket_right, .comma, .colon, .bar, .ampersand, .question, .range, .range_inclusive, .ellipsis, .at_sign, .hash => return .operator,
         else => return null,
     }
+}
+
+fn semantic_token_type_for_token(
+    tok: ink.token,
+    prev: ?ink.token.kind,
+    next: ?ink.token.kind,
+) ?semantic_token_type {
+    if (tok.which == .identifier and is_special_identifier(tok.what.string)) {
+        return .number;
+    }
+    return semantic_token_type_for(tok.which, prev, next);
+}
+
+fn is_special_identifier(name: []const u8) bool {
+    if (std.mem.eql(u8, name, "undefined")) return true;
+    if (std.mem.eql(u8, name, "none")) return true;
+    if (std.mem.eql(u8, name, "unit")) return true;
+    return false;
 }
 
 fn next_significant_kind(tokens: []const ink.token, start: usize) ?ink.token.kind {
@@ -1703,6 +1736,8 @@ fn collect_builtin_completions(items: *std.array_list.Managed(completion_item), 
         "float",
         "bool",
         "string",
+        "char",
+        "range",
         "none",
         "union",
         "intersect",
@@ -1784,6 +1819,10 @@ fn collect_completion_node(
                 if (imp.item) |item| try push_completion(items, item.string, completion_kind_module, prefix);
                 if (imp.alias) |alias| try push_completion(items, alias.string, completion_kind_module, prefix);
             },
+            .mod => |m| {
+                try push_completion(items, m.name.string, completion_kind_module, prefix);
+                for (m.items) |item| try collect_completion_node(items, ink.ast.deref(item), prefix);
+            },
             .type_alias => |t| {
                 try push_completion(items, t.name.string, completion_kind_type, prefix);
                 for (t.generics) |param| {
@@ -1798,6 +1837,13 @@ fn collect_completion_node(
             .@"var" => |v| {
                 try push_completion(items, v.name.string, completion_kind_variable, prefix);
                 try collect_completion_node(items, ink.ast.deref(v.value), prefix);
+            },
+            .bind => |b| {
+                try push_completion(items, b.type_name.string, completion_kind_type, prefix);
+                for (b.fields) |field| {
+                    try push_completion(items, field.string, completion_kind_variable, prefix);
+                }
+                try collect_completion_node(items, ink.ast.deref(b.value), prefix);
             },
         },
         .block => |blk| {
@@ -1988,6 +2034,24 @@ fn find_hover_info_node(node: *const ink.node, name: []const u8) ?hover_info {
             },
             .@"var" => |v| {
                 if (std.mem.eql(u8, v.name.string, name)) return .{ .@"var" = v };
+            },
+            .bind => |b| {
+                for (b.fields) |field| {
+                    if (std.mem.eql(u8, field.string, name)) return .{ .variable = field };
+                }
+                if (find_hover_info_node(ink.ast.deref(b.value), name)) |info| return info;
+            },
+            .mod => |m| {
+                if (std.mem.eql(u8, m.name.string, name)) return .{ .import = .{
+                    .attributes = &.{},
+                    .module = m.name,
+                    .item = null,
+                    .alias = null,
+                    .where = m.where,
+                } };
+                for (m.items) |item| {
+                    if (find_hover_info_node(ink.ast.deref(item), name)) |info| return info;
+                }
             },
         },
         .block => |blk| {
@@ -2585,6 +2649,19 @@ fn collect_inlay_hints_node(
                     end_offset,
                 );
             },
+            .bind => |b| {
+                try collect_inlay_hints_node(
+                    allocator,
+                    hints,
+                    sigs,
+                    variants,
+                    line_offsets,
+                    text,
+                    ink.ast.deref(b.value),
+                    start_offset,
+                    end_offset,
+                );
+            },
             .type_alias => |t| try collect_inlay_hints_node(
                 allocator,
                 hints,
@@ -2879,6 +2956,7 @@ fn collect_function_sigs(sigs: *std.array_list.Managed(function_sig), node: *con
             },
             .@"const" => |c| try collect_function_sigs(sigs, ink.ast.deref(c.value)),
             .@"var" => |v| try collect_function_sigs(sigs, ink.ast.deref(v.value)),
+            .bind => |b| try collect_function_sigs(sigs, ink.ast.deref(b.value)),
             .type_alias => |t| try collect_function_sigs(sigs, ink.ast.deref(t.value)),
             else => {},
         },
@@ -2990,6 +3068,7 @@ fn collect_variant_infos(variants: *std.array_list.Managed(variant_info), node: 
             },
             .@"const" => |c| try collect_variant_infos(variants, ink.ast.deref(c.value)),
             .@"var" => |v| try collect_variant_infos(variants, ink.ast.deref(v.value)),
+            .bind => |b| try collect_variant_infos(variants, ink.ast.deref(b.value)),
             .type_alias => |t| try collect_variant_infos(variants, ink.ast.deref(t.value)),
             else => {},
         },
@@ -3582,6 +3661,7 @@ fn node_start_span(node: *const ink.node) ?source.span {
             .type_alias => |t| return .{ .start = t.name.where.start, .end = t.name.where.end },
             .@"const" => |c| return .{ .start = c.name.where.start, .end = c.name.where.end },
             .@"var" => |v| return .{ .start = v.name.where.start, .end = v.name.where.end },
+            .bind => |b| return .{ .start = b.type_name.where.start, .end = b.type_name.where.end },
             else => {},
         },
         else => {},
@@ -3867,6 +3947,7 @@ fn format_ast_error(
         .empty_block => try writer.writeAll("empty block"),
         .multiple_statements => try writer.writeAll("expected a single statement"),
         .string_literal => try writer.writeAll("string literals are not supported here"),
+        .invalid_char_literal => try writer.writeAll("invalid character literal"),
         .invalid_duration_literal => try writer.writeAll("invalid duration literal"),
     }
 

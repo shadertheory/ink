@@ -1,3 +1,5 @@
+const std = @import("std");
+
 pub const fundamental = enum { i64, f32, bool, unit, identifier, unary, binary, location };
 
 pub const type_ref = union(enum) {
@@ -152,6 +154,7 @@ pub const specification = [_]type_spec{
         .name = "impl_decl",
         .fields = &.{
             .{ .name = "attributes", .ty = ref_attribute_slice },
+            .{ .name = "is_public", .ty = ref_bool },
             .{ .name = "negative", .ty = ref_bool },
             .{ .name = "by_trait", .ty = ref_identifier },
             .{ .name = "for_struct", .ty = ref_identifier },
@@ -167,6 +170,16 @@ pub const specification = [_]type_spec{
             .{ .name = "module", .ty = ref_identifier },
             .{ .name = "item", .ty = ref_identifier_opt },
             .{ .name = "alias", .ty = ref_identifier_opt },
+            .{ .name = "where", .ty = ref_location },
+        },
+    } },
+
+    .{ .@"struct" = .{
+        .name = "mod_decl",
+        .fields = &.{
+            .{ .name = "attributes", .ty = ref_attribute_slice },
+            .{ .name = "name", .ty = ref_identifier },
+            .{ .name = "items", .ty = ref_node_ptr_slice },
             .{ .name = "where", .ty = ref_location },
         },
     } },
@@ -200,6 +213,18 @@ pub const specification = [_]type_spec{
             .{ .name = "name", .ty = ref_identifier },
             .{ .name = "ty", .ty = ref_node_ptr_opt },
             .{ .name = "value", .ty = ref_node_ptr },
+            .{ .name = "where", .ty = ref_location },
+        },
+    } },
+
+    .{ .@"struct" = .{
+        .name = "bind_decl",
+        .fields = &.{
+            .{ .name = "attributes", .ty = ref_attribute_slice },
+            .{ .name = "type_name", .ty = ref_identifier },
+            .{ .name = "value", .ty = ref_node_ptr },
+            .{ .name = "fields", .ty = ref_identifier_slice },
+            .{ .name = "has_rest", .ty = ref_bool },
             .{ .name = "where", .ty = ref_location },
         },
     } },
@@ -248,6 +273,7 @@ pub const specification = [_]type_spec{
         .fields = &.{
             .{ .name = "attributes", .ty = ref_attribute_slice },
             .{ .name = "name", .ty = ref_identifier },
+            .{ .name = "is_flag", .ty = ref_bool },
             .{ .name = "generics", .ty = ref_generic_param_slice },
             .{ .name = "variants", .ty = ref_sum_variant_slice },
             .{ .name = "where", .ty = ref_location },
@@ -266,6 +292,13 @@ pub const specification = [_]type_spec{
     } },
     .{ .@"struct" = .{
         .name = "integer_literal",
+        .fields = &.{
+            .{ .name = "value", .ty = type_ref{ .builtin = .i64 } },
+            .{ .name = "where", .ty = ref_location },
+        },
+    } },
+    .{ .@"struct" = .{
+        .name = "character_literal",
         .fields = &.{
             .{ .name = "value", .ty = type_ref{ .builtin = .i64 } },
             .{ .name = "where", .ty = ref_location },
@@ -484,9 +517,11 @@ pub const specification = [_]type_spec{
             .{ .name = "enum", .ty = type_ref{ .named = "enum_decl" } },
             .{ .name = "impl", .ty = type_ref{ .named = "impl_decl" } },
             .{ .name = "import", .ty = type_ref{ .named = "import_decl" } },
+            .{ .name = "mod", .ty = type_ref{ .named = "mod_decl" } },
             .{ .name = "type_alias", .ty = type_ref{ .named = "type_decl" } },
             .{ .name = "const", .ty = type_ref{ .named = "const_decl" } },
             .{ .name = "var", .ty = type_ref{ .named = "var_decl" } },
+            .{ .name = "bind", .ty = type_ref{ .named = "bind_decl" } },
         },
     } },
 };
@@ -495,6 +530,7 @@ pub const node_union = union_spec{
     .name = "node",
     .fields = &.{
         .{ .name = "integer", .ty = type_ref{ .named = "integer_literal" } },
+        .{ .name = "character", .ty = type_ref{ .named = "character_literal" } },
         .{ .name = "float", .ty = type_ref{ .named = "float_literal" } },
         .{ .name = "duration", .ty = type_ref{ .named = "duration_literal" } },
         .{ .name = "string", .ty = ref_identifier },
@@ -530,6 +566,8 @@ pub const node_union = union_spec{
 pub const binary = struct { name: []const u8, ir_name: []const u8 };
 pub const unary = struct { name: []const u8, ir_name: []const u8 };
 pub const lexeme = struct { text: []const u8, kind: []const u8 };
+
+pub const inherent_impl_trait_name = "$inherent";
 
 pub const binarys = [_]binary{
     .{ .name = "add", .ir_name = "add" },
@@ -646,8 +684,10 @@ pub const keyword_lexemes = [_]lexeme{
     .{ .text = "trait", .kind = "trait" },
     .{ .text = "in", .kind = "in" },
     .{ .text = "impl", .kind = "impl" },
+    .{ .text = "pub", .kind = "pub" },
     .{ .text = "as", .kind = "as" },
     .{ .text = "import", .kind = "import" },
+    .{ .text = "mod", .kind = "mod" },
     .{ .text = "from", .kind = "from" },
     .{ .text = "with", .kind = "with" },
     .{ .text = "struct", .kind = "struct" },
@@ -657,6 +697,7 @@ pub const keyword_lexemes = [_]lexeme{
     .{ .text = "ref", .kind = "ref" },
     .{ .text = "type", .kind = "type" },
     .{ .text = "enum", .kind = "enum" },
+    .{ .text = "flag", .kind = "flag" },
     .{ .text = "where", .kind = "where" },
     .{ .text = "requires", .kind = "requires" },
     .{ .text = "dyn", .kind = "dyn" },
@@ -734,6 +775,7 @@ pub const number = struct {
 
 pub const generic_value_kinds = [_][]const u8{
     "int",
+    "uint",
     "bool",
     "float",
 };
@@ -763,6 +805,8 @@ pub const parser_precedence = [_]struct { kind: []const u8, precedence: []const 
     .{ .kind = "greater_or_equal", .precedence = "comparison" },
     .{ .kind = "equal", .precedence = "comparison" },
     .{ .kind = "not_equal", .precedence = "comparison" },
+    .{ .kind = "range", .precedence = "range" },
+    .{ .kind = "range_inclusive", .precedence = "range" },
     .{ .kind = "shift_left", .precedence = "shift" },
     .{ .kind = "shift_right", .precedence = "shift" },
     .{ .kind = "plus", .precedence = "sum" },
@@ -842,6 +886,7 @@ pub const parser_prefix_kinds = [_][]const u8{
     "struct",
     "trait",
     "enum",
+    "flag",
     "impl",
     "stmt_return",
     "dynamic",
@@ -863,3 +908,59 @@ pub const parser_prefix_kinds = [_][]const u8{
     "logical_false",
     "this",
 };
+
+pub const int_type_info = struct {
+    signed: bool,
+    bits: u16,
+};
+
+pub const default_signed_int_bits: u16 = 64;
+pub const default_unsigned_int_bits: u16 = 64;
+pub const default_signed_int_name: []const u8 = "i64";
+pub const default_unsigned_int_name: []const u8 = "u64";
+
+pub fn unqualified_name(name: []const u8) []const u8 {
+    if (std.mem.lastIndexOf(u8, name, "::")) |idx| {
+        return name[idx + 2 ..];
+    }
+    return name;
+}
+
+pub fn parse_int_type_name(name: []const u8) ?int_type_info {
+    const base = unqualified_name(name);
+    if (base.len < 2) return null;
+    const prefix = base[0];
+    if (prefix != 'i' and prefix != 'u') return null;
+    const digits = base[1..];
+    if (digits.len == 0) return null;
+    const bits = std.fmt.parseInt(u16, digits, 10) catch return null;
+    if (bits < 1 or bits > 512) return null;
+    return .{ .signed = prefix == 'i', .bits = bits };
+}
+
+pub fn is_int_type_name(name: []const u8) bool {
+    return parse_int_type_name(name) != null;
+}
+
+pub fn is_signed_int_type_name(name: []const u8) bool {
+    const info = parse_int_type_name(name) orelse return false;
+    return info.signed;
+}
+
+pub fn is_unsigned_int_type_name(name: []const u8) bool {
+    const info = parse_int_type_name(name) orelse return false;
+    return !info.signed;
+}
+
+pub fn is_builtin_numeric_type_name(name: []const u8) bool {
+    const base = unqualified_name(name);
+    return is_int_type_name(base) or std.mem.eql(u8, base, "float") or std.mem.eql(u8, base, "char");
+}
+
+pub fn is_builtin_type_name(name: []const u8) bool {
+    const base = unqualified_name(name);
+    if (std.mem.eql(u8, base, "int") or std.mem.eql(u8, base, "uint")) return true;
+    if (std.mem.eql(u8, base, "bool") or std.mem.eql(u8, base, "string") or std.mem.eql(u8, base, "char")) return true;
+    if (std.mem.eql(u8, base, "range")) return true;
+    return is_builtin_numeric_type_name(base);
+}

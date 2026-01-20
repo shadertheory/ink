@@ -316,6 +316,7 @@ fn convert_enum_decl(
 ) lower_error!mir.enum_decl {
     return .{
         .name = convert_string_id(decl.name),
+        .is_flag = decl.is_flag,
         .generics = try convert_generic_params(allocator, decl.generics),
         .variants = try convert_enum_variants(allocator, decl.variants),
     };
@@ -349,6 +350,7 @@ fn convert_decl(allocator: mem_allocator, decl: uir_decl) lower_error!mir_decl {
 fn convert_node(allocator: mem_allocator, node: uir_core.uir) lower_error!mir {
     return switch (node) {
         .integer => |value| .{ .integer = value },
+        .character => |value| .{ .integer = value },
         .float => |value| .{ .float = value },
         .duration => |value| .{ .duration = value },
         .string => |value| .{ .string = convert_string_id(value) },

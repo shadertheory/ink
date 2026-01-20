@@ -34,6 +34,7 @@ fn span_for_node(node: *const ink.node) ?source.span {
         .identifier => |id| span_from_location(id.where),
         .string => |str| span_from_location(str.where),
         .integer => |value| span_from_location(value.where),
+        .character => |value| span_from_location(value.where),
         .float => |value| span_from_location(value.where),
         .duration => |value| span_from_location(value.where),
         .unary => |un| span_for_node(ink.ast.deref(un.right)),
@@ -104,6 +105,8 @@ fn span_for_node(node: *const ink.node) ?source.span {
             .@"const" => |c| span_from_location(c.name.where),
             .@"var" => |v| span_from_location(v.name.where),
             .import => |imp| span_from_location(imp.module.where),
+            .mod => |m| span_from_location(m.name.where),
+            .bind => |b| span_from_location(b.where),
         },
     };
 }
@@ -207,6 +210,7 @@ pub const builder = struct {
         defer _ = self.span_stack.pop();
         return switch (node.*) {
             .integer => |value| self.emit(.{ .integer = value.value }),
+            .character => |value| self.emit(.{ .character = value.value }),
             .float => |value| self.emit(.{ .float = @as(f64, value.value) }),
             .duration => |value| self.emit(.{ .duration = value.value }),
             .string => |value| self.emit(.{ .string = try self.intern_string(value.string) }),
@@ -599,9 +603,11 @@ pub const builder = struct {
             .@"enum" => |e| .{ .@"enum" = try self.build_enum_decl(e) },
             .@"impl" => |i| .{ .@"impl" = try self.build_impl_decl(i) },
             .import => return self.fail_node("import"),
+            .mod => return self.fail_node("mod"),
             .type_alias => |t| .{ .type_alias = try self.build_type_decl(t) },
             .@"const" => |c| .{ .@"const" = try self.build_const_decl(c) },
             .@"var" => |v| .{ .@"var" = try self.build_var_decl(v) },
+            .bind => return self.fail_node("bind"),
         } });
     }
 
@@ -673,6 +679,7 @@ pub const builder = struct {
     fn build_enum_decl(self: *builder, e: ink.ast.enum_decl) build_error!uir.enum_decl {
         return .{
             .name = try self.intern_string(e.name.string),
+            .is_flag = e.is_flag,
             .generics = try self.build_generic_params(e.generics),
             .variants = try self.build_enum_variants(e.variants),
         };

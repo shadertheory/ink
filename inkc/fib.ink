@@ -1,4 +1,3 @@
-from module import fib
 
 fn fib(n: int) -> int
 	print(n)

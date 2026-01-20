@@ -18,11 +18,16 @@ const diagnostic = diag.diagnostic;
 const type_flag_trait: u8 = 0b001;
 const type_flag_other: u8 = 0b010;
 
+fn is_inherent_impl_name(name: []const u8) bool {
+    return std.mem.eql(u8, name, lang_spec.inherent_impl_trait_name);
+}
+
 pub const resolver = struct {
     pub const module_id = source.module_id;
     pub const module_import = struct { id: module_id, alias: []const u8 };
 
     const module_state = struct {
+        module_name: []const u8,
         imports: []const module_import,
         values: string_map(void),
         types: string_map(u8),
@@ -220,11 +225,13 @@ pub const resolver = struct {
     pub fn add_module(
         self: *resolver,
         id: module_id,
+        module_name: []const u8,
         imports: []const module_import,
         items: []const *ink.node,
         diags: *array_list(diagnostic),
     ) alloc_error!void {
         var state = module_state{
+            .module_name = module_name,
             .imports = try self.allocator.dupe(module_import, imports),
             .values = string_map(void).init(self.allocator),
             .types = string_map(u8).init(self.allocator),
@@ -258,14 +265,27 @@ pub const resolver = struct {
         try ctx.base_values.put("true", {});
         try ctx.base_values.put("false", {});
         try ctx.base_values.put("none", {});
+        try ctx.base_values.put("undefined", {});
+        try ctx.base_values.put("range", {});
         try ctx.base_values.put("cancel", {});
         try ctx.base_values.put("error::cancelled", {});
         try ctx.base_values.put("error::timeout", {});
-        try ctx.base_types.put("int", type_flag_other);
-        try ctx.base_types.put("uint", type_flag_other);
+        try ctx.base_types.put("int", type_flag_trait);
+        try ctx.base_types.put("uint", type_flag_trait);
         try ctx.base_types.put("float", type_flag_other);
         try ctx.base_types.put("bool", type_flag_other);
         try ctx.base_types.put("string", type_flag_other);
+        try ctx.base_types.put("char", type_flag_other);
+        try ctx.base_types.put("range", type_flag_other);
+        var bit_width: u16 = 1;
+        while (bit_width <= 512) : (bit_width += 1) {
+            const unsigned_name = try std.fmt.allocPrint(ctx.allocator, "u{d}", .{bit_width});
+            try ctx.base_types.put(unsigned_name, type_flag_other);
+            try ctx.allocated_names.append(ctx.allocator, unsigned_name);
+            const signed_name = try std.fmt.allocPrint(ctx.allocator, "i{d}", .{bit_width});
+            try ctx.base_types.put(signed_name, type_flag_other);
+            try ctx.allocated_names.append(ctx.allocator, signed_name);
+        }
         try ctx.base_types.put("token_stream", type_flag_other);
         try ctx.base_types.put("token_tree", type_flag_other);
         try ctx.base_types.put("token", type_flag_other);
@@ -279,6 +299,7 @@ pub const resolver = struct {
         try ctx.base_types.put("none", type_flag_other);
         try ctx.base_types.put("result", type_flag_other);
         try ctx.base_types.put("error", type_flag_other);
+        try ctx.base_types.put("lexer_error", type_flag_other);
         try ctx.base_types.put("task", type_flag_other);
         try ctx.base_types.put("buf", type_flag_other);
         try ctx.base_types.put("arena", type_flag_other);
@@ -338,7 +359,9 @@ pub const resolver = struct {
                         try state.allocated_names.append(state.allocator, qualified);
                     }
                 },
+                .bind => |_| {},
                 .import => |_| {},
+                .mod => |_| {},
                 .impl => |_| {},
             }
         }
@@ -377,23 +400,56 @@ pub const resolver = struct {
         types: *string_map(u8),
         state: module_state,
     ) alloc_error!void {
+        const module_name = state.module_name;
+        const module_prefix_len = module_name.len;
+        const sep = "::";
+
         var itv = state.values.iterator();
         while (itv.next()) |entry| {
-            if (!values.contains(entry.key_ptr.*)) {
-                try values.put(entry.key_ptr.*, {});
+            const name = entry.key_ptr.*;
+            if (!values.contains(name)) {
+                try values.put(name, {});
+            }
+            if (module_prefix_len != 0 and
+                std.mem.startsWith(u8, name, module_name) and
+                name.len > module_prefix_len + sep.len and
+                name[module_prefix_len] == ':' and
+                name[module_prefix_len + 1] == ':')
+            {
+                const relative = name[(module_prefix_len + sep.len)..];
+                if (!values.contains(relative)) {
+                    try values.put(relative, {});
+                }
             }
         }
 
         var itt = state.types.iterator();
         while (itt.next()) |entry| {
             const incoming = entry.value_ptr.*;
-            if (types.get(entry.key_ptr.*)) |existing| {
+            const name = entry.key_ptr.*;
+            if (types.get(name)) |existing| {
                 const merged = merge_type_flags(existing, incoming);
                 if (merged != existing) {
-                    try types.put(entry.key_ptr.*, merged);
+                    try types.put(name, merged);
                 }
             } else {
-                try types.put(entry.key_ptr.*, incoming);
+                try types.put(name, incoming);
+            }
+            if (module_prefix_len != 0 and
+                std.mem.startsWith(u8, name, module_name) and
+                name.len > module_prefix_len + sep.len and
+                name[module_prefix_len] == ':' and
+                name[module_prefix_len + 1] == ':')
+            {
+                const relative = name[(module_prefix_len + sep.len)..];
+                if (types.get(relative)) |existing| {
+                    const merged = merge_type_flags(existing, incoming);
+                    if (merged != existing) {
+                        try types.put(relative, merged);
+                    }
+                } else {
+                    try types.put(relative, incoming);
+                }
             }
         }
     }
@@ -405,33 +461,127 @@ pub const resolver = struct {
         state: module_state,
         alias: []const u8,
     ) alloc_error!void {
+        const module_name = state.module_name;
+        const module_prefix_len = module_name.len;
+        const sep = "::";
+
         var itv = state.values.iterator();
         while (itv.next()) |entry| {
             const name = entry.key_ptr.*;
-            const qualified = if (std.mem.indexOf(u8, name, "::") != null)
-                name
-            else
-                try qualify_name(ctx, alias, name);
-            if (!values.contains(qualified)) {
-                try values.put(qualified, {});
+            const scope_idx = std.mem.indexOf(u8, name, "::");
+            const has_scope = scope_idx != null;
+            var is_module_prefixed = false;
+            var relative_name: []const u8 = name;
+
+            if (has_scope and module_prefix_len != 0) {
+                if (std.mem.startsWith(u8, name, module_name) and
+                    name.len > module_prefix_len + sep.len and
+                    name[module_prefix_len] == ':' and
+                    name[module_prefix_len + 1] == ':')
+                {
+                    is_module_prefixed = true;
+                    relative_name = name[(module_prefix_len + sep.len)..];
+                }
+            }
+
+            if (has_scope) {
+                if (!values.contains(name)) {
+                    try values.put(name, {});
+                }
+                if (is_module_prefixed) {
+                    const aliased = try qualify_name(ctx, alias, relative_name);
+                    if (!values.contains(aliased)) {
+                        try values.put(aliased, {});
+                    }
+                    if (std.mem.indexOf(u8, relative_name, "::") != null) {
+                        if (!values.contains(relative_name)) {
+                            try values.put(relative_name, {});
+                        }
+                    }
+                } else {
+                    const aliased = try qualify_name(ctx, alias, name);
+                    if (!values.contains(aliased)) {
+                        try values.put(aliased, {});
+                    }
+                }
+            } else {
+                const qualified = try qualify_name(ctx, alias, name);
+                if (!values.contains(qualified)) {
+                    try values.put(qualified, {});
+                }
             }
         }
 
         var itt = state.types.iterator();
         while (itt.next()) |entry| {
             const name = entry.key_ptr.*;
-            const qualified = if (std.mem.indexOf(u8, name, "::") != null)
-                name
-            else
-                try qualify_name(ctx, alias, name);
             const incoming = entry.value_ptr.*;
-            if (types.get(qualified)) |existing| {
-                const merged = merge_type_flags(existing, incoming);
-                if (merged != existing) {
-                    try types.put(qualified, merged);
+            const scope_idx = std.mem.indexOf(u8, name, "::");
+            const has_scope = scope_idx != null;
+            var is_module_prefixed = false;
+            var relative_name: []const u8 = name;
+
+            if (has_scope and module_prefix_len != 0) {
+                if (std.mem.startsWith(u8, name, module_name) and
+                    name.len > module_prefix_len + sep.len and
+                    name[module_prefix_len] == ':' and
+                    name[module_prefix_len + 1] == ':')
+                {
+                    is_module_prefixed = true;
+                    relative_name = name[(module_prefix_len + sep.len)..];
+                }
+            }
+
+            if (has_scope) {
+                if (types.get(name)) |existing| {
+                    const merged = merge_type_flags(existing, incoming);
+                    if (merged != existing) {
+                        try types.put(name, merged);
+                    }
+                } else {
+                    try types.put(name, incoming);
+                }
+                if (is_module_prefixed) {
+                    const aliased = try qualify_name(ctx, alias, relative_name);
+                    if (types.get(aliased)) |existing| {
+                        const merged = merge_type_flags(existing, incoming);
+                        if (merged != existing) {
+                            try types.put(aliased, merged);
+                        }
+                    } else {
+                        try types.put(aliased, incoming);
+                    }
+                    if (std.mem.indexOf(u8, relative_name, "::") != null) {
+                        if (types.get(relative_name)) |existing| {
+                            const merged = merge_type_flags(existing, incoming);
+                            if (merged != existing) {
+                                try types.put(relative_name, merged);
+                            }
+                        } else {
+                            try types.put(relative_name, incoming);
+                        }
+                    }
+                } else {
+                    const aliased = try qualify_name(ctx, alias, name);
+                    if (types.get(aliased)) |existing| {
+                        const merged = merge_type_flags(existing, incoming);
+                        if (merged != existing) {
+                            try types.put(aliased, merged);
+                        }
+                    } else {
+                        try types.put(aliased, incoming);
+                    }
                 }
             } else {
-                try types.put(qualified, incoming);
+                const qualified = try qualify_name(ctx, alias, name);
+                if (types.get(qualified)) |existing| {
+                    const merged = merge_type_flags(existing, incoming);
+                    if (merged != existing) {
+                        try types.put(qualified, merged);
+                    }
+                } else {
+                    try types.put(qualified, incoming);
+                }
             }
         }
     }
@@ -448,7 +598,7 @@ pub const resolver = struct {
 
     fn resolve_node(ctx: *context, node: *const ink.node, diags: *array_list(diagnostic)) alloc_error!void {
         switch (node.*) {
-            .integer, .float, .duration, .string => {},
+            .integer, .character, .float, .duration, .string => {},
             .identifier => |id| {
                 const ok = ctx.resolve_value(id.string);
                 if (!ok) {
@@ -727,7 +877,14 @@ pub const resolver = struct {
             },
             .trait => |t| try ctx.declare_type(t.name.string, type_flag_trait, diags, node),
             .@"enum" => |e| try ctx.declare_type(e.name.string, type_flag_other, diags, node),
+            .bind => |b| {
+                for (b.fields) |field| {
+                    if (std.mem.eql(u8, field.string, "_")) continue;
+                    try ctx.declare_value(field.string, diags, node);
+                }
+            },
             .import => |_| {},
+            .mod => |_| {},
             .impl => {},
         }
     }
@@ -740,9 +897,26 @@ pub const resolver = struct {
             .@"enum" => |e| try resolve_enum_decl(ctx, e, diags),
             .impl => |i| try resolve_impl_decl(ctx, i, diags),
             .import => |imp| try resolve_import_decl(ctx, imp, diags),
+            .mod => |_| {},
             .type_alias => |t| try resolve_type_alias_decl(ctx, t, diags),
             .@"const" => |c| try resolve_const_decl(ctx, c, diags),
             .@"var" => |v| try resolve_var_decl(ctx, v, diags),
+            .bind => |b| {
+                try resolve_attributes(ctx, b.attributes, diags);
+                if (!ctx.resolve_type(b.type_name.string)) {
+                    const hint = try suggest_type(ctx, b.type_name.string);
+                    try report_unknown(
+                        ctx,
+                        diags,
+                        "unknown type",
+                        b.type_name.string,
+                        span{ .start = b.type_name.where.start, .end = b.type_name.where.end },
+                        "E2002",
+                        hint,
+                    );
+                }
+                try resolve_node(ctx, ink.ast.deref(b.value), diags);
+            },
         }
     }
 
@@ -971,6 +1145,28 @@ pub const resolver = struct {
             if (param.default) |ref| try resolve_type_node(ctx, ink.ast.deref(ref), diags);
         }
 
+        if (e.is_flag) {
+            if (e.variants.len > 64) {
+                try diags.append(.{
+                    .danger = .@"error",
+                    .message = "flag cannot have more than 64 variants",
+                    .span = span{ .start = e.name.where.start, .end = e.name.where.end },
+                    .source_id = ctx.current_source_id,
+                });
+            }
+            for (e.variants) |variant| {
+                if (variant.payload != null) {
+                    try diags.append(.{
+                        .danger = .@"error",
+                        .message = "flag variants cannot have payloads",
+                        .span = span{ .start = variant.name.where.start, .end = variant.name.where.end },
+                        .source_id = ctx.current_source_id,
+                    });
+                    break;
+                }
+            }
+        }
+
         for (e.variants) |variant| {
             if (variant.payload) |ref| try resolve_type_node(ctx, ink.ast.deref(ref), diags);
         }
@@ -996,7 +1192,8 @@ pub const resolver = struct {
 
     fn resolve_impl_decl(ctx: *context, im: ink.ast.impl_decl, diags: *array_list(diagnostic)) alloc_error!void {
         try resolve_attributes(ctx, im.attributes, diags);
-        if (!ctx.resolve_type(im.by_trait.string)) {
+        const is_inherent = is_inherent_impl_name(im.by_trait.string);
+        if (!is_inherent and !ctx.resolve_type(im.by_trait.string)) {
             const hint = try suggest_type(ctx, im.by_trait.string);
             try report_unknown(
                 ctx,
@@ -1407,10 +1604,10 @@ pub const resolver = struct {
             });
             return;
         };
-        if (bits <= 0) {
+        if (bits <= 0 or bits > 512) {
             try diags.append(.{
                 .danger = .@"error",
-                .message = "int/uint bit width must be > 0",
+                .message = "int/uint bit width must be between 1 and 512",
                 .span = span_of_node(bits_node),
                 .source_id = ctx.current_source_id,
             });
@@ -1420,6 +1617,7 @@ pub const resolver = struct {
     fn eval_const_int(node: *const ink.node) ?i64 {
         return switch (node.*) {
             .integer => |value| value.value,
+            .character => |value| value.value,
             .unary => |un| switch (un.op) {
                 .neg => blk: {
                     const inner = eval_const_int(ink.ast.deref(un.right)) orelse break :blk null;
@@ -1447,6 +1645,7 @@ pub const resolver = struct {
         return switch (node.*) {
             .identifier => |id| span{ .start = id.where.start, .end = id.where.end },
             .integer => |value| span{ .start = value.where.start, .end = value.where.end },
+            .character => |value| span{ .start = value.where.start, .end = value.where.end },
             .float => |value| span{ .start = value.where.start, .end = value.where.end },
             .duration => |value| span{ .start = value.where.start, .end = value.where.end },
             .string => |str| span{ .start = str.where.start, .end = str.where.end },

@@ -1,5 +1,6 @@
 const std = @import("std");
 const ink = @import("ink");
+const lang_spec = ink.lang_spec;
 const mir_mod = ink.mir;
 const core = @import("core.zig");
 const intrinsic = @import("../../intrinsic.zig");
@@ -84,6 +85,7 @@ const macro_token_kind = enum(u8) {
     equal,
     not_equal,
     @"enum",
+    flag,
     type,
     arrow,
     question,
@@ -234,15 +236,40 @@ fn split_enum_constructor_name(name: []const u8) ?struct { enum_name: []const u8
 }
 
 fn is_builtin_type_name(name: []const u8) bool {
-    return std.mem.eql(u8, name, "int") or
-        std.mem.eql(u8, name, "uint") or
-        std.mem.eql(u8, name, "float") or
-        std.mem.eql(u8, name, "bool") or
-        std.mem.eql(u8, name, "string");
+    const base = lang_spec.unqualified_name(name);
+    if (lang_spec.is_builtin_type_name(base)) return true;
+    return std.mem.eql(u8, base, "token_stream") or
+        std.mem.eql(u8, base, "token_tree") or std.mem.eql(u8, base, "token") or
+        std.mem.eql(u8, base, "token_group") or std.mem.eql(u8, base, "token_kind") or
+        std.mem.eql(u8, base, "token_tree_kind") or std.mem.eql(u8, base, "delimiter") or
+        std.mem.eql(u8, base, "span") or std.mem.eql(u8, base, "symbol") or
+        std.mem.eql(u8, base, "type") or std.mem.eql(u8, base, "none") or
+        std.mem.eql(u8, base, "result") or std.mem.eql(u8, base, "error") or
+        std.mem.eql(u8, base, "lexer_error") or
+        std.mem.eql(u8, base, "task") or std.mem.eql(u8, base, "buf") or
+        std.mem.eql(u8, base, "arena") or std.mem.eql(u8, base, "union") or
+        std.mem.eql(u8, base, "intersect") or std.mem.eql(u8, base, "tuple") or
+        std.mem.eql(u8, base, "fn") or std.mem.eql(u8, base, "slice") or
+        std.mem.eql(u8, base, "array") or std.mem.eql(u8, base, "list") or
+        std.mem.eql(u8, base, "box") or std.mem.eql(u8, base, "atomic") or
+        std.mem.eql(u8, base, "duration") or std.mem.eql(u8, base, "instant") or
+        std.mem.eql(u8, base, "deadline") or std.mem.eql(u8, base, "fd") or
+        std.mem.eql(u8, base, "not") or std.mem.eql(u8, base, "send") or
+        std.mem.eql(u8, base, "sync") or std.mem.eql(u8, base, "sized");
 }
 
 fn is_int_type_name(name: []const u8) bool {
-    return std.mem.eql(u8, name, "int") or std.mem.eql(u8, name, "uint");
+    return lang_spec.is_int_type_name(name);
+}
+
+fn is_int_type_key(key: type_key) bool {
+    const name = type_key_base_name(key) orelse return false;
+    return lang_spec.is_int_type_name(name);
+}
+
+fn is_uint_type_key(key: type_key) bool {
+    const name = type_key_base_name(key) orelse return false;
+    return lang_spec.is_unsigned_int_type_name(name);
 }
 
 fn is_float_type_name(name: []const u8) bool {
@@ -383,6 +410,7 @@ const struct_info = struct {
 const enum_info = struct {
     variants: []const mir_mod.mir.enum_variant,
     generics: []const mir_mod.mir.generic_param,
+    is_flag: bool,
 };
 
 const trait_method = struct {
@@ -443,6 +471,7 @@ const builder = struct {
     label_constants: std.AutoHashMap(ink.exe.label_id, u32),
     owned_slices: std.ArrayListUnmanaged([]const u8),
     owned_type_slices: std.ArrayListUnmanaged([]const type_key),
+    owned_type_names: std.ArrayListUnmanaged([]const u8),
     next_label: u32,
 
     pub fn init(
@@ -480,6 +509,7 @@ const builder = struct {
             .label_constants = std.AutoHashMap(ink.exe.label_id, u32).init(allocator),
             .owned_slices = std.ArrayListUnmanaged([]const u8){},
             .owned_type_slices = std.ArrayListUnmanaged([]const type_key){},
+            .owned_type_names = std.ArrayListUnmanaged([]const u8){},
             .next_label = 1,
         };
     }
@@ -553,6 +583,18 @@ const builder = struct {
             self.allocator.free(slice);
         }
         self.owned_type_slices.deinit(self.allocator);
+        for (self.owned_type_names.items) |name| {
+            self.allocator.free(name);
+        }
+        self.owned_type_names.deinit(self.allocator);
+    }
+
+    fn int_type_name(self: *builder, signed: bool, bits: i64) ?[]const u8 {
+        if (bits < 1 or bits > 512) return null;
+        const prefix: u8 = if (signed) 'i' else 'u';
+        const name = std.fmt.allocPrint(self.allocator, "{c}{d}", .{ prefix, bits }) catch return null;
+        self.owned_type_names.append(self.allocator, name) catch return null;
+        return name;
     }
 
     pub fn emit(self: *builder, inst: ink.exe.instruction) lower_error!void {
@@ -663,6 +705,9 @@ fn type_key_from_type_node_with_self(b: *builder, id: mir_mod.mir_identifier, se
             if (b.type_aliases.get(name)) |alias_ref| {
                 break :blk type_key_from_type_node_with_self(b, alias_ref, self_name);
             }
+            const base = lang_spec.unqualified_name(name);
+            if (std.mem.eql(u8, base, "int")) break :blk .{ .name = lang_spec.default_signed_int_name };
+            if (std.mem.eql(u8, base, "uint")) break :blk .{ .name = lang_spec.default_unsigned_int_name };
             break :blk .{ .name = name };
         },
         .type => |ty| switch (ty) {
@@ -672,6 +717,9 @@ fn type_key_from_type_node_with_self(b: *builder, id: mir_mod.mir_identifier, se
                 if (b.type_aliases.get(name)) |alias_ref| {
                     break :blk type_key_from_type_node_with_self(b, alias_ref, self_name);
                 }
+                const base = lang_spec.unqualified_name(name);
+                if (std.mem.eql(u8, base, "int")) break :blk .{ .name = lang_spec.default_signed_int_name };
+                if (std.mem.eql(u8, base, "uint")) break :blk .{ .name = lang_spec.default_unsigned_int_name };
                 break :blk .{ .name = name };
             },
             .dyn => |ref| blk: {
@@ -711,6 +759,16 @@ fn type_key_from_type_node_with_self(b: *builder, id: mir_mod.mir_identifier, se
                 break :blk .{ .applied = .{ .base = "optional", .args = args } };
             },
             .applied => |ap| blk: {
+                const base_name = b.string_value(ap.base);
+                if ((std.mem.eql(u8, base_name, "int") or std.mem.eql(u8, base_name, "uint")) and ap.args.len == 1) {
+                    const arg_node = b.node(ap.args[0]);
+                    if (arg_node == .integer) {
+                        const signed = std.mem.eql(u8, base_name, "int");
+                        if (b.int_type_name(signed, arg_node.integer)) |name| {
+                            break :blk .{ .name = name };
+                        }
+                    }
+                }
                 const args = b.allocator.alloc(type_key, ap.args.len) catch break :blk .unknown;
                 for (ap.args, 0..) |arg, idx| {
                     const arg_node = b.node(arg);
@@ -738,7 +796,7 @@ fn type_key_from_type_node_with_self(b: *builder, id: mir_mod.mir_identifier, se
                     }
                 }
                 b.owned_type_slices.append(b.allocator, args) catch break :blk .unknown;
-                break :blk .{ .applied = .{ .base = b.string_value(ap.base), .args = args } };
+                break :blk .{ .applied = .{ .base = base_name, .args = args } };
             },
         },
         else => .unknown,
@@ -784,7 +842,7 @@ fn constraint_from_type_node(b: *builder, id: mir_mod.mir_identifier) ?trait_con
 }
 
 fn add_builtin_traits(b: *builder) void {
-    const builtin_names = [_][]const u8{ "send", "sync", "sized" };
+    const builtin_names = [_][]const u8{ "send", "sync", "sized", "int", "uint" };
     for (builtin_names) |name| {
         if (b.traits.contains(name)) continue;
         const methods = b.allocator.alloc(trait_method, 0) catch return;
@@ -884,6 +942,7 @@ fn enum_payload_type_key(
 }
 
 fn enum_max_payload_words(b: *builder, enum_name: []const u8, info: enum_info, bindings: []const generic_binding) u8 {
+    if (info.is_flag) return 0;
     var max_words: u8 = 0;
     for (info.variants) |variant| {
         if (variant.payload) |payload_id| {
@@ -896,6 +955,7 @@ fn enum_max_payload_words(b: *builder, enum_name: []const u8, info: enum_info, b
 }
 
 fn enum_word_count(b: *builder, enum_name: []const u8, info: enum_info, type_args: ?[]const type_key) u8 {
+    if (info.is_flag) return 1;
     var bindings = std.ArrayListUnmanaged(generic_binding){};
     defer bindings.deinit(b.allocator);
 
@@ -1458,9 +1518,12 @@ fn auto_trait_satisfied(
     visited_traits: *std.ArrayListUnmanaged([]const u8),
     visited_types: *std.StringHashMapUnmanaged(void),
 ) bool {
-    if (std.mem.eql(u8, trait_name, "sized")) return auto_trait_sized(b, ty, visited_traits, visited_types);
-    if (std.mem.eql(u8, trait_name, "send")) return auto_trait_send(b, ty, visited_traits, visited_types);
-    if (std.mem.eql(u8, trait_name, "sync")) return auto_trait_sync(b, ty, visited_traits, visited_types);
+    const base = lang_spec.unqualified_name(trait_name);
+    if (std.mem.eql(u8, base, "int")) return is_int_type_key(ty);
+    if (std.mem.eql(u8, base, "uint")) return is_uint_type_key(ty);
+    if (std.mem.eql(u8, base, "sized")) return auto_trait_sized(b, ty, visited_traits, visited_types);
+    if (std.mem.eql(u8, base, "send")) return auto_trait_send(b, ty, visited_traits, visited_types);
+    if (std.mem.eql(u8, base, "sync")) return auto_trait_sync(b, ty, visited_traits, visited_types);
     return auto_trait_structural(b, ty, trait_name, visited_traits, visited_types);
 }
 
@@ -1472,7 +1535,8 @@ fn type_satisfies_trait(
     visited_types: *std.StringHashMapUnmanaged(void),
 ) bool {
     if (ty == .unknown) return true;
-    if (std.mem.eql(u8, trait_name, "print_to")) {
+    const trait_base = lang_spec.unqualified_name(trait_name);
+    if (std.mem.eql(u8, trait_base, "print_to")) {
         if (type_key_base_name(ty)) |base_name| {
             if (is_builtin_type_name(base_name)) return true;
         }
@@ -2007,7 +2071,7 @@ const function_ctx = struct {
         }
         const node = self.b.node(id);
         return switch (node) {
-            .integer => .{ .name = "int" },
+            .integer => .{ .name = lang_spec.default_unsigned_int_name },
             .float => .{ .name = "float" },
             .boolean => .{ .name = "bool" },
             .string => .{ .name = "string" },
@@ -2041,7 +2105,7 @@ const function_ctx = struct {
                             break :blk right.applied.args[0];
                         }
                     }
-                    break :blk .{ .name = "int" };
+                    break :blk .{ .name = lang_spec.default_signed_int_name };
                 }
                 if (un.op == .box) {
                     const args = self.b.allocator.alloc(type_key, 1) catch break :blk .unknown;
@@ -2550,7 +2614,7 @@ const function_ctx = struct {
                 }
             },
             .bit_not => {
-                if (self.is_int_type_key(right_type) or right_type == .unknown) {
+                if (self.is_flag_type_key(right_type) or self.is_int_type_key(right_type) or right_type == .unknown) {
                     return self.emit_int_unary(right_id, .bit_not);
                 }
             },
@@ -2624,6 +2688,15 @@ const function_ctx = struct {
         const same_int = self.is_int_type_key(left_type) and self.is_int_type_key(right_type);
         const same_float = self.is_float_type_key(left_type) and self.is_float_type_key(right_type);
         const same_bool = self.is_bool_type_key(left_type) and self.is_bool_type_key(right_type);
+        const left_flag = self.is_flag_type_key(left_type);
+        const right_flag = self.is_flag_type_key(right_type);
+        const same_flag = left_flag and right_flag and blk: {
+            const left_name = type_key_base_name(left_type) orelse break :blk false;
+            const right_name = type_key_base_name(right_type) orelse break :blk false;
+            break :blk std.mem.eql(u8, left_name, right_name);
+        };
+        const left_unknown = left_type == .unknown;
+        const right_unknown = right_type == .unknown;
 
         switch (op) {
             .add => {
@@ -2647,19 +2720,34 @@ const function_ctx = struct {
                 if (same_int or left_type == .unknown or right_type == .unknown) return self.emit_int_binary(left_id, right_id, .rem);
             },
             .bit_and => {
-                if (same_int or left_type == .unknown or right_type == .unknown) return self.emit_int_binary(left_id, right_id, .bit_and);
+                if (same_flag or ((left_flag or right_flag) and (left_unknown or right_unknown))) {
+                    return self.emit_int_binary(left_id, right_id, .bit_and);
+                }
+                if (same_int or left_unknown or right_unknown) return self.emit_int_binary(left_id, right_id, .bit_and);
             },
             .bit_or => {
-                if (same_int or left_type == .unknown or right_type == .unknown) return self.emit_int_binary(left_id, right_id, .bit_or);
+                if (same_flag or ((left_flag or right_flag) and (left_unknown or right_unknown))) {
+                    return self.emit_int_binary(left_id, right_id, .bit_or);
+                }
+                if (same_int or left_unknown or right_unknown) return self.emit_int_binary(left_id, right_id, .bit_or);
             },
             .bit_xor => {
-                if (same_int or left_type == .unknown or right_type == .unknown) return self.emit_int_binary(left_id, right_id, .bit_xor);
+                if (same_flag or ((left_flag or right_flag) and (left_unknown or right_unknown))) {
+                    return self.emit_int_binary(left_id, right_id, .bit_xor);
+                }
+                if (same_int or left_unknown or right_unknown) return self.emit_int_binary(left_id, right_id, .bit_xor);
             },
             .shl => {
-                if (same_int or left_type == .unknown or right_type == .unknown) return self.emit_int_binary(left_id, right_id, .bit_shl);
+                if (left_flag and (self.is_int_type_key(right_type) or right_unknown)) {
+                    return self.emit_int_binary(left_id, right_id, .bit_shl);
+                }
+                if (same_int or left_unknown or right_unknown) return self.emit_int_binary(left_id, right_id, .bit_shl);
             },
             .shr => {
-                if (same_int or left_type == .unknown or right_type == .unknown) return self.emit_int_binary(left_id, right_id, .bit_shr);
+                if (left_flag and (self.is_int_type_key(right_type) or right_unknown)) {
+                    return self.emit_int_binary(left_id, right_id, .bit_shr);
+                }
+                if (same_int or left_unknown or right_unknown) return self.emit_int_binary(left_id, right_id, .bit_shr);
             },
             .equal => {
                 if (same_float) return self.emit_float_binary(left_id, right_id, .fcompare_eq);
@@ -2838,15 +2926,13 @@ const function_ctx = struct {
                             if (try self.store_index_set_value(bin.left, bin.right, value_reg, base_type, value_type, left_id)) |reg| {
                                 return reg;
                             }
-                            if (self.is_known_non_builtin(base_type)) return error.unknown_function;
-                            return error.unsupported_node;
+                            return error.unknown_function;
                         }
-                    } else if (self.trait_name_from_type(base_type) != null or self.is_known_non_builtin(base_type)) {
+                    } else {
                         if (try self.store_index_set_value(bin.left, bin.right, value_reg, base_type, value_type, left_id)) |reg| {
                             return reg;
                         }
-                        if (self.is_known_non_builtin(base_type)) return error.unknown_function;
-                        return error.unsupported_node;
+                        return error.unknown_function;
                     }
 
                     const ptr_reg = try self.compile_index_ptr(bin.left, bin.right);
@@ -2991,9 +3077,11 @@ const function_ctx = struct {
         }
 
         if (result != null) return value_reg;
-        if (self.is_known_non_builtin(base_type)) {
-            self.record_call_error(call_id, "no matching overload for ", "index_set", &.{ base_type, index_type, value_type }, true);
-        }
+        const prefix = if (self.b.functions.contains("index_set"))
+            "no matching overload for "
+        else
+            "unknown method ";
+        self.record_call_error(call_id, prefix, "index_set", &.{ base_type, index_type, value_type }, true);
         return null;
     }
 
@@ -3676,8 +3764,15 @@ const function_ctx = struct {
         return is_bool_type_name(name);
     }
 
+    fn is_flag_type_key(self: *function_ctx, ty: type_key) bool {
+        const name = type_key_base_name(ty) orelse return false;
+        if (self.b.enums.get(name)) |info| return info.is_flag;
+        return false;
+    }
+
     fn is_known_non_builtin(self: *function_ctx, ty: type_key) bool {
         const name = type_key_base_name(ty) orelse return false;
+        if (self.is_flag_type_key(ty)) return false;
         if (is_builtin_type_name(name)) return false;
         if (self.b.traits.contains(name)) return false;
         return true;
@@ -3730,6 +3825,12 @@ const function_ctx = struct {
                     const idx = try self.b.intern_const(value);
                     const reg = try self.alloc_temp();
                     try self.emit(.{ .load_const = .{ .dst = reg, .const_index = idx } });
+                    break :blk reg;
+                }
+                if (try self.try_compile_flag_value(name, id)) |reg| {
+                    break :blk reg;
+                }
+                if (try self.try_compile_enum_constructor(name, &.{}, &.{}, id)) |reg| {
                     break :blk reg;
                 }
                 if (self.b.global_consts.get(name)) |info| {
@@ -4801,6 +4902,26 @@ const function_ctx = struct {
         }
         if (!found) return null;
 
+        if (info.is_flag) {
+            if (arg_ids.len != 0) {
+                self.b.set_error_fmt(
+                    node_id,
+                    "invalid call to {s}: expected {d} arguments, got {d}",
+                    .{ name, 0, arg_ids.len },
+                );
+                return error.unknown_function;
+            }
+            if (variant_idx >= 64) {
+                self.b.set_error_fmt(node_id, "flag variant index exceeds 63", .{});
+                return error.unsupported_node;
+            }
+            const value = @as(u64, 1) << @intCast(variant_idx);
+            const const_idx = try self.b.intern_const(value);
+            const reg = try self.alloc_temp();
+            try self.emit(.{ .load_const = .{ .dst = reg, .const_index = const_idx } });
+            return reg;
+        }
+
         const expected_args: usize = if (payload_id != null) 1 else 0;
         if (arg_ids.len != expected_args) {
             self.b.set_error_fmt(
@@ -4869,6 +4990,36 @@ const function_ctx = struct {
         }
 
         return base_reg;
+    }
+
+    fn try_compile_flag_value(
+        self: *function_ctx,
+        name: []const u8,
+        node_id: mir_mod.mir_identifier,
+    ) lower_error!?u8 {
+        const split = split_enum_constructor_name(name) orelse return null;
+        const info = self.b.enums.get(split.enum_name) orelse return null;
+        if (!info.is_flag) return null;
+
+        var variant_idx: usize = 0;
+        var found = false;
+        for (info.variants, 0..) |variant, idx| {
+            if (std.mem.eql(u8, self.b.string_value(variant.name), split.variant_name)) {
+                variant_idx = idx;
+                found = true;
+                break;
+            }
+        }
+        if (!found) return null;
+        if (variant_idx >= 64) {
+            self.b.set_error_fmt(node_id, "flag variant index exceeds 63", .{});
+            return error.unsupported_node;
+        }
+        const value = @as(u64, 1) << @intCast(variant_idx);
+        const const_idx = try self.b.intern_const(value);
+        const reg = try self.alloc_temp();
+        try self.emit(.{ .load_const = .{ .dst = reg, .const_index = const_idx } });
+        return reg;
     }
 
     fn compile_await_expr(self: *function_ctx, id: mir_mod.mir_identifier) lower_error!u8 {
@@ -4991,7 +5142,7 @@ const function_ctx = struct {
         const node = self.b.node(value_id);
         return switch (node) {
             .record_literal => |rec| self.b.string_value(rec.type_name),
-            .integer => "int",
+            .integer => lang_spec.default_unsigned_int_name,
             .float => "float",
             .boolean => "bool",
             .string => "string",
@@ -5350,7 +5501,7 @@ const function_ctx = struct {
         const name = type_key_base_name(arg_type) orelse return error.unsupported_node;
         if (std.mem.eql(u8, name, "string")) return arg_reg;
 
-        const foreign_fn = if (std.mem.eql(u8, name, "int") or std.mem.eql(u8, name, "uint"))
+        const foreign_fn = if (lang_spec.is_int_type_name(name) or std.mem.eql(u8, name, "int") or std.mem.eql(u8, name, "uint"))
             "std::string_from_int"
         else if (std.mem.eql(u8, name, "float"))
             "std::string_from_float"
@@ -5712,7 +5863,7 @@ const function_ctx = struct {
 
     fn resolve_print_to(self: *function_ctx, arg_type: type_key) lower_error!?function_info {
         const group = self.b.functions.get("print_to") orelse return null;
-        var call_types = [_]type_key{ .{ .name = "int" }, arg_type };
+        var call_types = [_]type_key{ .{ .name = lang_spec.default_signed_int_name }, arg_type };
         const selected_idx = self.resolve_function_overload_index(group.items, call_types[0..]) catch |err| switch (err) {
             error.unknown_function => return null,
             else => return err,
@@ -5804,7 +5955,7 @@ const function_ctx = struct {
         } else {
             const print_suffix = switch (arg_type) {
                 .name => |type_name| blk: {
-                    if (std.mem.eql(u8, type_name, "int") or std.mem.eql(u8, type_name, "uint")) break :blk "print_int";
+                    if (lang_spec.is_int_type_name(type_name) or std.mem.eql(u8, type_name, "int") or std.mem.eql(u8, type_name, "uint") or std.mem.eql(u8, type_name, "char")) break :blk "print_int";
                     if (std.mem.eql(u8, type_name, "float")) break :blk "print_float";
                     if (std.mem.eql(u8, type_name, "bool")) break :blk "print_bool";
                     if (std.mem.eql(u8, type_name, "string")) break :blk "print_string";
@@ -5816,7 +5967,7 @@ const function_ctx = struct {
                     return error.unknown_function;
                 },
                 .applied => |ap| blk: {
-                    if (std.mem.eql(u8, ap.base, "int") or std.mem.eql(u8, ap.base, "uint")) break :blk "print_int";
+                    if (lang_spec.is_int_type_name(ap.base) or std.mem.eql(u8, ap.base, "int") or std.mem.eql(u8, ap.base, "uint") or std.mem.eql(u8, ap.base, "char")) break :blk "print_int";
                     if (std.mem.eql(u8, ap.base, "float")) break :blk "print_float";
                     if (std.mem.eql(u8, ap.base, "bool")) break :blk "print_bool";
                     if (std.mem.eql(u8, ap.base, "string")) break :blk "print_string";
@@ -6333,7 +6484,7 @@ const function_ctx = struct {
             } else if (std.mem.eql(u8, name, "array")) {
                 data_reg = try self.ptr_of_reg(base_reg);
                 if (self.is_temp(base_reg)) base_owner_reg = base_reg;
-            } else if (self.trait_name_from_type(base_type) != null or self.is_known_non_builtin(base_type)) {
+            } else {
                 const maybe_reg = self.try_compile_method_call("index", left, &.{right}) catch |err| switch (err) {
                     error.unknown_function => {
                         self.record_call_error(node_id, "unknown method ", "index", &.{ base_type, self.infer_expr_type(right) }, true);
@@ -6344,15 +6495,15 @@ const function_ctx = struct {
                 if (maybe_reg) |reg| {
                     return reg;
                 }
-                if (self.is_known_non_builtin(base_type)) {
-                    self.record_call_error(node_id, "no matching overload for ", "index", &.{ base_type, self.infer_expr_type(right) }, true);
-                    return error.unknown_function;
-                }
-                return error.unsupported_node;
-            } else {
-                return error.unsupported_node;
+                const index_type = self.infer_expr_type(right);
+                const prefix = if (self.b.functions.contains("index"))
+                    "no matching overload for "
+                else
+                    "unknown method ";
+                self.record_call_error(node_id, prefix, "index", &.{ base_type, index_type }, true);
+                return error.unknown_function;
             }
-        } else if (self.trait_name_from_type(base_type) != null or self.is_known_non_builtin(base_type)) {
+        } else {
             const maybe_reg = self.try_compile_method_call("index", left, &.{right}) catch |err| switch (err) {
                 error.unknown_function => {
                     self.record_call_error(node_id, "unknown method ", "index", &.{ base_type, self.infer_expr_type(right) }, true);
@@ -6363,13 +6514,13 @@ const function_ctx = struct {
             if (maybe_reg) |reg| {
                 return reg;
             }
-            if (self.is_known_non_builtin(base_type)) {
-                self.record_call_error(node_id, "no matching overload for ", "index", &.{ base_type, self.infer_expr_type(right) }, true);
-                return error.unknown_function;
-            }
-            return error.unsupported_node;
-        } else {
-            return error.unsupported_node;
+            const index_type = self.infer_expr_type(right);
+            const prefix = if (self.b.functions.contains("index"))
+                "no matching overload for "
+            else
+                "unknown method ";
+            self.record_call_error(node_id, prefix, "index", &.{ base_type, index_type }, true);
+            return error.unknown_function;
         }
 
         var index_reg = try self.compile_expr(right);
@@ -6495,7 +6646,7 @@ fn intrinsic_return_type(def: intrinsic.intrinsic_def) type_key {
     return switch (def.id) {
         .iadd, .isub, .imul, .idiv, .irem, .imin, .imax, .ineg, .iabs,
         .bnot, .band, .bor, .bxor, .shl, .shr, .sar, .rol, .ror,
-        .alloc, .deref, .type_words => .{ .name = "int" },
+        .alloc, .deref, .type_words => .{ .name = lang_spec.default_signed_int_name },
         .ieq, .ine, .ilt, .ile, .igt, .ige => .{ .name = "bool" },
         .fadd, .fsub, .fmul, .fdiv, .frem, .fmin, .fmax, .fneg, .fabs,
         .sqrt, .sin, .cos, .tan, .asin, .acos, .atan, .floor, .ceil, .round, .trunc => .{ .name = "float" },
@@ -6608,6 +6759,7 @@ pub fn lower_with_options(
                         b.enums.put(name, .{
                             .variants = variants,
                             .generics = en.generics,
+                            .is_flag = en.is_flag,
                         }) catch return error.out_of_memory;
                     }
                 },
@@ -6684,7 +6836,9 @@ pub fn lower_with_options(
                 .@"impl" => |impl| {
                     const trait_name = b.string_value(impl.by_trait);
                     const type_name = b.string_value(impl.for_struct);
+                    const is_inherent = std.mem.eql(u8, trait_name, ink.lang_spec.inherent_impl_trait_name);
                     if (impl.negative) {
+                        if (is_inherent) continue;
                         if (impl.functions.len != 0) return error.unsupported_node;
                         var neg_list = b.trait_neg_impls.getPtr(trait_name);
                         if (neg_list == null) {
@@ -6695,7 +6849,7 @@ pub fn lower_with_options(
                             neg_list.?.append(type_name) catch return error.out_of_memory;
                         }
                     } else {
-                        const is_runtime_trait = b.traits.contains(trait_name);
+                        const is_runtime_trait = !is_inherent and b.traits.contains(trait_name);
                         var method_map = std.StringHashMap(ink.exe.label_id).init(allocator);
 
                         for (impl.functions) |func| {
@@ -6728,21 +6882,25 @@ pub fn lower_with_options(
                             }
                         }
 
-                        var impl_list = b.trait_impls.getPtr(trait_name);
-                        if (impl_list == null) {
-                            var list = std.array_list.Managed([]const u8).init(allocator);
-                            list.append(type_name) catch return error.out_of_memory;
-                            b.trait_impls.put(trait_name, list) catch return error.out_of_memory;
-                        } else if (!string_list_contains(impl_list.?.items, type_name)) {
-                            impl_list.?.append(type_name) catch return error.out_of_memory;
-                        }
+                        if (!is_inherent) {
+                            var impl_list = b.trait_impls.getPtr(trait_name);
+                            if (impl_list == null) {
+                                var list = std.array_list.Managed([]const u8).init(allocator);
+                                list.append(type_name) catch return error.out_of_memory;
+                                b.trait_impls.put(trait_name, list) catch return error.out_of_memory;
+                            } else if (!string_list_contains(impl_list.?.items, type_name)) {
+                                impl_list.?.append(type_name) catch return error.out_of_memory;
+                            }
 
-                        if (is_runtime_trait) {
-                            impl_records.append(.{
-                                .trait_name = trait_name,
-                                .type_name = type_name,
-                                .methods = method_map,
-                            }) catch return error.out_of_memory;
+                            if (is_runtime_trait) {
+                                impl_records.append(.{
+                                    .trait_name = trait_name,
+                                    .type_name = type_name,
+                                    .methods = method_map,
+                                }) catch return error.out_of_memory;
+                            } else {
+                                method_map.deinit();
+                            }
                         } else {
                             method_map.deinit();
                         }

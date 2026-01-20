@@ -145,6 +145,7 @@ pub const mir = union(enum) {
 
     pub const enum_decl = struct {
         name: string_identifier,
+        is_flag: bool,
         generics: []const generic_param,
         variants: []const enum_variant,
     };

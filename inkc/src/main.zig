@@ -1083,6 +1083,25 @@ pub fn main() !void {
     main_sources[0] = main_id;
     try module_source_slices.append(main_sources);
 
+    var lib_sources: []ink.compiler.source_id = &.{};
+    if (std.mem.eql(u8, std.fs.path.basename(input_path), "main.ink")) {
+        const input_dir = std.fs.path.dirname(input_path) orelse ".";
+        const lib_path = try std.fs.path.join(allocator, &.{ input_dir, "lib.ink" });
+        if (std.fs.cwd().access(lib_path, .{})) |_| {
+            try allocated_paths.append(lib_path);
+            const lib_text = try std.fs.cwd().readFileAlloc(allocator, lib_path, 1_000_000);
+            const lib_id = next_source_id;
+            next_source_id += 1;
+            try sources.append(.{ .id = lib_id, .path = lib_path, .text = lib_text });
+            lib_sources = try allocator.alloc(ink.compiler.source_id, 1);
+            lib_sources[0] = lib_id;
+            try module_source_slices.append(lib_sources);
+        } else |err| switch (err) {
+            error.FileNotFound => allocator.free(lib_path),
+            else => return err,
+        }
+    }
+
     var std_sources: []ink.compiler.source_id = &.{};
     if (try find_std_dir(allocator, input_path)) |std_dir| {
         defer allocator.free(std_dir);
@@ -1100,6 +1119,9 @@ pub fn main() !void {
     var modules = std.array_list.Managed(ink.compiler.module_spec).init(allocator);
     defer modules.deinit();
     try modules.append(.{ .name = "main", .sources = main_sources, .deps = empty_deps });
+    if (lib_sources.len != 0) {
+        try modules.append(.{ .name = "lib", .sources = lib_sources, .deps = empty_deps });
+    }
     if (std_sources.len != 0) {
         try modules.append(.{ .name = "std", .sources = std_sources, .deps = empty_deps });
     }
